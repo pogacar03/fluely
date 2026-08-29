@@ -9,7 +9,7 @@ const corePath = path.resolve(__dirname, "../../../dist-electron/electron/servic
 const { ShortcutManager } = await import(pathToFileURL(modulePath).href);
 const { DEFAULT_SETTINGS } = await import(pathToFileURL(corePath).href);
 
-function makeManager({ failAccelerator, visible = false, captureActive = false } = {}) {
+function makeManager({ failAccelerator, throwAccelerator, throwAlways = false, visible = false, captureActive = false } = {}) {
   const callbacks = new Map();
   const registerCalls = [];
   const unregisterCalls = [];
@@ -30,9 +30,15 @@ function makeManager({ failAccelerator, visible = false, captureActive = false }
   };
   const actions = { analyze: 0, capture: 0, cancel: 0 };
   const adapter = {
+    failAccelerator,
+    throwAccelerator,
+    throwAlways,
     register(accelerator, callback) {
       registerCalls.push(accelerator);
-      if (accelerator === failAccelerator) {
+      if (adapter.throwAlways || accelerator === adapter.throwAccelerator) {
+        throw new Error(`register failed for ${accelerator}`);
+      }
+      if (accelerator === adapter.failAccelerator) {
         return false;
       }
       callbacks.set(accelerator, callback);
@@ -54,7 +60,7 @@ function makeManager({ failAccelerator, visible = false, captureActive = false }
     cancelAndClear: () => { actions.cancel += 1; },
   });
 
-  return { manager, callbacks, registerCalls, unregisterCalls, window, actions };
+  return { manager, callbacks, registerCalls, unregisterCalls, window, actions, adapter };
 }
 
 test("duplicate accelerators are rejected before registration", () => {
@@ -153,4 +159,45 @@ test("dispose unregisters every active shortcut", () => {
   manager.dispose();
 
   assert.deepEqual(unregisterCalls, Object.values(DEFAULT_SETTINGS.shortcuts));
+});
+
+test("registration throws return failure and restore the previous shortcut state", () => {
+  const { manager, adapter } = makeManager();
+  const initial = manager.registerAll(DEFAULT_SETTINGS.shortcuts);
+  assert.equal(initial.ok, true);
+
+  const next = { ...DEFAULT_SETTINGS.shortcuts, toggleVisibility: "CommandOrControl+K" };
+  adapter.throwAccelerator = next.toggleVisibility;
+  const result = manager.update(next);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "INTERNAL_ERROR");
+  assert.equal(manager.getStatus().entries.find((entry) => entry.action === "toggleVisibility").accelerator,
+    DEFAULT_SETTINGS.shortcuts.toggleVisibility);
+  assert.equal(manager.getStatus().entries.find((entry) => entry.action === "toggleVisibility").registered, true);
+});
+
+test("failed shortcut rollback never reports active entries when restoration also throws", () => {
+  const { manager, adapter } = makeManager();
+  manager.registerAll(DEFAULT_SETTINGS.shortcuts);
+  adapter.throwAlways = true;
+
+  const result = manager.update({ ...DEFAULT_SETTINGS.shortcuts, toggleVisibility: "CommandOrControl+K" });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "INTERNAL_ERROR");
+  assert.equal(manager.getStatus().entries.every((entry) => entry.registered === false && entry.available === false), true);
+});
+
+test("shortcut rollback clears partial registrations when an old accelerator becomes unavailable", () => {
+  const { manager, adapter, callbacks } = makeManager();
+  manager.registerAll(DEFAULT_SETTINGS.shortcuts);
+  adapter.throwAccelerator = "CommandOrControl+K";
+  adapter.failAccelerator = DEFAULT_SETTINGS.shortcuts.captureScreenshot;
+
+  const result = manager.update({ ...DEFAULT_SETTINGS.shortcuts, toggleVisibility: "CommandOrControl+K" });
+
+  assert.equal(result.ok, false);
+  assert.equal(manager.getStatus().entries.every((entry) => entry.registered === false && entry.available === false), true);
+  assert.equal(callbacks.size, 0);
 });

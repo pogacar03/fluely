@@ -150,6 +150,70 @@ test("screenshot session releases its lock after a failed capture", async () => 
   assert.equal(secondWindow.visible, true);
 });
 
+test("screenshot session returns a timeout before idle but holds its visibility gate until native settle", async () => {
+  const window = makeWindow(true);
+  const wait = makeWait();
+  let releaseIdle;
+  const idle = new Promise((resolve) => {
+    releaseIdle = resolve;
+  });
+  const timeout = {
+    code: "SCREEN_CAPTURE_FAILED",
+    message: "capture timed out",
+    action: "Restart Fluely and try again.",
+  };
+
+  const session = runScreenshotSession({
+    window,
+    platform: "darwin",
+    capture: async () => { throw timeout; },
+    whenIdle: () => idle,
+    wait: wait.wait,
+  });
+
+  await assert.rejects(session, timeout);
+  assert.equal(window.visible, false);
+  assert.equal(isScreenshotSessionActive(), true);
+
+  releaseIdle();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(isScreenshotSessionActive(), false);
+  assert.equal(window.visible, true);
+  assert.equal(window.showInactiveCalls, 1);
+});
+
+test("screenshot session releases once after a rejected idle promise without an unhandled rejection", async () => {
+  const window = makeWindow(true);
+  let rejectIdle;
+  const idle = new Promise((resolve, reject) => {
+    rejectIdle = reject;
+  });
+  let unhandled = false;
+  const onUnhandled = () => { unhandled = true; };
+  process.once("unhandledRejection", onUnhandled);
+
+  try {
+    const session = runScreenshotSession({
+      window,
+      platform: "darwin",
+      capture: async () => {
+        throw new Error("caller timeout");
+      },
+      whenIdle: () => idle,
+      wait: async () => undefined,
+    });
+    await assert.rejects(session, /caller timeout/);
+    assert.equal(isScreenshotSessionActive(), true);
+    rejectIdle(new Error("native settle failure"));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(isScreenshotSessionActive(), false);
+    assert.equal(window.showInactiveCalls, 1);
+    assert.equal(unhandled, false);
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandled);
+  }
+});
+
 test("screenshot session rejects an overlapping capture", async () => {
   const window = makeWindow(true);
   const wait = makeWait();

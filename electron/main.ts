@@ -10,13 +10,14 @@ import {
 import { join } from "node:path";
 import type { AppStatus, FluelySettings, IpcError, ScreenshotItem, ScreenshotState } from "../src/shared/ipc";
 import { DEFAULT_SETTINGS } from "./services/settings-core";
-import { CapturePrivacyController } from "./services/CapturePrivacyController";
+import { CapturePrivacyController, DockPrivacyCoordinator } from "./services/CapturePrivacyController";
 import { registerIpcHandlers } from "./services/ipcHandlers";
 import { SettingsService } from "./services/SettingsService";
 import { ScreenshotService } from "./services/ScreenshotService";
 import { ShortcutManager } from "./services/ShortcutManager";
 import { createScreenshotWorkflow } from "./services/capture-workflow";
 import { isScreenshotSessionActive } from "./services/screenshot-session";
+import { attachApplicationLifecycle, attachWindowLifecycle } from "./services/window-lifecycle";
 import { getWindowPreferences } from "./windowConfig";
 
 let mainWindow: BrowserWindow | null = null;
@@ -24,7 +25,23 @@ let settingsService: SettingsService | null = null;
 let shortcutManager: ShortcutManager | null = null;
 let capturePrivacyController: CapturePrivacyController | null = null;
 let screenshotService: ScreenshotService | null = null;
+let dockPrivacyCoordinator: DockPrivacyCoordinator | null = null;
 let ipcHandlersRegistered = false;
+
+function getDockPrivacyCoordinator(): DockPrivacyCoordinator | undefined {
+  if (process.platform !== "darwin") {
+    return undefined;
+  }
+
+  if (!dockPrivacyCoordinator) {
+    dockPrivacyCoordinator = new DockPrivacyCoordinator({
+      hide: () => app.dock?.hide(),
+      show: () => app.dock?.show(),
+    });
+  }
+
+  return dockPrivacyCoordinator;
+}
 
 export function createMainWindow(settings: FluelySettings = DEFAULT_SETTINGS): BrowserWindow {
   const window = new BrowserWindow({
@@ -41,21 +58,22 @@ export function createMainWindow(settings: FluelySettings = DEFAULT_SETTINGS): B
   capturePrivacyController?.dispose();
   capturePrivacyController = new CapturePrivacyController(
     process.platform,
-    process.platform === "darwin" ? {
-      hide: () => app.dock?.hide(),
-      show: () => app.dock?.show(),
-    } : undefined,
+    getDockPrivacyCoordinator(),
   );
   capturePrivacyController.apply(window, settings.privacy.captureProtection);
 
   window.loadFile(join(__dirname, "../../dist/index.html"));
-  window.once("ready-to-show", () => window.show());
-  window.on("closed", () => {
-    if (mainWindow === window) {
-      mainWindow = null;
-      capturePrivacyController?.dispose();
-      capturePrivacyController = null;
-    }
+  attachWindowLifecycle({
+    window,
+    isCaptureActive: isScreenshotSessionActive,
+    onReadyToShow: () => window.show(),
+    onClosed: () => {
+      if (mainWindow === window) {
+        mainWindow = null;
+        capturePrivacyController?.dispose();
+        capturePrivacyController = null;
+      }
+    },
   });
 
   mainWindow = window;
@@ -130,6 +148,7 @@ function captureCurrentWindow(): Promise<ScreenshotItem> {
     window,
     platform: process.platform,
     capture: () => getScreenshotService().capture(),
+    whenIdle: () => getScreenshotService().whenIdle(),
     delete: (id) => getScreenshotService().delete(id),
     clear: () => getScreenshotService().clear(),
   }).capture().catch((error) => {
@@ -207,7 +226,7 @@ async function initializeServices(window: BrowserWindow): Promise<void> {
             action: "Restart Fluely and try again.",
           },
         },
-        },
+      },
       screenshots: {
         getState: () => getScreenshotService().getState(),
         capture: () => captureCurrentWindow(),
@@ -247,14 +266,16 @@ app.whenReady().then(async () => {
   const window = createMainWindow(loadedSettings.get());
   await initializeServices(window);
 
-  app.on("activate", () => {
-    capturePrivacyController?.reassert();
-    if (BrowserWindow.getAllWindows().length === 0) {
+  attachApplicationLifecycle({
+    app,
+    hasWindows: () => BrowserWindow.getAllWindows().length > 0,
+    reassertPrivacy: () => capturePrivacyController?.reassert(),
+    createWindow: () => {
       const nextWindow = createMainWindow(loadedSettings.get());
       void initializeServices(nextWindow).catch((error) => {
         console.error("Fluely could not restore its main window services.", error);
       });
-    }
+    },
   });
 }).catch((error) => {
   console.error("Fluely could not initialize its main process.", error);

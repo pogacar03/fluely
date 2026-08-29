@@ -56,6 +56,33 @@ export interface ScreenshotState {
 
 export type ScreenshotStateListener = (state: ScreenshotState) => void;
 
+export interface ScreenshotStateSubscriptionSource {
+  onStateChanged(listener: ScreenshotStateListener): () => void;
+}
+
+/** Keeps renderer state listeners scoped to a live component and makes cleanup idempotent. */
+export function subscribeToScreenshotState(
+  source: ScreenshotStateSubscriptionSource,
+  listener: ScreenshotStateListener,
+  isActive: () => boolean = () => true,
+): () => void {
+  let subscribed = true;
+  const wrappedListener: ScreenshotStateListener = (state) => {
+    if (subscribed && isActive()) {
+      listener(state);
+    }
+  };
+  const unsubscribeSource = source.onStateChanged(wrappedListener);
+
+  return () => {
+    if (!subscribed) {
+      return;
+    }
+    subscribed = false;
+    unsubscribeSource();
+  };
+}
+
 export type IpcErrorCode =
   | "INVALID_ARGUMENT"
   | "SETTINGS_READ_FAILED"

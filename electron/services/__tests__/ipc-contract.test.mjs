@@ -288,6 +288,82 @@ test("settings update reapplies persisted shortcuts after a successful save", as
   assert.deepEqual(appliedShortcuts, [requested]);
 });
 
+test("settings update returns shortcut registration failure instead of saved success", async () => {
+  const registrations = new Map();
+  const requested = {
+    toggleVisibility: "CommandOrControl+K",
+    captureScreenshot: "CommandOrControl+Shift+9",
+    analyzeQueue: "CommandOrControl+L",
+    captureAndAnalyze: "CommandOrControl+Shift+L",
+    cancelAndClear: "CommandOrControl+R",
+  };
+  const failure = {
+    ok: false,
+    error: {
+      code: "INTERNAL_ERROR",
+      message: "OS shortcut registration failed.",
+      action: "Restart Fluely and try again.",
+    },
+  };
+
+  registerIpcHandlers({
+    ipcMain: { handle(channel, handler) { registrations.set(channel, handler); } },
+    settings: {
+      get: () => ({ shortcuts: requested, window: {}, privacy: {} }),
+      update: async () => ({ ok: true, value: { shortcuts: requested, window: {}, privacy: {} } }),
+      reset: async () => ({ ok: true, value: { shortcuts: requested, window: {}, privacy: {} } }),
+    },
+    shortcuts: { getStatus: () => ({ entries: [], updatedAt: new Date(0).toISOString() }), update: () => ({ ok: true, value: {} }) },
+    screenshots: {
+      getState: () => ({ items: [], capturing: false, permission: "unavailable" }),
+      capture: async () => ({ id: "11111111-1111-4111-8111-111111111111", createdAt: "2026-08-30T00:00:00.000Z", width: 1, height: 1 }),
+      delete: async () => ({ items: [], capturing: false, permission: "unavailable" }),
+      clear: async () => ({ items: [], capturing: false, permission: "unavailable" }),
+    },
+    applyShortcuts: () => failure,
+    getAppStatus: () => ({ name: "Fluely", version: "0.1.0", platform: "linux", visible: true }),
+  });
+
+  const result = await registrations.get("settings:update")({}, { shortcuts: requested });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "INTERNAL_ERROR");
+});
+
+test("settings reset returns shortcut registration failure instead of saved success", async () => {
+  const registrations = new Map();
+  const failure = {
+    ok: false,
+    error: {
+      code: "INTERNAL_ERROR",
+      message: "OS shortcut registration failed.",
+      action: "Restart Fluely and try again.",
+    },
+  };
+  registerIpcHandlers({
+    ipcMain: { handle(channel, handler) { registrations.set(channel, handler); } },
+    settings: {
+      get: () => ({ shortcuts: {}, window: {}, privacy: { captureProtection: true } }),
+      update: async () => ({ ok: true, value: {} }),
+      reset: async () => ({ ok: true, value: { shortcuts: {}, window: {}, privacy: { captureProtection: true } } }),
+    },
+    shortcuts: { getStatus: () => ({ entries: [], updatedAt: new Date(0).toISOString() }), update: () => ({ ok: true, value: {} }) },
+    screenshots: {
+      getState: () => ({ items: [], capturing: false, permission: "unavailable" }),
+      capture: async () => ({ id: "22222222-2222-4222-8222-222222222222", createdAt: "2026-08-30T00:00:00.000Z", width: 1, height: 1 }),
+      delete: async () => ({ items: [], capturing: false, permission: "unavailable" }),
+      clear: async () => ({ items: [], capturing: false, permission: "unavailable" }),
+    },
+    applyShortcuts: () => failure,
+    getAppStatus: () => ({ name: "Fluely", version: "0.1.0", platform: "linux", visible: true }),
+  });
+
+  const result = await registrations.get("settings:reset")();
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "INTERNAL_ERROR");
+});
+
 test("screenshot mutation handlers notify complete state snapshots on success and failure", async () => {
   const registrations = new Map();
   const notifications = [];

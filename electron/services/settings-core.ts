@@ -68,6 +68,40 @@ function normalizeDimension(value: unknown, fallback: number, min: number, max: 
   return Math.min(max, Math.max(min, Math.round(value)));
 }
 
+export function validateShortcutSettings(input: unknown): IpcError | null {
+  if (!isRecord(input)) {
+    return {
+      code: "INVALID_ARGUMENT",
+      message: "Shortcuts must be an object.",
+      action: "Enter each shortcut once, using a non-empty accelerator.",
+    };
+  }
+
+  const seen = new Set<string>();
+  for (const action of SHORTCUT_ACTIONS) {
+    const value = input[action];
+    if (typeof value !== "string" || value.trim().length === 0) {
+      return {
+        code: "INVALID_ARGUMENT",
+        message: `Shortcut ${action} must be a non-empty string.`,
+        action: "Enter each shortcut once, using a non-empty accelerator.",
+      };
+    }
+
+    const accelerator = value.trim();
+    if (seen.has(accelerator)) {
+      return {
+        code: "INVALID_ARGUMENT",
+        message: `Shortcut ${action} duplicates another shortcut: ${accelerator}.`,
+        action: "Enter each shortcut once, using a non-empty accelerator.",
+      };
+    }
+    seen.add(accelerator);
+  }
+
+  return null;
+}
+
 export function normalizeSettings(input: unknown): FluelySettings {
   const settings = cloneDefaultSettings();
 
@@ -163,6 +197,7 @@ export function validateSettingsPatch(input: unknown): IpcError | null {
   }
 
   if (isRecord(input.shortcuts)) {
+    const seenAccelerators = new Set<string>();
     for (const action of SHORTCUT_ACTIONS) {
       if (action in input.shortcuts &&
         (typeof input.shortcuts[action] !== "string" || input.shortcuts[action].trim().length === 0)) {
@@ -171,6 +206,18 @@ export function validateSettingsPatch(input: unknown): IpcError | null {
           message: `Shortcut ${action} must be a non-empty string.`,
           action: "Enter a valid keyboard accelerator and try again.",
         };
+      }
+
+      if (action in input.shortcuts) {
+        const accelerator = (input.shortcuts[action] as string).trim();
+        if (seenAccelerators.has(accelerator)) {
+          return {
+            code: "INVALID_ARGUMENT",
+            message: `Shortcut ${action} duplicates another shortcut: ${accelerator}.`,
+            action: "Enter each shortcut once, using a non-empty accelerator.",
+          };
+        }
+        seenAccelerators.add(accelerator);
       }
     }
   }

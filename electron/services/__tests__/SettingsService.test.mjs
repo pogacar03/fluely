@@ -75,3 +75,17 @@ test("SettingsService rejects invalid update payloads without writing", async ()
   assert.equal(result.error.code, "INVALID_ARGUMENT");
   assert.equal((await readdir(directory)).includes("settings.json"), false);
 });
+
+test("SettingsService rejects a partial shortcut update that duplicates an existing accelerator", async () => {
+  const directory = await makeDirectory();
+  const service = new SettingsService(directory);
+  await service.load();
+
+  const result = await service.update({
+    shortcuts: { toggleVisibility: "CommandOrControl+Shift+8" },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "INVALID_ARGUMENT");
+  assert.equal((await readdir(directory)).includes("settings.json"), false);
+});

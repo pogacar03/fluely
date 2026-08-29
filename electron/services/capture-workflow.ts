@@ -4,11 +4,13 @@ import {
   runScreenshotSession,
   type ScreenshotSessionWindow,
 } from "./screenshot-session";
+export { attachApplicationLifecycle, attachWindowLifecycle } from "./window-lifecycle";
 
 export interface ScreenshotWorkflowDependencies {
   window: ScreenshotSessionWindow;
   platform: NodeJS.Platform;
   capture: () => Promise<ScreenshotItem>;
+  whenIdle?: () => Promise<void>;
   delete: (id: string) => Promise<ScreenshotState>;
   clear: () => Promise<ScreenshotState>;
 }
@@ -24,11 +26,12 @@ export function createScreenshotWorkflow({
   window,
   platform,
   capture,
+  whenIdle,
   delete: deleteScreenshot,
   clear,
 }: ScreenshotWorkflowDependencies): ScreenshotWorkflow {
   return {
-    capture: () => runScreenshotSession({ window, platform, capture }),
+    capture: () => runScreenshotSession({ window, platform, capture, whenIdle }),
     delete: (id) => deleteScreenshot(id),
     clear: () => clear(),
     toggleVisibility: () => {

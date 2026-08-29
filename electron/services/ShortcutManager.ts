@@ -6,6 +6,7 @@ import type {
   ShortcutStatus,
   ShortcutStatusEntry,
 } from "../../src/shared/ipc";
+import { validateShortcutSettings } from "./settings-core";
 
 export interface GlobalShortcutAdapter {
   register(accelerator: string, callback: () => void): boolean;
@@ -40,36 +41,6 @@ const PLACEHOLDER_ACTIONS = new Set<ShortcutAction>([
   "captureAndAnalyze",
 ]);
 
-function invalidShortcut(message: string): IpcError {
-  return {
-    code: "INVALID_ARGUMENT",
-    message,
-    action: "Enter each shortcut once, using a non-empty accelerator.",
-  };
-}
-
-function validateShortcuts(input: ShortcutSettings): IpcError | null {
-  if (typeof input !== "object" || input === null || Array.isArray(input)) {
-    return invalidShortcut("Shortcuts must be an object.");
-  }
-
-  const seen = new Set<string>();
-  for (const action of SHORTCUT_ACTIONS) {
-    const value = input[action];
-    if (typeof value !== "string" || value.trim().length === 0) {
-      return invalidShortcut(`Shortcut ${action} must be a non-empty string.`);
-    }
-
-    const accelerator = value.trim();
-    if (seen.has(accelerator)) {
-      return invalidShortcut(`Shortcut ${action} duplicates another shortcut: ${accelerator}.`);
-    }
-    seen.add(accelerator);
-  }
-
-  return null;
-}
-
 function cloneStatus(status: ShortcutStatus): ShortcutStatus {
   return {
     entries: status.entries.map((entry) => ({ ...entry })),
@@ -77,8 +48,21 @@ function cloneStatus(status: ShortcutStatus): ShortcutStatus {
   };
 }
 
+function cloneShortcuts(shortcuts: ShortcutSettings | null): ShortcutSettings | null {
+  return shortcuts ? { ...shortcuts } : null;
+}
+
+function registrationFailure(): IpcError {
+  return {
+    code: "INTERNAL_ERROR",
+    message: "Fluely could not register its shortcuts with the operating system.",
+    action: "Restart Fluely and try again.",
+  };
+}
+
 export class ShortcutManager {
   private status: ShortcutStatus = { entries: [], updatedAt: new Date(0).toISOString() };
+  private requestedShortcuts: ShortcutSettings | null = null;
 
   public constructor(
     private readonly globalShortcut: GlobalShortcutAdapter,
@@ -90,19 +74,43 @@ export class ShortcutManager {
   ) {}
 
   public registerAll(shortcuts: ShortcutSettings): IpcResult<ShortcutStatus> {
-    const validationError = validateShortcuts(shortcuts);
+    const validationError = validateShortcutSettings(shortcuts);
     if (validationError) {
       return { ok: false, error: validationError };
     }
 
-    this.globalShortcut.unregisterAll();
-    const entries = SHORTCUT_ACTIONS.map((action) => this.registerAction(action, shortcuts[action]));
-    this.status = {
-      entries,
-      updatedAt: new Date().toISOString(),
-    };
+    const previousShortcuts = cloneShortcuts(this.requestedShortcuts);
+    const previousStatus = cloneStatus(this.status);
 
-    return { ok: true, value: this.getStatus() };
+    try {
+      this.globalShortcut.unregisterAll();
+      const entries = SHORTCUT_ACTIONS.map((action) => this.registerAction(action, shortcuts[action]));
+      this.status = {
+        entries,
+        updatedAt: new Date().toISOString(),
+      };
+      this.requestedShortcuts = cloneShortcuts(shortcuts);
+
+      return { ok: true, value: this.getStatus() };
+    } catch {
+      const restored = this.restorePreviousRegistration(previousShortcuts, previousStatus);
+      if (!restored) {
+        this.status = {
+          entries: previousStatus.entries.map((entry) => ({
+            ...entry,
+            registered: false,
+            available: false,
+            message: "Fluely could not restore this shortcut after registration failed.",
+            errorCode: "INTERNAL_ERROR",
+          })),
+          updatedAt: new Date().toISOString(),
+        };
+      } else {
+        this.status = previousStatus;
+      }
+      this.requestedShortcuts = previousShortcuts;
+      return { ok: false, error: registrationFailure() };
+    }
   }
 
   public update(shortcuts: ShortcutSettings): IpcResult<ShortcutStatus> {
@@ -114,8 +122,56 @@ export class ShortcutManager {
   }
 
   public dispose(): void {
-    this.globalShortcut.unregisterAll();
+    try {
+      this.globalShortcut.unregisterAll();
+    } catch {
+      // Teardown is best-effort; never leave a stale active status in memory.
+    }
+    this.requestedShortcuts = null;
     this.status = { entries: [], updatedAt: new Date().toISOString() };
+  }
+
+  private restorePreviousRegistration(
+    previousShortcuts: ShortcutSettings | null,
+    previousStatus: ShortcutStatus,
+  ): boolean {
+    try {
+      this.globalShortcut.unregisterAll();
+    } catch {
+      return false;
+    }
+
+    if (!previousShortcuts) {
+      return true;
+    }
+
+    try {
+      const entries = SHORTCUT_ACTIONS.map((action) => this.registerAction(action, previousShortcuts[action]));
+      const matches = entries.length === previousStatus.entries.length && entries.every((entry, index) => {
+        const previous = previousStatus.entries[index];
+        return entry.action === previous.action &&
+          entry.accelerator === previous.accelerator &&
+          entry.registered === previous.registered &&
+          entry.available === previous.available;
+      });
+      if (matches) {
+        return true;
+      }
+
+      try {
+        this.globalShortcut.unregisterAll();
+      } catch {
+        // Best-effort cleanup after a partial restoration.
+      }
+      return false;
+    } catch {
+      try {
+        this.globalShortcut.unregisterAll();
+      } catch {
+        // Best-effort cleanup after rollback failure.
+      }
+      return false;
+    }
   }
 
   private registerAction(action: ShortcutAction, accelerator: string): ShortcutStatusEntry {

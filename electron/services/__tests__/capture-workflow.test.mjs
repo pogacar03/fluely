@@ -10,24 +10,31 @@ const workflowPath = path.resolve(__dirname, "../../../dist-electron/electron/se
 const shortcutPath = path.resolve(__dirname, "../../../dist-electron/electron/services/ShortcutManager.js");
 const handlersPath = path.resolve(__dirname, "../../../dist-electron/electron/services/ipcHandlers.js");
 const screenshotServicePath = path.resolve(__dirname, "../../../dist-electron/electron/services/ScreenshotService.js");
-const { createScreenshotWorkflow } = await import(pathToFileURL(workflowPath).href);
+const sessionPath = path.resolve(__dirname, "../../../dist-electron/electron/services/screenshot-session.js");
+const { createScreenshotWorkflow, attachWindowLifecycle, attachApplicationLifecycle } = await import(pathToFileURL(workflowPath).href);
 const { ShortcutManager } = await import(pathToFileURL(shortcutPath).href);
 const { registerIpcHandlers } = await import(pathToFileURL(handlersPath).href);
 const { ScreenshotService } = await import(pathToFileURL(screenshotServicePath).href);
+const { isScreenshotSessionActive } = await import(pathToFileURL(sessionPath).href);
 
 function makeWindow(visible = true) {
   return {
     visible,
+    showCalls: 0,
+    hideCalls: 0,
     isVisible() {
       return this.visible;
     },
     hide() {
+      this.hideCalls += 1;
       this.visible = false;
     },
     show() {
+      this.showCalls += 1;
       this.visible = true;
     },
     showInactive() {
+      this.showCalls += 1;
       this.visible = true;
     },
     isDestroyed() {
@@ -207,4 +214,131 @@ test("settings reset composition reapplies privacy and the default OS shortcuts"
   assert.equal(result.ok, true);
   assert.deepEqual(appliedPrivacy, [true]);
   assert.deepEqual(appliedShortcuts, [shortcuts]);
+});
+
+test("window lifecycle does not show a window when a screenshot session is active and disposes on close", () => {
+  function makeLifecycleWindow() {
+    const listeners = new Map();
+    return {
+      listeners,
+      showCalls: 0,
+      destroyed: false,
+      once(event, listener) {
+        listeners.set(event, () => {
+          listeners.delete(event);
+          listener();
+        });
+      },
+      on(event, listener) {
+        listeners.set(event, listener);
+      },
+      emit(event) {
+        listeners.get(event)?.();
+      },
+      show() {
+        this.showCalls += 1;
+      },
+      isDestroyed() {
+        return this.destroyed;
+      },
+    };
+  }
+
+  const activeWindow = makeLifecycleWindow();
+  const readyWindow = makeLifecycleWindow();
+  let active = true;
+  let closed = 0;
+  attachWindowLifecycle({
+    window: activeWindow,
+    isCaptureActive: () => active,
+    onReadyToShow: () => activeWindow.show(),
+    onClosed: () => { closed += 1; },
+  });
+
+  activeWindow.emit("ready-to-show");
+  assert.equal(activeWindow.showCalls, 0);
+  active = false;
+  attachWindowLifecycle({
+    window: readyWindow,
+    isCaptureActive: () => active,
+    onReadyToShow: () => readyWindow.show(),
+    onClosed: () => { closed += 1; },
+  });
+  readyWindow.emit("ready-to-show");
+  assert.equal(readyWindow.showCalls, 1);
+  readyWindow.emit("closed");
+  assert.equal(closed, 1);
+});
+
+test("application lifecycle reasserts privacy on activate and recreates a closed window", () => {
+  let activateListener;
+  const app = {
+    on(event, listener) {
+      assert.equal(event, "activate");
+      activateListener = listener;
+    },
+  };
+  let reassertions = 0;
+  let created = 0;
+  attachApplicationLifecycle({
+    app,
+    hasWindows: () => false,
+    reassertPrivacy: () => { reassertions += 1; },
+    createWindow: () => { created += 1; },
+  });
+
+  activateListener();
+
+  assert.equal(reassertions, 1);
+  assert.equal(created, 1);
+});
+
+test("composition holds the hidden window and session gate through a timed-out native capture", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "fluely-workflow-timeout-"));
+  const window = makeWindow(true);
+  const listeners = new Map();
+  window.once = (event, listener) => listeners.set(event, listener);
+  window.on = (event, listener) => listeners.set(event, listener);
+  const sourcePromise = new Promise((resolve) => { window.releaseSources = resolve; });
+  const service = new ScreenshotService({
+    directory,
+    platform: "darwin",
+    sourceTimeoutMs: 5,
+    systemPreferences: { getMediaAccessStatus: () => "granted" },
+    desktopCapturer: { getSources: () => sourcePromise },
+    screen: {
+      getCursorScreenPoint: () => ({ x: 20, y: 20 }),
+      getDisplayNearestPoint: () => ({ id: 42, bounds: { width: 1920, height: 1080 }, scaleFactor: 1 }),
+    },
+  });
+  const workflow = createScreenshotWorkflow({
+    window,
+    platform: "darwin",
+    capture: () => service.capture(),
+    whenIdle: () => service.whenIdle(),
+    delete: (id) => service.delete(id),
+    clear: () => service.clear(),
+  });
+  attachWindowLifecycle({
+    window,
+    isCaptureActive: isScreenshotSessionActive,
+    onReadyToShow: () => window.show(),
+    onClosed: () => service.dispose(),
+  });
+
+  const capturePromise = workflow.capture();
+  await new Promise((resolve) => setImmediate(resolve));
+  listeners.get("ready-to-show")();
+  workflow.toggleVisibility();
+  await assert.rejects(capturePromise, (error) => error?.code === "SCREEN_CAPTURE_FAILED");
+  assert.equal(window.visible, false);
+  assert.equal(window.showCalls, 0);
+  assert.equal(isScreenshotSessionActive(), true);
+
+  window.releaseSources([]);
+  await service.whenIdle();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(window.visible, true);
+  service.dispose();
+  await rm(directory, { recursive: true, force: true });
 });

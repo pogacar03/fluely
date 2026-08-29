@@ -52,6 +52,30 @@ function failure<T>(error: IpcError): IpcResult<T> {
   return { ok: false, error };
 }
 
+function shortcutApplicationFailure(): IpcError {
+  return {
+    code: "INTERNAL_ERROR",
+    message: "Fluely saved the requested settings but could not register the shortcuts.",
+    action: "Restart Fluely and try again.",
+  };
+}
+
+function applyShortcutSettings(
+  applyShortcuts: ((shortcuts: ShortcutSettings) => IpcResult<ShortcutStatus> | void) | undefined,
+  shortcuts: ShortcutSettings,
+): IpcError | null {
+  if (!applyShortcuts) {
+    return null;
+  }
+
+  try {
+    const result = applyShortcuts(shortcuts);
+    return result && !result.ok ? result.error : null;
+  } catch {
+    return shortcutApplicationFailure();
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -153,11 +177,10 @@ export function registerIpcHandlers({
       typeof payload.privacy.captureProtection === "boolean") {
       applyPrivacy?.(result.value.privacy.captureProtection);
     }
-    if (result.ok && applyShortcuts && isRecord(payload) && isRecord(payload.shortcuts)) {
-      try {
-        applyShortcuts(result.value.shortcuts);
-      } catch {
-        // Settings remain the user's requested values even if OS registration is unavailable.
+    if (result.ok && isRecord(payload) && isRecord(payload.shortcuts)) {
+      const shortcutError = applyShortcutSettings(applyShortcuts, result.value.shortcuts);
+      if (shortcutError) {
+        return failure<FluelySettings>(shortcutError);
       }
     }
     return result;
@@ -168,11 +191,10 @@ export function registerIpcHandlers({
     if (result.ok && applyPrivacy && result.value.privacy) {
       applyPrivacy?.(result.value.privacy.captureProtection);
     }
-    if (result.ok && applyShortcuts) {
-      try {
-        applyShortcuts(result.value.shortcuts);
-      } catch {
-        // Settings reset remains successful even if OS registration is unavailable.
+    if (result.ok) {
+      const shortcutError = applyShortcutSettings(applyShortcuts, result.value.shortcuts);
+      if (shortcutError) {
+        return failure<FluelySettings>(shortcutError);
       }
     }
     return result;

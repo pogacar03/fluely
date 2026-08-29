@@ -63,6 +63,18 @@ test("validateSettingsPatch rejects malformed nested values", () => {
   });
 });
 
+test("validateSettingsPatch rejects duplicate accelerator values before persistence", () => {
+  const error = validateSettingsPatch({
+    shortcuts: {
+      toggleVisibility: "CommandOrControl+K",
+      captureScreenshot: "CommandOrControl+K",
+    },
+  });
+
+  assert.equal(error.code, "INVALID_ARGUMENT");
+  assert.match(error.message, /duplicates another shortcut/i);
+});
+
 test("validateSettingsPatch accepts clamped dimensions and partial shortcuts", () => {
   assert.equal(
     validateSettingsPatch({

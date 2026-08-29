@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { subscribeToScreenshotState } from "../shared/ipc";
 import type {
   FluelySettings,
   IpcError,
@@ -111,11 +112,11 @@ export function App() {
       });
     };
     window.addEventListener("focus", refreshOnFocus);
-    const unsubscribeScreenshotState = window.fluely.screenshots.onStateChanged((state) => {
-      if (active) {
-        setScreenshotState(state);
-      }
-    });
+    const unsubscribeScreenshotState = subscribeToScreenshotState(
+      window.fluely.screenshots,
+      (state) => setScreenshotState(state),
+      () => active,
+    );
 
     return () => {
       active = false;

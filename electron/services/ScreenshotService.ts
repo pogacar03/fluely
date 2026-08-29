@@ -50,6 +50,14 @@ export interface SystemPreferencesAdapter {
   getMediaAccessStatus(type: "screen"): string;
 }
 
+export interface ScreenshotFileSystem {
+  mkdir(path: string, options: { recursive: true }): Promise<unknown>;
+  readdir(path: string): Promise<string[]>;
+  writeFile(path: string, data: Uint8Array, options: { mode: number }): Promise<unknown>;
+  rename(from: string, to: string): Promise<unknown>;
+  unlink(path: string): Promise<unknown>;
+}
+
 export type ScreenshotPlatform = NodeJS.Platform | (() => NodeJS.Platform);
 
 export interface ScreenshotServiceOptions {
@@ -67,6 +75,7 @@ export interface ScreenshotServiceOptions {
   idFactory?: () => string;
   now?: () => Date;
   clock?: () => Date;
+  fileSystem?: ScreenshotFileSystem;
   onStateChanged?: (state: ScreenshotState) => void;
 }
 
@@ -83,6 +92,14 @@ const SERVICE_ERROR_CODES = new Set<IpcError["code"]>([
   "CAPTURE_IN_PROGRESS",
   "SCREENSHOT_NOT_FOUND",
 ]);
+
+const defaultFileSystem: ScreenshotFileSystem = {
+  mkdir: (path, options) => mkdir(path, options),
+  readdir: (path) => readdir(path),
+  writeFile: (path, data, options) => writeFile(path, data, options),
+  rename: (from, to) => rename(from, to),
+  unlink: (path) => unlink(path),
+};
 
 function createError(code: IpcError["code"], message: string, action: string): ScreenshotServiceError {
   return { code, message, action };
@@ -144,6 +161,14 @@ function captureFailed(): ScreenshotServiceError {
   );
 }
 
+function captureTimedOut(): ScreenshotServiceError {
+  return createError(
+    "SCREEN_CAPTURE_FAILED",
+    "Fluely could not finish the screen capture within five seconds.",
+    "Restart Fluely and try again. A native capture request is still being released in the background.",
+  );
+}
+
 function captureInProgress(): ScreenshotServiceError {
   return createError(
     "CAPTURE_IN_PROGRESS",
@@ -166,6 +191,7 @@ export class ScreenshotService {
   private readonly sourceTimeoutMs: number;
   private readonly idFactory: () => string;
   private readonly now: () => Date;
+  private readonly fileSystem: ScreenshotFileSystem;
   private readonly items: ScreenshotItem[] = [];
   private readonly initialization: Promise<void>;
   private mutationTail: Promise<void> = Promise.resolve();
@@ -187,6 +213,7 @@ export class ScreenshotService {
     this.sourceTimeoutMs = options.sourceTimeoutMs ?? options.sourceEnumerationTimeoutMs ?? DEFAULT_SOURCE_TIMEOUT_MS;
     this.idFactory = options.idFactory ?? randomUUID;
     this.now = options.now ?? options.clock ?? (() => new Date());
+    this.fileSystem = options.fileSystem ?? defaultFileSystem;
     this.initialization = this.cleanupManagedFiles();
   }
 
@@ -230,10 +257,13 @@ export class ScreenshotService {
           throw permissionFailure;
         }
 
-        const source = await this.selectSource((settled, timeoutError) => {
+        const timeoutError = initialPermission === "not-determined"
+          ? permissionError("not-determined") ?? captureFailed()
+          : captureTimedOut();
+        const source = await this.selectSource((settled) => {
           pendingSource = settled;
           notifyTimeout?.(timeoutError);
-        });
+        }, timeoutError);
         const imageBytes = source.thumbnail.toPNG();
         const size = source.thumbnail.getSize();
         const item: ScreenshotItem = {
@@ -272,6 +302,11 @@ export class ScreenshotService {
     return Promise.race([operation, timeoutNotice]);
   }
 
+  /** Resolves only after all queued mutations, including a late native source settle, are idle. */
+  public whenIdle(): Promise<void> {
+    return this.initialization.then(() => this.mutationTail);
+  }
+
   public delete(id: string): Promise<ScreenshotState> {
     return this.enqueueMutation(async () => {
       try {
@@ -282,7 +317,7 @@ export class ScreenshotService {
         }
 
         const [item] = this.items.splice(index, 1);
-        await unlink(join(this.directory, `${item.id}.png`)).catch(() => undefined);
+        await this.fileSystem.unlink(join(this.directory, `${item.id}.png`)).catch(() => undefined);
         return this.getState();
       } finally {
         this.emitState();
@@ -295,7 +330,7 @@ export class ScreenshotService {
       try {
         await this.initialization;
         const items = this.items.splice(0);
-        await Promise.all(items.map((item) => unlink(join(this.directory, `${item.id}.png`)).catch(() => undefined)));
+        await Promise.all(items.map((item) => this.fileSystem.unlink(join(this.directory, `${item.id}.png`)).catch(() => undefined)));
         await this.cleanupManagedFiles();
         return this.getState();
       } finally {
@@ -344,7 +379,8 @@ export class ScreenshotService {
   }
 
   private async selectSource(
-    onTimeout: (settled: Promise<void>, error: ScreenshotServiceError) => void,
+    onTimeout: (settled: Promise<void>) => void,
+    timeoutError: ScreenshotServiceError,
   ): Promise<ScreenshotSource> {
     const point = this.options.screen.getCursorScreenPoint();
     const display = this.options.screen.getDisplayNearestPoint(point);
@@ -353,7 +389,7 @@ export class ScreenshotService {
       width: Math.max(1, Math.round(display.bounds.width * scaleFactor)),
       height: Math.max(1, Math.round(display.bounds.height * scaleFactor)),
     };
-    const sources = await this.getSourcesWithTimeout(thumbnailSize, onTimeout);
+    const sources = await this.getSourcesWithTimeout(thumbnailSize, onTimeout, timeoutError);
     const source = sources.find((candidate) => candidate.display_id === String(display.id));
     if (!source) {
       throw captureFailed();
@@ -363,7 +399,8 @@ export class ScreenshotService {
 
   private async getSourcesWithTimeout(
     thumbnailSize: ScreenshotSize,
-    onTimeout: (settled: Promise<void>, error: ScreenshotServiceError) => void,
+    onTimeout: (settled: Promise<void>) => void,
+    timeoutError: ScreenshotServiceError,
   ): Promise<readonly ScreenshotSource[]> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const sourcePromise = Promise.resolve().then(() => this.options.desktopCapturer.getSources({
@@ -373,9 +410,8 @@ export class ScreenshotService {
     const sourceSettled = sourcePromise.then(() => undefined, () => undefined);
     const timeoutPromise = new Promise<readonly ScreenshotSource[]>((_, reject) => {
       timer = setTimeout(() => {
-        const error = captureFailed();
-        onTimeout(sourceSettled, error);
-        reject(error);
+        onTimeout(sourceSettled);
+        reject(timeoutError);
       }, this.sourceTimeoutMs);
     });
 
@@ -389,15 +425,15 @@ export class ScreenshotService {
   }
 
   private async persist(id: string, imageBytes: Uint8Array): Promise<void> {
-    await mkdir(this.directory, { recursive: true });
+    await this.fileSystem.mkdir(this.directory, { recursive: true });
     const temporaryPath = join(this.directory, `${id}.png.tmp`);
     const finalPath = join(this.directory, `${id}.png`);
 
     try {
-      await writeFile(temporaryPath, imageBytes, { mode: 0o600 });
-      await rename(temporaryPath, finalPath);
+      await this.fileSystem.writeFile(temporaryPath, imageBytes, { mode: 0o600 });
+      await this.fileSystem.rename(temporaryPath, finalPath);
     } catch (error) {
-      await unlink(temporaryPath).catch(() => undefined);
+      await this.fileSystem.unlink(temporaryPath).catch(() => undefined);
       throw error;
     }
   }
@@ -408,20 +444,20 @@ export class ScreenshotService {
       if (!oldest) {
         return;
       }
-      await unlink(join(this.directory, `${oldest.id}.png`)).catch(() => undefined);
+      await this.fileSystem.unlink(join(this.directory, `${oldest.id}.png`)).catch(() => undefined);
     }
   }
 
   private async cleanupManagedFiles(): Promise<void> {
     let files: string[];
     try {
-      files = await readdir(this.directory);
+      files = await this.fileSystem.readdir(this.directory);
     } catch {
       return;
     }
 
     await Promise.all(files
       .filter((file) => MANAGED_FILE_PATTERN.test(file))
-      .map((file) => unlink(join(this.directory, file)).catch(() => undefined)));
+      .map((file) => this.fileSystem.unlink(join(this.directory, file)).catch(() => undefined)));
   }
 }

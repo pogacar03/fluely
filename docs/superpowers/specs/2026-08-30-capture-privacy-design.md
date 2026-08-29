@@ -28,7 +28,7 @@ Native non-activating panel attributes, global keyboard interception, applicatio
 
 ### Capture protection
 
-`CapturePrivacyController` owns the privacy state for the main `BrowserWindow`. It applies `setContentProtection`, hides the window from Mission Control on macOS, and reapplies protection when the window is shown. On Darwin it also uses the public Dock adapter to hide/show the Dock with the privacy policy. It exposes an explicit reassert operation for lifecycle transitions. The controller must degrade safely on platforms where a method is unavailable.
+`CapturePrivacyController` owns the privacy state for the main `BrowserWindow`. It applies `setContentProtection`, hides the window from Mission Control on macOS, and reapplies protection when the window is shown. On Darwin it delegates Dock changes to one shared public `DockPrivacyCoordinator`, whose serialized `setHidden(boolean)` operations are latest-intent ordered; each controller records whether it owns a hide request, so disposal only releases its own hide. A current-generation Dock settle reasserts content protection. The controller must degrade safely on platforms where a method is unavailable.
 
 Fluely’s current macOS-first package will keep capture protection enabled by default. The setting is persisted as `privacy.captureProtection`. This release does not hide the application process or impersonate another application.
 
@@ -38,7 +38,7 @@ Fluely’s current macOS-first package will keep capture protection enabled by d
 
 The queue is session-scoped rather than a persisted manifest. During initialization the service removes only orphan files whose names are strict UUID `<id>.png` or `<id>.png.tmp` forms; `clear` repeats that managed-file cleanup. Other files in the directory are never touched. Capture, delete, clear, and eviction share one mutation serialization, and every mutation waits for initialization. A timed-out native source request remains the active gate until its underlying Promise settles, because Electron's `desktopCapturer` API has no `AbortSignal`.
 
-The service receives platform adapters so pure behavior is testable without launching Electron. Renderer-facing values contain an opaque ID, timestamp, dimensions, and count; no arbitrary filesystem path is exposed.
+The service receives platform adapters so pure behavior is testable without launching Electron, including a focused filesystem adapter (defaulting to `node:fs/promises`) for atomic-write ordering tests. Renderer-facing values contain an opaque ID, timestamp, dimensions, and count; no arbitrary filesystem path is exposed.
 
 ### Capture session
 
@@ -50,7 +50,11 @@ The main process wraps every capture in a session:
 4. wait 80 ms on macOS and 40 ms elsewhere;
 5. capture the selected display;
 6. restore the window with `showInactive()` on macOS when it was previously visible;
-7. restore state in `finally`, including failure paths.
+7. restore the visibility captured at session start through a once-only finalizer, including failure paths.
+
+`ScreenshotService.whenIdle()` is the finalizer's hold promise. A five-second caller timeout does not cancel Electron's native request: the IPC caller receives the timeout error, while the session remains active and hidden until the mutation tail and late source promise settle. A never-settling native request therefore keeps the gate held and tells the user to restart. The extracted `attachWindowLifecycle` helper applies the same gate to `ready-to-show`; it never shows a window while a session is active.
+
+The companion `attachApplicationLifecycle` helper is used by `main.ts` for `activate`: it reasserts the privacy controller and recreates the main window only when Electron reports no live windows.
 
 This hiding step is what keeps Fluely out of its own screenshots even where macOS ignores content protection.
 
@@ -74,12 +78,14 @@ The existing status panel displays capture-protection state, screen-capture perm
 
 - `denied` and `restricted` states return distinct actionable errors. `not-determined` is allowed through the first protected `getSources()` call so macOS can register consent; after a failure the service rereads the status and maps the resulting state explicitly.
 - Source enumeration has a five-second caller timeout. The native Promise remains tracked until settle; while it is pending, `capturing` stays true and no second enumeration can start.
+- If capture began with Darwin permission `not-determined`, that five-second caller error is `SCREEN_CAPTURE_PERMISSION_REQUIRED` with System Settings guidance; the eventual state is reread after native settlement.
 - An empty source list or unmatched display returns a stable capture error.
 - Writes use a temporary file followed by rename.
-- Capture restoration runs in `finally`.
+- Capture restoration uses a once-only finalizer; on timeout it waits for `whenIdle()` before restoring the start-of-session visibility.
 - Queue deletion is restricted to IDs created by `ScreenshotService`.
 - Shortcut-triggered errors are logged without crashing the main process.
 - OS shortcut conflicts preserve the requested setting while exposing an unavailable status entry.
+- Duplicate accelerators are rejected by settings validation before persistence. Shortcut registration catches adapter throws, best-effort rolls back the previous requested/registration state, and reports a non-active status if rollback cannot restore it. `settings:update` and `settings:reset` propagate an `applyShortcuts` `ok:false` result to the renderer rather than reporting a saved success.
 
 ## Testing
 
@@ -96,8 +102,9 @@ Automated tests cover:
 - IPC/preload allowlists;
 - shortcut availability and invocation.
 - Darwin Dock hide/show policy and reassertion;
-- session-scoped UUID orphan cleanup, shared mutation serialization, timeout gating, native Retina thumbnail sizing, and state subscriptions;
-- composition of shortcut → session → service → state notification, failure restoration, and settings reset reapplication.
+- shared async Dock ordering, controller ownership, and rejection handling;
+- session-scoped UUID orphan cleanup, shared mutation serialization, timeout gating, native Retina thumbnail sizing, atomic temp-write/rename cleanup, and state subscriptions;
+- composition of shortcut → session → service → state notification, ready-to-show gating, timeout-held restoration, failure recovery, settings reset reapplication, and renderer subscription cleanup.
 
 Manual macOS checks cover:
 
@@ -118,4 +125,5 @@ Manual macOS checks cover:
 - The renderer never receives screenshot filesystem paths.
 - At most five screenshots remain in the managed directory.
 - State subscribers receive a final non-capturing snapshot after every queue mutation.
+- A timed-out capture returns to IPC within five seconds but keeps the session/window gate until native settlement; a never-settling request requires restart.
 - `npm run typecheck`, `npm test`, and `npm run build` pass.

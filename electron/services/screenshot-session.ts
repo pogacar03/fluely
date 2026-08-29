@@ -10,6 +10,8 @@ export interface ScreenshotSessionOptions<T> {
   window: ScreenshotSessionWindow;
   platform: NodeJS.Platform;
   capture: () => Promise<T> | T;
+  /** Holds visibility restoration until a timed-out native capture has settled. */
+  whenIdle?: () => Promise<void>;
   wait?: (milliseconds: number) => Promise<void>;
 }
 
@@ -40,6 +42,7 @@ export async function runScreenshotSession<T>({
   window,
   platform,
   capture,
+  whenIdle,
   wait = defaultWait,
 }: ScreenshotSessionOptions<T>): Promise<T> {
   if (sessionActive) {
@@ -48,16 +51,14 @@ export async function runScreenshotSession<T>({
 
   sessionActive = true;
   let wasVisible = false;
+  let finalized = false;
 
-  try {
-    wasVisible = window.isVisible();
-    if (wasVisible) {
-      window.hide();
+  const restore = (): void => {
+    if (finalized) {
+      return;
     }
+    finalized = true;
 
-    await wait(platform === "darwin" ? 80 : 40);
-    return await capture();
-  } finally {
     try {
       if (wasVisible && !isDestroyed(window)) {
         if (platform === "darwin" && window.showInactive) {
@@ -66,8 +67,51 @@ export async function runScreenshotSession<T>({
           window.show();
         }
       }
+    } catch {
+      // A teardown race must not strand the session gate or create an unhandled rejection.
     } finally {
       sessionActive = false;
     }
+  };
+
+  const restoreWhenIdle = (): void => {
+    if (!whenIdle) {
+      restore();
+      return;
+    }
+
+    let idle: Promise<void>;
+    try {
+      idle = whenIdle();
+    } catch {
+      restore();
+      return;
+    }
+
+    // The caller-facing timeout is already rejected. Keep the late native
+    // operation observed and release the gate on either settle path.
+    void Promise.resolve(idle).then(restore, restore);
+  };
+
+  try {
+    wasVisible = window.isVisible();
+    if (wasVisible) {
+      window.hide();
+    }
+
+    await wait(platform === "darwin" ? 80 : 40);
+    const result = await capture();
+    if (whenIdle) {
+      try {
+        await whenIdle();
+      } catch {
+        // A failed idle observer must not strand a successfully completed session.
+      }
+    }
+    restore();
+    return result;
+  } catch (error) {
+    restoreWhenIdle();
+    throw error;
   }
 }

@@ -65,6 +65,7 @@ function makeService(directory, adapters, options = {}) {
     idFactory: options.idFactory,
     now: options.now,
     sourceTimeoutMs: options.sourceTimeoutMs,
+    fileSystem: options.fileSystem,
     onStateChanged: options.onStateChanged,
   });
 }
@@ -126,7 +127,7 @@ test("ScreenshotService tracks a timed-out source request until it settles", asy
 
   await assert.rejects(
     service.capture(),
-    (error) => error?.code === "SCREEN_CAPTURE_FAILED",
+    (error) => error?.code === "SCREEN_CAPTURE_FAILED" && /Restart Fluely/i.test(error.action),
   );
   assert.equal(service.getState().capturing, true);
   await assert.rejects(service.capture(), (error) => error?.code === "CAPTURE_IN_PROGRESS");
@@ -140,6 +141,87 @@ test("ScreenshotService tracks a timed-out source request until it settles", asy
   const recovered = await service.capture();
   assert.equal(recovered.width, 1920);
   assert.equal(sourceCalls, 2);
+});
+
+test("ScreenshotService returns an actionable first-use permission timeout", async () => {
+  const directory = await makeDirectory();
+  let releaseSources;
+  let permission = "not-determined";
+  const states = [];
+  const adapters = makeAdapters({
+    platform: "darwin",
+    permission,
+    getSources: () => new Promise((resolve) => {
+      releaseSources = resolve;
+    }),
+  });
+  adapters.systemPreferences.getMediaAccessStatus = () => permission;
+  const service = makeService(directory, adapters, {
+    sourceTimeoutMs: 5,
+    onStateChanged: (state) => states.push(state),
+  });
+
+  await assert.rejects(
+    service.capture(),
+    (error) => error?.code === "SCREEN_CAPTURE_PERMISSION_REQUIRED" && /System Settings/i.test(error.action),
+  );
+  assert.equal(service.getState().capturing, true);
+
+  permission = "denied";
+  releaseSources([]);
+  await service.whenIdle();
+  assert.equal(service.getState().capturing, false);
+  assert.equal(service.getState().permission, "denied");
+  assert.equal(states.at(-1).permission, "denied");
+});
+
+test("ScreenshotService whenIdle waits for a late native rejection without an unhandled rejection", async () => {
+  const directory = await makeDirectory();
+  let rejectSources;
+  const adapters = makeAdapters({
+    getSources: () => new Promise((resolve, reject) => {
+      rejectSources = reject;
+    }),
+  });
+  const service = makeService(directory, adapters, { sourceTimeoutMs: 5 });
+  let idleResolved = false;
+  let unhandled = false;
+  const onUnhandled = () => { unhandled = true; };
+  process.once("unhandledRejection", onUnhandled);
+
+  try {
+    await assert.rejects(service.capture(), (error) => error?.code === "SCREEN_CAPTURE_FAILED");
+    const idle = service.whenIdle().then(() => { idleResolved = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(idleResolved, false);
+    rejectSources(new Error("late native rejection"));
+    await idle;
+    assert.equal(idleResolved, true);
+    assert.equal(unhandled, false);
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandled);
+  }
+});
+
+test("ScreenshotService whenIdle also waits for session initialization cleanup", async () => {
+  const directory = await makeDirectory();
+  let releaseInitialization;
+  const fileSystem = {
+    readdir: () => new Promise((resolve) => { releaseInitialization = resolve; }),
+    mkdir: async () => undefined,
+    writeFile: async () => undefined,
+    rename: async () => undefined,
+    unlink: async () => undefined,
+  };
+  const service = makeService(directory, makeAdapters(), { fileSystem });
+  let idleResolved = false;
+  const idle = service.whenIdle().then(() => { idleResolved = true; });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(idleResolved, false);
+  releaseInitialization([]);
+  await idle;
+  assert.equal(idleResolved, true);
 });
 
 test("ScreenshotService selects the source matching the display nearest the cursor", async () => {
@@ -193,6 +275,78 @@ test("ScreenshotService persists PNG bytes through a temporary file and rename",
   });
   assert.equal(await readFile(path.join(directory, `${item.id}.png`), "utf8"), "png-bytes");
   assert.deepEqual(files, [`${item.id}.png`]);
+});
+
+test("ScreenshotService observes atomic temp write then rename through its filesystem adapter", async () => {
+  const directory = await makeDirectory();
+  const calls = [];
+  const fileSystem = {
+    async mkdir(target) {
+      calls.push(["mkdir", target]);
+    },
+    async readdir() {
+      calls.push(["readdir"]);
+      return [];
+    },
+    async writeFile(target) {
+      calls.push(["write", target]);
+    },
+    async rename(from, to) {
+      calls.push(["rename", from, to]);
+    },
+    async unlink(target) {
+      calls.push(["unlink", target]);
+    },
+  };
+  const service = makeService(directory, makeAdapters(), {
+    fileSystem,
+    idFactory: () => "99999999-9999-4999-8999-999999999999",
+  });
+
+  await service.capture();
+
+  assert.deepEqual(calls.map(([operation]) => operation), ["readdir", "mkdir", "write", "rename"]);
+  assert.match(calls[2][1], /\.png\.tmp$/);
+  assert.match(calls[3][1], /\.png\.tmp$/);
+  assert.match(calls[3][2], /\.png$/);
+});
+
+test("ScreenshotService unlinks its temporary file after filesystem write or rename failures", async () => {
+  for (const failureOperation of ["write", "rename"]) {
+    const directory = await makeDirectory();
+    const calls = [];
+    const fileSystem = {
+      async mkdir() {
+        calls.push("mkdir");
+      },
+      async readdir() {
+        calls.push("readdir");
+        return [];
+      },
+      async writeFile(target) {
+        calls.push("write");
+        if (failureOperation === "write") {
+          throw new Error("write failed");
+        }
+      },
+      async rename() {
+        calls.push("rename");
+        if (failureOperation === "rename") {
+          throw new Error("rename failed");
+        }
+      },
+      async unlink(target) {
+        calls.push(["unlink", target]);
+      },
+    };
+    const service = makeService(directory, makeAdapters(), {
+      fileSystem,
+      idFactory: () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+
+    await assert.rejects(service.capture(), (error) => error?.code === "SCREEN_CAPTURE_FAILED");
+    assert.equal(calls.some((entry) => Array.isArray(entry) && entry[0] === "unlink" && /\.png\.tmp$/.test(entry[1])), true);
+  }
 });
 
 test("ScreenshotService evicts the oldest file when the queue exceeds five items", async () => {

@@ -6,6 +6,7 @@ import {
   DEFAULT_SETTINGS,
   mergeSettings,
   normalizeSettings,
+  validateShortcutSettings,
   validateSettingsPatch,
 } from "./settings-core";
 
@@ -73,6 +74,10 @@ export class SettingsService {
     }
 
     const nextSettings = mergeSettings(this.settings, patch);
+    const shortcutValidationError = validateShortcutSettings(nextSettings.shortcuts);
+    if (shortcutValidationError) {
+      return failure(shortcutValidationError);
+    }
 
     try {
       await this.writeAtomically(nextSettings);

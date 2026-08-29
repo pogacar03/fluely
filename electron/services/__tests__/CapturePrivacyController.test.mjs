@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const modulePath = path.resolve(__dirname, "../../../dist-electron/electron/services/CapturePrivacyController.js");
-const { CapturePrivacyController } = await import(pathToFileURL(modulePath).href);
+const { CapturePrivacyController, DockPrivacyCoordinator } = await import(pathToFileURL(modulePath).href);
 
 function makeWindow({ destroyed = false } = {}) {
   const events = new EventEmitter();
@@ -121,4 +121,111 @@ test("Dock policy is applied before content protection is reasserted", () => {
   order.length = 0;
   controller.reassert();
   assert.deepEqual(order, ["dock-hide", "content", "mission-control"]);
+});
+
+test("Dock visibility actions are serialized so a stale show cannot win a newer hide intent", async () => {
+  const window = makeWindow();
+  const calls = [];
+  let releaseHide;
+  const dock = {
+    hide: () => {
+      calls.push("hide");
+      return new Promise((resolve) => { releaseHide = resolve; });
+    },
+    show: () => {
+      calls.push("show");
+      return Promise.resolve();
+    },
+  };
+  const first = new CapturePrivacyController("darwin", dock);
+  first.apply(window, true);
+  first.apply(window, false);
+  const second = new CapturePrivacyController("darwin", dock);
+  second.apply(window, true);
+
+  assert.deepEqual(calls, ["hide"]);
+  releaseHide();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ["hide", "show", "hide"]);
+});
+
+test("Dock disposal does not show when a controller never owned a hide request", async () => {
+  const window = makeWindow();
+  const calls = [];
+  const controller = new CapturePrivacyController("darwin", {
+    hide: () => calls.push("hide"),
+    show: () => calls.push("show"),
+  });
+
+  controller.apply(window, false);
+  controller.dispose();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(calls, ["show"]);
+});
+
+test("replacing a privacy window with a destroyed target releases owned Dock hiding", () => {
+  const liveWindow = makeWindow();
+  const destroyedWindow = makeWindow({ destroyed: true });
+  const calls = [];
+  const controller = new CapturePrivacyController("darwin", {
+    hide: () => calls.push("hide"),
+    show: () => calls.push("show"),
+  });
+
+  controller.apply(liveWindow, true);
+  controller.apply(destroyedWindow, true);
+
+  assert.deepEqual(calls, ["hide", "show"]);
+});
+
+test("shared Dock coordinator serializes every intent and leaves the latest intent last", async () => {
+  const calls = [];
+  const deferred = [];
+  const coordinator = new DockPrivacyCoordinator({
+    hide: () => {
+      calls.push("hide");
+      if (calls.filter((call) => call === "hide").length > 1) {
+        return Promise.resolve();
+      }
+      return new Promise((resolve, reject) => deferred.push({ resolve, reject }));
+    },
+    show: () => {
+      calls.push("show");
+      return Promise.resolve();
+    },
+  });
+
+  const first = coordinator.setHidden(true);
+  const second = coordinator.setHidden(false);
+  const third = coordinator.setHidden(true);
+  assert.deepEqual(calls, ["hide"]);
+  deferred.shift().resolve();
+  await Promise.all([first, second, third]);
+
+  assert.deepEqual(calls, ["hide", "show", "hide"]);
+});
+
+test("shared Dock coordinator continues with the latest intent after an async rejection", async () => {
+  const calls = [];
+  let rejectHide;
+  const coordinator = new DockPrivacyCoordinator({
+    hide: () => {
+      calls.push("hide");
+      return new Promise((resolve, reject) => { rejectHide = reject; });
+    },
+    show: () => {
+      calls.push("show");
+      return Promise.resolve();
+    },
+  });
+
+  const first = coordinator.setHidden(true);
+  const second = coordinator.setHidden(false);
+  rejectHide(new Error("Dock unavailable"));
+  await assert.rejects(first, /Dock unavailable/);
+  await second;
+
+  assert.deepEqual(calls, ["hide", "show"]);
 });
