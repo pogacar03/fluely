@@ -1,5 +1,4 @@
-import { contextBridge } from "electron";
+import { contextBridge, ipcRenderer } from "electron";
+import { exposeFluelyApi } from "./preloadBridge";
 
-contextBridge.exposeInMainWorld("fluely", {
-  version: "0.1.0",
-});
+exposeFluelyApi(contextBridge, ipcRenderer);
