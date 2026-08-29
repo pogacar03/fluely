@@ -33,7 +33,7 @@ Fluely is currently in active early development. The first release is being deli
 
 | Milestone | Focus | Status |
 | --- | --- | --- |
-| 1 | Electron foundation, secure IPC, settings, shortcuts | In progress |
+| 1 | Electron foundation, secure IPC, settings, shortcuts | Complete locally |
 | 2 | Screenshot queue, vision requests, streaming answers | Planned |
 | 3 | Shared conversation context and phone mirror | Planned |
 | 4 | Microphone input, VAD, pluggable STT | Planned |
@@ -110,16 +110,17 @@ Fluely is not a security product. Please review the threat model before exposing
 
 ## Development
 
-The repository is being scaffolded now. Once the first runnable slice lands, the standard loop will be:
+Milestone 1 is runnable locally. The standard verification loop is:
 
 ```bash
-npm install
+npm ci
 npm run typecheck
 npm test
 npm run build
+npm run package:dir
 ```
 
-Until those scripts are present, the repository should be treated as a work in progress rather than a ready-to-install application.
+The current package target is an unsigned macOS Apple Silicon directory build. Public release signing, final artwork, and the next screenshot/provider milestone are still ahead.
 
 ## Scope guardrails
 

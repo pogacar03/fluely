@@ -1,6 +1,6 @@
 # Fluely Milestone 1 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Build a runnable Fluely Electron foundation with secure IPC, atomic settings, configurable shortcuts, and a polished status surface.
 
@@ -47,7 +47,7 @@
 - Produces the compiled entry points `dist/index.html`, `dist-electron/electron/main.js`, and `dist-electron/electron/preload.js`.
 - Produces `window.fluely` type declarations for later service tasks.
 
-- [ ] **Step 1: Add the minimal package and compiler configuration**
+- [x] **Step 1: Add the minimal package and compiler configuration**
 
 Use this dependency shape and scripts:
 
@@ -67,16 +67,15 @@ Use this dependency shape and scripts:
     "test": "npm run build:electron && node --test electron/services/__tests__/*.test.mjs",
     "package:dir": "npm run build && electron-builder --dir"
   },
-  "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/node": "^22.10.2",
-    "electron": "^33.4.11",
+    "electron": "^40.10.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "electron-builder": "^25.1.8",
     "rimraf": "^6.0.1",
     "typescript": "^5.7.2",
@@ -87,11 +86,11 @@ Use this dependency shape and scripts:
 
 The exact versions may be updated only if the package manager resolves a compatible current patch release during install; do not add a UI component framework or runtime service dependency.
 
-- [ ] **Step 2: Configure the renderer and Electron compiler targets**
+- [x] **Step 2: Configure the renderer and Electron compiler targets**
 
 Set the renderer compiler to strict ES modules with DOM types and the Electron compiler to strict CommonJS output under `dist-electron`, including `electron/**/*.ts` and `src/shared/**/*.ts`. Configure Vite to use React, emit `dist`, and avoid source maps in production output.
 
-- [ ] **Step 3: Write the failing secure-window test**
+- [x] **Step 3: Write the failing secure-window test**
 
 Add a pure `getWindowPreferences(preloadPath)` contract test:
 
@@ -113,7 +112,7 @@ npm test -- electron/services/__tests__/windowConfig.test.mjs
 
 Expected: FAIL because `dist-electron/electron/windowConfig.js` does not exist yet.
 
-- [ ] **Step 4: Implement the secure window shell**
+- [x] **Step 4: Implement the secure window shell**
 
 Create `electron/main.ts` with an app-ready lifecycle that creates a `BrowserWindow` using:
 
@@ -130,7 +129,7 @@ Keep the object-producing helper in `electron/windowConfig.ts` so the security c
 
 Set the app name to `Fluely`, open `dist/index.html`, show the window after `ready-to-show`, and quit on non-macOS `window-all-closed`. Keep service registration in named functions so later tasks can attach handlers without turning `main.ts` into a service implementation.
 
-- [ ] **Step 5: Run the secure-window test green**
+- [x] **Step 5: Run the secure-window test green**
 
 Run:
 
@@ -140,11 +139,11 @@ npm test -- electron/services/__tests__/windowConfig.test.mjs
 
 Expected: PASS with the four security assertions above.
 
-- [ ] **Step 6: Add the renderer status surface**
+- [x] **Step 6: Add the renderer status surface**
 
 Build a compact dark Fluely shell with a header, status badge, shortcut summary, and an empty-state card explaining that capture and providers arrive in later milestones. Use semantic HTML, CSS variables, and no external font or icon package. The UI must not use `require`, `process`, `fs`, `path`, or any Electron import.
 
-- [ ] **Step 7: Build the shell and verify entry points**
+- [x] **Step 7: Build the shell and verify entry points**
 
 Run:
 
@@ -156,7 +155,7 @@ npm run build
 
 Expected: all commands pass and the three output entry points exist. Do not add service behavior until the service tests in later tasks are written first.
 
-- [ ] **Step 8: Commit the bootstrap**
+- [x] **Step 8: Commit the bootstrap**
 
 ```bash
 git add package.json package-lock.json tsconfig.json electron/tsconfig.json vite.config.ts index.html electron src assets/icon.svg
@@ -176,7 +175,7 @@ git commit -m "feat: bootstrap Fluely desktop shell"
 - `settings-core.ts` produces `DEFAULT_SETTINGS`, `normalizeSettings(input: unknown): FluelySettings`, `normalizeSettingsPatch(input: unknown): SettingsPatch`, and `validateSettingsPatch(input: unknown): IpcError | null`.
 - `SettingsService` produces `load(): Promise<SettingsLoadResult>`, `get(): FluelySettings`, `update(patch: SettingsPatch): Promise<ServiceResult<FluelySettings>>`, and `reset(): Promise<ServiceResult<FluelySettings>>`.
 
-- [ ] **Step 1: Write failing normalization tests**
+- [x] **Step 1: Write failing normalization tests**
 
 Add tests for the exact defaults, whitespace shortcut fallback, unknown key removal, and dimension clamping:
 
@@ -198,7 +197,7 @@ test("normalizeSettings ignores unknown keys and blank shortcuts", () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests and verify the expected missing-module failure**
+- [x] **Step 2: Run the tests and verify the expected missing-module failure**
 
 Run:
 
@@ -208,11 +207,11 @@ npm test -- electron/services/__tests__/settings-core.test.mjs
 
 Expected: FAIL because `dist-electron/electron/services/settings-core.js` does not exist yet.
 
-- [ ] **Step 3: Implement the smallest pure normalization module**
+- [x] **Step 3: Implement the smallest pure normalization module**
 
 Define the default object once, clone nested objects when returning it, clamp width to `480..1600` and height to `360..1400`, trim non-empty shortcut strings, and ignore all unknown input keys. Keep this module independent of Electron and filesystem APIs.
 
-- [ ] **Step 4: Run the normalization tests green**
+- [x] **Step 4: Run the normalization tests green**
 
 Run:
 
@@ -222,15 +221,15 @@ npm test -- electron/services/__tests__/settings-core.test.mjs
 
 Expected: PASS for all normalization tests.
 
-- [ ] **Step 5: Write failing atomic persistence tests**
+- [x] **Step 5: Write failing atomic persistence tests**
 
 Use a temporary directory and a small injected filesystem adapter. Verify that `save()` writes JSON to a temporary sibling and renames it into place, that the final file is mode `0600`, and that a malformed existing file is backed up before defaults are used. Do not assert implementation-private helper calls; assert the final file content and backup result.
 
-- [ ] **Step 6: Implement `SettingsService` with atomic writes**
+- [x] **Step 6: Implement `SettingsService` with atomic writes**
 
 Resolve the file as `join(userDataPath, "settings.json")`; create the directory recursively; write to `${file}.tmp-${process.pid}-${randomSuffix}`; call `rename`; and clean up a failed temporary write. When JSON parsing fails, copy the original to `settings.invalid-${timestamp}.json` when possible, return defaults, and expose an actionable warning without aborting startup. Keep the in-memory settings unchanged when an update write fails.
 
-- [ ] **Step 7: Run service tests and typecheck**
+- [x] **Step 7: Run service tests and typecheck**
 
 Run:
 
@@ -241,7 +240,7 @@ npm run typecheck
 
 Expected: PASS with no type errors.
 
-- [ ] **Step 8: Commit settings**
+- [x] **Step 8: Commit settings**
 
 ```bash
 git add src/shared/ipc.ts electron/services/settings-core.ts electron/services/SettingsService.ts electron/services/__tests__
@@ -260,7 +259,7 @@ git commit -m "feat: add atomic Fluely settings service"
 - `ShortcutManager` produces `registerAll(shortcuts): IpcResult<ShortcutStatus>`, `update(shortcuts): IpcResult<ShortcutStatus>`, `getStatus(): ShortcutStatus`, and `dispose(): void`.
 - `ShortcutStatus` contains every configured shortcut, `registered`, `errorCode`, `message`, and `action` fields in serializable form.
 
-- [ ] **Step 1: Write failing shortcut tests**
+- [x] **Step 1: Write failing shortcut tests**
 
 Cover duplicate detection, successful registration, conflict reporting, idempotent re-registration, and the visibility-only rule:
 
@@ -289,7 +288,7 @@ test("toggle shortcut changes visibility without invoking analysis", () => {
 });
 ```
 
-- [ ] **Step 2: Run the shortcut tests to verify the expected missing-module failure**
+- [x] **Step 2: Run the shortcut tests to verify the expected missing-module failure**
 
 Run:
 
@@ -299,11 +298,11 @@ npm test -- electron/services/__tests__/ShortcutManager.test.mjs
 
 Expected: FAIL because the manager module is not present.
 
-- [ ] **Step 3: Implement validation and registration**
+- [x] **Step 3: Implement validation and registration**
 
 Validate every shortcut as a trimmed non-empty string, reject duplicate accelerators before changing the active registration, unregister prior accelerators on successful updates, and preserve the requested settings when the OS rejects a registration. Register `toggleVisibility` to call `window.show()` / `window.hide()` only. Register later-milestone actions as no-op callbacks whose status says `Not available in this milestone`.
 
-- [ ] **Step 4: Run the shortcut tests green**
+- [x] **Step 4: Run the shortcut tests green**
 
 Run:
 
@@ -313,7 +312,7 @@ npm test -- electron/services/__tests__/ShortcutManager.test.mjs
 
 Expected: PASS for all shortcut tests.
 
-- [ ] **Step 5: Commit shortcut management**
+- [x] **Step 5: Commit shortcut management**
 
 ```bash
 git add src/shared/ipc.ts electron/services/ShortcutManager.ts electron/services/__tests__/ShortcutManager.test.mjs
@@ -336,7 +335,7 @@ git commit -m "feat: add configurable shortcut manager"
 - `registerIpcHandlers(dependencies): () => void` consumes `SettingsService`, `ShortcutManager`, and `BrowserWindow` adapters.
 - IPC failures serialize as `{ ok: false, error: { code, message, action } }`.
 
-- [ ] **Step 1: Write the failing IPC contract test**
+- [x] **Step 1: Write the failing IPC contract test**
 
 Add a source-level smoke test that imports the compiled preload and asserts the exposed key set is exactly:
 
@@ -346,7 +345,7 @@ Add a source-level smoke test that imports the compiled preload and asserts the 
 
 Also assert that the preload does not expose `ipcRenderer`, `fs`, `path`, `shell`, or a generic `invoke` function.
 
-- [ ] **Step 2: Run the contract test and verify it fails for the missing bridge**
+- [x] **Step 2: Run the contract test and verify it fails for the missing bridge**
 
 Run:
 
@@ -356,19 +355,19 @@ npm test -- electron/services/__tests__/ipc-contract.test.mjs
 
 Expected: FAIL until the preload bridge exposes the documented API.
 
-- [ ] **Step 3: Implement shared contracts and preload allow-list**
+- [x] **Step 3: Implement shared contracts and preload allow-list**
 
 Use `contextBridge.exposeInMainWorld("fluely", { ... })` with one wrapper per allowed method. The wrappers pass fixed channel names to `ipcRenderer.invoke`; no channel string or Electron object is accepted from renderer input.
 
-- [ ] **Step 4: Implement main-process handlers**
+- [x] **Step 4: Implement main-process handlers**
 
 Register `settings:get`, `settings:update`, `settings:reset`, `shortcuts:get`, `shortcuts:update`, and `app:get-status`. Validate update payloads before invoking services, return stable error objects, and keep the settings file path inside the main process. Register shortcuts after settings load and dispose them on `will-quit`.
 
-- [ ] **Step 5: Connect the React UI to real settings and status**
+- [x] **Step 5: Connect the React UI to real settings and status**
 
 On mount, load status, settings, and shortcut status in parallel. Render each shortcut with a success/conflict/unavailable badge. Add a controlled settings form for window width/height and shortcut strings, a save button, and a reset button. Show the actionable error message returned by IPC and keep the last known good UI state after failed writes.
 
-- [ ] **Step 6: Run build, tests, and manual launch**
+- [x] **Step 6: Run build, tests, and manual launch**
 
 Run:
 
@@ -381,7 +380,7 @@ npm run package:dir
 
 Then launch the unpacked app generated under `release/` and verify that Fluely renders, settings can be saved/reset, and `CommandOrControl+B` toggles visibility without starting analysis.
 
-- [ ] **Step 7: Commit the integrated foundation**
+- [x] **Step 7: Commit the integrated foundation**
 
 ```bash
 git add src/shared/ipc.ts electron/main.ts electron/preload.ts electron/services/ipcHandlers.ts electron/services/__tests__/ipc-contract.test.mjs src/renderer
@@ -402,7 +401,7 @@ git commit -m "feat: wire secure Fluely IPC foundation"
 - `npm run package:dir` produces an unpacked package using only `dist/**`, `dist-electron/**`, `package.json`, and required runtime assets.
 - CI runs `npm run typecheck`, `npm test`, and `npm run build` on a supported Node version.
 
-- [ ] **Step 1: Add an allowlisted Electron Builder configuration**
+- [x] **Step 1: Add an allowlisted Electron Builder configuration**
 
 Use a configuration equivalent to:
 
@@ -426,15 +425,15 @@ mac:
 
 Do not add `node_modules` as a file pattern. Keep the final icon replacement documented as a release task.
 
-- [ ] **Step 2: Add packaging and repository hygiene checks**
+- [x] **Step 2: Add packaging and repository hygiene checks**
 
 Ignore `node_modules`, `dist`, `dist-electron`, `release`, local settings, screenshots, model files, and `.DS_Store`. Have `scripts/check-package-allowlist.mjs` fail if the builder config contains a blanket `node_modules` pattern or if the release tree contains test files, source maps, or `.env` files.
 
-- [ ] **Step 3: Add CI and update the README status**
+- [x] **Step 3: Add CI and update the README status**
 
 Add a GitHub Actions workflow that installs with `npm ci`, runs typecheck/tests/build, and updates the README milestone table from `In progress` to `Complete` only after all local acceptance checks pass. Keep README claims aligned with the actual build.
 
-- [ ] **Step 4: Run the complete verification set**
+- [x] **Step 4: Run the complete verification set**
 
 Run:
 
@@ -450,7 +449,7 @@ git status --short
 
 Expected: all checks pass, the package is created under `release/`, and no files under the old Natively directory or `/Applications` have changed.
 
-- [ ] **Step 5: Push the development branch**
+- [x] **Step 5: Push the development branch**
 
 ```bash
 git push -u origin codex/fluely-foundation
