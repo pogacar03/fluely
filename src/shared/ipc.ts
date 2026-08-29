@@ -59,6 +59,7 @@ export interface ShortcutStatusEntry {
   registered: boolean;
   available: boolean;
   message: string;
+  errorCode?: IpcErrorCode;
 }
 
 export interface ShortcutStatus {

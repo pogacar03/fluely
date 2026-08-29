@@ -257,7 +257,7 @@ git commit -m "feat: add atomic Fluely settings service"
 
 **Interfaces:**
 - `ShortcutManager` consumes an injected `GlobalShortcutAdapter`, a `WindowAdapter`, and action callbacks.
-- `ShortcutManager` produces `registerAll(shortcuts): ShortcutStatus`, `update(shortcuts): ShortcutStatus`, `getStatus(): ShortcutStatus`, and `dispose(): void`.
+- `ShortcutManager` produces `registerAll(shortcuts): IpcResult<ShortcutStatus>`, `update(shortcuts): IpcResult<ShortcutStatus>`, `getStatus(): ShortcutStatus`, and `dispose(): void`.
 - `ShortcutStatus` contains every configured shortcut, `registered`, `errorCode`, `message`, and `action` fields in serializable form.
 
 - [ ] **Step 1: Write failing shortcut tests**
