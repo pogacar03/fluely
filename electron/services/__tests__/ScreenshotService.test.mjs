@@ -1,6 +1,6 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -32,6 +32,8 @@ function makeAdapters({
   platform = "linux",
   permission = "granted",
   displayId = 42,
+  displayBounds = { width: 1920, height: 1080 },
+  scaleFactor = 1,
   sources = [{ display_id: "42", thumbnail: makeThumbnail("png-bytes") }],
   getSources,
 } = {}) {
@@ -47,7 +49,7 @@ function makeAdapters({
   };
   const screen = {
     getCursorScreenPoint: () => ({ x: 100, y: 200 }),
-    getDisplayNearestPoint: () => ({ id: displayId }),
+    getDisplayNearestPoint: () => ({ id: displayId, bounds: displayBounds, scaleFactor }),
   };
   const systemPreferences = {
     getMediaAccessStatus: () => permission,
@@ -63,14 +65,14 @@ function makeService(directory, adapters, options = {}) {
     idFactory: options.idFactory,
     now: options.now,
     sourceTimeoutMs: options.sourceTimeoutMs,
+    onStateChanged: options.onStateChanged,
   });
 }
 
-test("ScreenshotService maps macOS screen permission states to actionable errors", async () => {
+test("ScreenshotService maps already-decided macOS screen permission states to actionable errors", async () => {
   const cases = [
     ["denied", "SCREEN_CAPTURE_DENIED"],
     ["restricted", "SCREEN_CAPTURE_RESTRICTED"],
-    ["not-determined", "SCREEN_CAPTURE_PERMISSION_REQUIRED"],
   ];
 
   for (const [permission, code] of cases) {
@@ -84,22 +86,68 @@ test("ScreenshotService maps macOS screen permission states to actionable errors
   }
 });
 
-test("ScreenshotService times out source enumeration after the configured five-second limit", async () => {
+test("ScreenshotService allows the first not-determined capture to reach the OS and remaps consent failure", async () => {
   const directory = await makeDirectory();
-  const adapters = makeAdapters({ getSources: () => new Promise(() => undefined) });
+  let permissionReads = 0;
+  const adapters = makeAdapters({
+    platform: "darwin",
+    permission: "not-determined",
+    getSources: () => {
+      throw new Error("system consent was declined");
+    },
+  });
+  adapters.systemPreferences.getMediaAccessStatus = () => {
+    permissionReads += 1;
+    return permissionReads === 1 ? "not-determined" : "denied";
+  };
+  const service = makeService(directory, adapters);
+
+  await assert.rejects(service.capture(), (error) => error?.code === "SCREEN_CAPTURE_DENIED");
+  assert.equal(adapters.sourceCalls.length, 1);
+  assert.equal(service.getState().permission, "denied");
+});
+
+test("ScreenshotService tracks a timed-out source request until it settles", async () => {
+  const directory = await makeDirectory();
+  let releaseSources;
+  let sourceCalls = 0;
+  const adapters = makeAdapters({
+    getSources: () => {
+      sourceCalls += 1;
+      if (sourceCalls === 1) {
+        return new Promise((resolve) => {
+          releaseSources = resolve;
+        });
+      }
+      return [{ display_id: "42", thumbnail: makeThumbnail("recovered") }];
+    },
+  });
   const service = makeService(directory, adapters, { sourceTimeoutMs: 5 });
 
   await assert.rejects(
     service.capture(),
     (error) => error?.code === "SCREEN_CAPTURE_FAILED",
   );
+  assert.equal(service.getState().capturing, true);
+  await assert.rejects(service.capture(), (error) => error?.code === "CAPTURE_IN_PROGRESS");
+  assert.equal(sourceCalls, 1);
+
+  releaseSources([{ display_id: "42", thumbnail: makeThumbnail("late") }]);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(service.getState().capturing, false);
+
+  const recovered = await service.capture();
+  assert.equal(recovered.width, 1920);
+  assert.equal(sourceCalls, 2);
 });
 
 test("ScreenshotService selects the source matching the display nearest the cursor", async () => {
   const directory = await makeDirectory();
   const adapters = makeAdapters({
     displayId: 9,
+    displayBounds: { width: 1280, height: 720 },
+    scaleFactor: 1.5,
     sources: [
       { display_id: "42", thumbnail: makeThumbnail("wrong-display") },
       { display_id: "9", thumbnail: makeThumbnail("selected-display", 1440, 900) },
@@ -116,7 +164,7 @@ test("ScreenshotService selects the source matching the display nearest the curs
   assert.equal(stored, "selected-display");
   assert.deepEqual(adapters.sourceCalls, [{
     types: ["screen"],
-    thumbnailSize: { width: 3840, height: 2160 },
+    thumbnailSize: { width: 1920, height: 1080 },
   }]);
   assert.deepEqual(item, {
     id: "11111111-1111-4111-8111-111111111111",
@@ -217,4 +265,138 @@ test("ScreenshotService releases its capturing flag after adapter errors", async
   const recovered = await service.capture();
   assert.equal(recovered.id, "44444444-4444-4444-8444-444444444441");
   assert.equal(service.getState().capturing, false);
+});
+
+test("ScreenshotService cleans only strict managed orphan files on initialization and clear", async () => {
+  const directory = await makeDirectory();
+  const managedIds = [
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222",
+    "33333333-3333-4333-8333-333333333333",
+    "44444444-4444-4444-8444-444444444444",
+    "55555555-5555-4555-8555-555555555555",
+  ];
+  await Promise.all(managedIds.map((id) => writeFile(path.join(directory, `${id}.png`), id)));
+  await writeFile(path.join(directory, `${managedIds[0]}.png.tmp`), "temporary");
+  await writeFile(path.join(directory, "keep-me.txt"), "unrelated");
+  await writeFile(path.join(directory, "keep-me.png"), "unrelated png");
+
+  const adapters = makeAdapters();
+  const service = makeService(directory, adapters, {
+    idFactory: () => "66666666-6666-4666-8666-666666666666",
+  });
+  await service.capture();
+
+  const afterCapture = await readdir(directory);
+  const managedAfterCapture = afterCapture.filter((file) => /\.png(?:\.tmp)?$/i.test(file));
+  assert.ok(managedAfterCapture.length <= 5);
+  assert.equal(afterCapture.includes("keep-me.txt"), true);
+  assert.equal(afterCapture.includes("keep-me.png"), true);
+
+  await writeFile(path.join(directory, `${managedIds[1]}.png.tmp`), "temporary again");
+  await service.clear();
+  const afterClear = (await readdir(directory)).sort();
+  assert.deepEqual(afterClear, ["keep-me.png", "keep-me.txt"]);
+});
+
+test("ScreenshotService serializes capture, delete, and clear in one mutation queue", async () => {
+  const directory = await makeDirectory();
+  let releaseSources;
+  const adapters = makeAdapters({
+    getSources: () => new Promise((resolve) => {
+      releaseSources = resolve;
+    }),
+  });
+  const service = makeService(directory, adapters, {
+    idFactory: () => "77777777-7777-4777-8777-777777777777",
+  });
+
+  const capturePromise = service.capture();
+  for (let attempt = 0; attempt < 20 && typeof releaseSources !== "function"; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(typeof releaseSources, "function");
+  const clearPromise = service.clear();
+  let clearResolved = false;
+  void clearPromise.then(() => { clearResolved = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(service.getState().capturing, true);
+  assert.equal(clearResolved, false);
+  await assert.rejects(service.capture(), (error) => error?.code === "CAPTURE_IN_PROGRESS");
+
+  releaseSources([{ display_id: "42", thumbnail: makeThumbnail("serialized") }]);
+  await capturePromise;
+  const state = await clearPromise;
+  assert.deepEqual(state.items, []);
+  assert.equal(service.getState().capturing, false);
+  assert.deepEqual(await readdir(directory), []);
+});
+
+test("ScreenshotService queues delete behind an in-flight capture", async () => {
+  const directory = await makeDirectory();
+  const id = "88888888-8888-4888-8888-888888888888";
+  let releaseSources;
+  const adapters = makeAdapters({
+    getSources: () => new Promise((resolve) => {
+      releaseSources = resolve;
+    }),
+  });
+  const service = makeService(directory, adapters, { idFactory: () => id });
+
+  const capturePromise = service.capture();
+  for (let attempt = 0; attempt < 20 && typeof releaseSources !== "function"; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(typeof releaseSources, "function");
+  const deletePromise = service.delete(id);
+  let deleteResolved = false;
+  void deletePromise.then(() => { deleteResolved = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(deleteResolved, false);
+
+  releaseSources([{ display_id: "42", thumbnail: makeThumbnail("delete-after-capture") }]);
+  await capturePromise;
+  const state = await deletePromise;
+  assert.deepEqual(state.items, []);
+  assert.deepEqual(await readdir(directory), []);
+});
+
+test("ScreenshotService emits capturing and final states for background subscribers", async () => {
+  const directory = await makeDirectory();
+  const states = [];
+  const service = makeService(directory, makeAdapters(), {
+    onStateChanged: (state) => states.push(state),
+  });
+
+  await service.capture();
+
+  assert.equal(states.some((state) => state.capturing), true);
+  assert.equal(states.at(-1).capturing, false);
+  assert.equal(states.at(-1).items.length, 1);
+});
+
+test("ScreenshotService emits a complete final state after delete and clear success or failure", async () => {
+  const directory = await makeDirectory();
+  const states = [];
+  const service = makeService(directory, makeAdapters(), {
+    idFactory: () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    onStateChanged: (state) => states.push(state),
+  });
+  const item = await service.capture();
+
+  states.length = 0;
+  const afterDelete = await service.delete(item.id);
+  assert.deepEqual(afterDelete.items, []);
+  assert.deepEqual(states.at(-1), afterDelete);
+
+  states.length = 0;
+  await assert.rejects(service.delete(item.id), (error) => error?.code === "SCREENSHOT_NOT_FOUND");
+  assert.equal(states.at(-1).capturing, false);
+  assert.deepEqual(states.at(-1).items, []);
+
+  states.length = 0;
+  const afterClear = await service.clear();
+  assert.deepEqual(afterClear.items, []);
+  assert.deepEqual(states.at(-1), afterClear);
 });

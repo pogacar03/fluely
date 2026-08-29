@@ -39,6 +39,8 @@ export interface IpcHandlerDependencies {
   shortcuts: ShortcutHandlerService;
   screenshots: ScreenshotHandlerService;
   applyPrivacy?: (enabled: boolean) => void;
+  applyShortcuts?: (shortcuts: ShortcutSettings) => IpcResult<ShortcutStatus> | void;
+  notifyScreenshotState?: (state: ScreenshotState) => void;
   getAppStatus(): AppStatus;
 }
 
@@ -117,12 +119,25 @@ function screenshotFailure(error: unknown): IpcError {
   };
 }
 
+function emitScreenshotState(
+  notifyScreenshotState: ((state: ScreenshotState) => void) | undefined,
+  screenshots: ScreenshotHandlerService,
+): void {
+  try {
+    notifyScreenshotState?.(screenshots.getState());
+  } catch {
+    // Renderer notification failures must not change the IPC mutation result.
+  }
+}
+
 export function registerIpcHandlers({
   ipcMain,
   settings,
   shortcuts,
   screenshots,
   applyPrivacy,
+  applyShortcuts,
+  notifyScreenshotState,
   getAppStatus,
 }: IpcHandlerDependencies): void {
   ipcMain.handle("settings:get", () => success(settings.get()));
@@ -138,6 +153,13 @@ export function registerIpcHandlers({
       typeof payload.privacy.captureProtection === "boolean") {
       applyPrivacy?.(result.value.privacy.captureProtection);
     }
+    if (result.ok && applyShortcuts && isRecord(payload) && isRecord(payload.shortcuts)) {
+      try {
+        applyShortcuts(result.value.shortcuts);
+      } catch {
+        // Settings remain the user's requested values even if OS registration is unavailable.
+      }
+    }
     return result;
   });
 
@@ -145,6 +167,13 @@ export function registerIpcHandlers({
     const result = await settings.reset();
     if (result.ok && applyPrivacy && result.value.privacy) {
       applyPrivacy?.(result.value.privacy.captureProtection);
+    }
+    if (result.ok && applyShortcuts) {
+      try {
+        applyShortcuts(result.value.shortcuts);
+      } catch {
+        // Settings reset remains successful even if OS registration is unavailable.
+      }
     }
     return result;
   });
@@ -165,6 +194,8 @@ export function registerIpcHandlers({
       return success(await screenshots.capture());
     } catch (error) {
       return failure<ScreenshotItem>(screenshotFailure(error));
+    } finally {
+      emitScreenshotState(notifyScreenshotState, screenshots);
     }
   });
 
@@ -177,6 +208,8 @@ export function registerIpcHandlers({
       return success(await screenshots.delete(payload));
     } catch (error) {
       return failure<ScreenshotState>(screenshotFailure(error));
+    } finally {
+      emitScreenshotState(notifyScreenshotState, screenshots);
     }
   });
 
@@ -185,6 +218,8 @@ export function registerIpcHandlers({
       return success(await screenshots.clear());
     } catch (error) {
       return failure<ScreenshotState>(screenshotFailure(error));
+    } finally {
+      emitScreenshotState(notifyScreenshotState, screenshots);
     }
   });
 

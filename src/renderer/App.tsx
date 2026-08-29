@@ -111,10 +111,16 @@ export function App() {
       });
     };
     window.addEventListener("focus", refreshOnFocus);
+    const unsubscribeScreenshotState = window.fluely.screenshots.onStateChanged((state) => {
+      if (active) {
+        setScreenshotState(state);
+      }
+    });
 
     return () => {
       active = false;
       window.removeEventListener("focus", refreshOnFocus);
+      unsubscribeScreenshotState();
     };
   }, []);
 
@@ -125,7 +131,7 @@ export function App() {
       if (result.ok) {
         setNotice({
           tone: "success",
-          text: `Captured ${result.value.width} × ${result.value.height} display pixels.`,
+          text: `Captured ${result.value.width} × ${result.value.height} captured pixels.`,
         });
       } else {
         setNotice({ tone: "error", text: `${result.error.message} ${result.error.action}` });

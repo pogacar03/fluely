@@ -8,14 +8,15 @@ import {
   systemPreferences,
 } from "electron";
 import { join } from "node:path";
-import type { AppStatus, FluelySettings, IpcError, ScreenshotItem } from "../src/shared/ipc";
+import type { AppStatus, FluelySettings, IpcError, ScreenshotItem, ScreenshotState } from "../src/shared/ipc";
 import { DEFAULT_SETTINGS } from "./services/settings-core";
 import { CapturePrivacyController } from "./services/CapturePrivacyController";
 import { registerIpcHandlers } from "./services/ipcHandlers";
 import { SettingsService } from "./services/SettingsService";
 import { ScreenshotService } from "./services/ScreenshotService";
 import { ShortcutManager } from "./services/ShortcutManager";
-import { runScreenshotSession } from "./services/screenshot-session";
+import { createScreenshotWorkflow } from "./services/capture-workflow";
+import { isScreenshotSessionActive } from "./services/screenshot-session";
 import { getWindowPreferences } from "./windowConfig";
 
 let mainWindow: BrowserWindow | null = null;
@@ -38,7 +39,13 @@ export function createMainWindow(settings: FluelySettings = DEFAULT_SETTINGS): B
   });
 
   capturePrivacyController?.dispose();
-  capturePrivacyController = new CapturePrivacyController(process.platform);
+  capturePrivacyController = new CapturePrivacyController(
+    process.platform,
+    process.platform === "darwin" ? {
+      hide: () => app.dock?.hide(),
+      show: () => app.dock?.show(),
+    } : undefined,
+  );
   capturePrivacyController.apply(window, settings.privacy.captureProtection);
 
   window.loadFile(join(__dirname, "../../dist/index.html"));
@@ -68,6 +75,19 @@ function getAppStatus(): AppStatus {
   };
 }
 
+function notifyScreenshotState(state?: ScreenshotState): void {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) {
+    return;
+  }
+
+  try {
+    window.webContents.send("screenshots:state-changed", state ?? getScreenshotService().getState());
+  } catch {
+    // The renderer may be tearing down while a background mutation completes.
+  }
+}
+
 function getScreenshotService(): ScreenshotService {
   if (!screenshotService) {
     screenshotService = new ScreenshotService({
@@ -86,6 +106,7 @@ function getScreenshotService(): ScreenshotService {
       systemPreferences: {
         getMediaAccessStatus: (type) => systemPreferences.getMediaAccessStatus(type),
       },
+      onStateChanged: (state) => notifyScreenshotState(state),
     });
   }
   return screenshotService;
@@ -105,10 +126,15 @@ function captureCurrentWindow(): Promise<ScreenshotItem> {
     return Promise.reject(captureFailure());
   }
 
-  return runScreenshotSession({
+  return createScreenshotWorkflow({
     window,
     platform: process.platform,
     capture: () => getScreenshotService().capture(),
+    delete: (id) => getScreenshotService().delete(id),
+    clear: () => getScreenshotService().clear(),
+  }).capture().catch((error) => {
+    notifyScreenshotState();
+    throw error;
   });
 }
 
@@ -141,6 +167,14 @@ async function initializeServices(window: BrowserWindow): Promise<void> {
       isVisible: () => window.isVisible(),
       show: () => window.show(),
       hide: () => window.hide(),
+      isCaptureActive: () => isScreenshotSessionActive(),
+      toggleVisibility: () => createScreenshotWorkflow({
+        window,
+        platform: process.platform,
+        capture: () => getScreenshotService().capture(),
+        delete: (id) => getScreenshotService().delete(id),
+        clear: () => getScreenshotService().clear(),
+      }).toggleVisibility(),
     },
     {
       captureScreenshot: () => {
@@ -173,18 +207,33 @@ async function initializeServices(window: BrowserWindow): Promise<void> {
             action: "Restart Fluely and try again.",
           },
         },
-      },
+        },
       screenshots: {
         getState: () => getScreenshotService().getState(),
         capture: () => captureCurrentWindow(),
-        delete: (id) => getScreenshotService().delete(id),
-        clear: () => getScreenshotService().clear(),
+        delete: (id) => getScreenshotService().delete(id).catch((error) => {
+          notifyScreenshotState();
+          throw error;
+        }),
+        clear: () => getScreenshotService().clear().catch((error) => {
+          notifyScreenshotState();
+          throw error;
+        }),
       },
       applyPrivacy: (enabled) => {
         if (mainWindow && capturePrivacyController) {
           capturePrivacyController.apply(mainWindow, enabled);
         }
       },
+      applyShortcuts: (shortcuts) => shortcutManager?.update(shortcuts) ?? {
+        ok: false,
+        error: {
+          code: "INTERNAL_ERROR",
+          message: "Fluely shortcut services are not ready.",
+          action: "Restart Fluely and try again.",
+        },
+      },
+      notifyScreenshotState,
       getAppStatus,
     });
     ipcHandlersRegistered = true;

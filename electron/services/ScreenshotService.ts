@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   IpcError,
@@ -16,6 +16,12 @@ export interface ScreenshotSize {
 export interface ScreenshotPoint {
   x: number;
   y: number;
+}
+
+export interface ScreenshotDisplay {
+  id: number | string;
+  bounds: ScreenshotSize;
+  scaleFactor: number;
 }
 
 export interface ScreenshotThumbnail {
@@ -37,7 +43,7 @@ export interface DesktopCaptureAdapter {
 
 export interface ScreenAdapter {
   getCursorScreenPoint(): ScreenshotPoint;
-  getDisplayNearestPoint(point: ScreenshotPoint): { id: number | string };
+  getDisplayNearestPoint(point: ScreenshotPoint): ScreenshotDisplay;
 }
 
 export interface SystemPreferencesAdapter {
@@ -56,19 +62,19 @@ export interface ScreenshotServiceOptions {
   desktopCapturer: DesktopCaptureAdapter;
   screen: ScreenAdapter;
   systemPreferences?: SystemPreferencesAdapter;
-  thumbnailSize?: ScreenshotSize;
   sourceTimeoutMs?: number;
   sourceEnumerationTimeoutMs?: number;
   idFactory?: () => string;
   now?: () => Date;
   clock?: () => Date;
+  onStateChanged?: (state: ScreenshotState) => void;
 }
 
 export type ScreenshotServiceError = IpcError;
 
 const MAX_ITEMS = 5;
 const DEFAULT_SOURCE_TIMEOUT_MS = 5000;
-const DEFAULT_THUMBNAIL_SIZE: ScreenshotSize = { width: 3840, height: 2160 };
+const MANAGED_FILE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.png(?:\.tmp)?$/i;
 const SERVICE_ERROR_CODES = new Set<IpcError["code"]>([
   "SCREEN_CAPTURE_DENIED",
   "SCREEN_CAPTURE_RESTRICTED",
@@ -157,11 +163,12 @@ function screenshotNotFound(): ScreenshotServiceError {
 export class ScreenshotService {
   private readonly directory: string;
   private readonly platformDetector: () => NodeJS.Platform;
-  private readonly thumbnailSize: ScreenshotSize;
   private readonly sourceTimeoutMs: number;
   private readonly idFactory: () => string;
   private readonly now: () => Date;
   private readonly items: ScreenshotItem[] = [];
+  private readonly initialization: Promise<void>;
+  private mutationTail: Promise<void> = Promise.resolve();
   private capturing = false;
   private disposed = false;
   private permission: ScreenshotPermission = "unavailable";
@@ -177,10 +184,10 @@ export class ScreenshotService {
 
     const platform = options.platform ?? process.platform;
     this.platformDetector = typeof platform === "function" ? platform : () => platform;
-    this.thumbnailSize = options.thumbnailSize ?? DEFAULT_THUMBNAIL_SIZE;
     this.sourceTimeoutMs = options.sourceTimeoutMs ?? options.sourceEnumerationTimeoutMs ?? DEFAULT_SOURCE_TIMEOUT_MS;
     this.idFactory = options.idFactory ?? randomUUID;
     this.now = options.now ?? options.clock ?? (() => new Date());
+    this.initialization = this.cleanupManagedFiles();
   }
 
   public getState(): ScreenshotState {
@@ -192,65 +199,127 @@ export class ScreenshotService {
     };
   }
 
-  public async capture(): Promise<ScreenshotItem> {
+  public capture(): Promise<ScreenshotItem> {
     if (this.capturing) {
-      throw captureInProgress();
+      return Promise.reject(captureInProgress());
     }
     if (this.disposed) {
-      throw captureFailed();
+      return Promise.reject(captureFailed());
     }
 
     this.capturing = true;
-    try {
-      this.permission = this.readPermission();
-      const permissionFailure = this.getPlatform() === "darwin" ? permissionError(this.permission) : null;
-      if (permissionFailure) {
-        throw permissionFailure;
-      }
+    this.emitState();
 
-      const source = await this.selectSource();
-      const imageBytes = source.thumbnail.toPNG();
-      const size = source.thumbnail.getSize();
-      const item: ScreenshotItem = {
-        id: this.idFactory(),
-        createdAt: this.now().toISOString(),
-        width: size.width,
-        height: size.height,
-      };
+    let notifyTimeout: ((error: ScreenshotServiceError) => void) | undefined;
+    const timeoutNotice = new Promise<never>((_, reject) => {
+      notifyTimeout = (error) => reject(error);
+    });
 
-      await this.persist(item.id, imageBytes);
-      this.items.push(item);
-      await this.evictOldest();
-      return { ...item };
-    } catch (error) {
-      if (isServiceError(error)) {
-        throw error;
+    const operation = this.enqueueMutation(async () => {
+      let pendingSource: Promise<void> | undefined;
+      let initialPermission: ScreenshotPermission = "unavailable";
+
+      try {
+        await this.initialization;
+        initialPermission = this.readPermission();
+        this.permission = initialPermission;
+        const permissionFailure = this.getPlatform() === "darwin" && initialPermission !== "not-determined"
+          ? permissionError(initialPermission)
+          : null;
+        if (permissionFailure) {
+          throw permissionFailure;
+        }
+
+        const source = await this.selectSource((settled, timeoutError) => {
+          pendingSource = settled;
+          notifyTimeout?.(timeoutError);
+        });
+        const imageBytes = source.thumbnail.toPNG();
+        const size = source.thumbnail.getSize();
+        const item: ScreenshotItem = {
+          id: this.idFactory(),
+          createdAt: this.now().toISOString(),
+          width: size.width,
+          height: size.height,
+        };
+
+        await this.persist(item.id, imageBytes);
+        this.items.push(item);
+        await this.evictOldest();
+        return { ...item };
+      } catch (error) {
+        if (this.getPlatform() === "darwin" && initialPermission === "not-determined") {
+          this.permission = this.readPermission();
+          const refreshedPermissionError = permissionError(this.permission);
+          if (refreshedPermissionError) {
+            throw refreshedPermissionError;
+          }
+        }
+
+        if (isServiceError(error)) {
+          throw error;
+        }
+        throw captureFailed();
+      } finally {
+        if (pendingSource) {
+          await pendingSource;
+        }
+        this.capturing = false;
+        this.emitState();
       }
-      throw captureFailed();
-    } finally {
-      this.capturing = false;
-    }
+    });
+
+    return Promise.race([operation, timeoutNotice]);
   }
 
-  public async delete(id: string): Promise<ScreenshotState> {
-    const index = this.items.findIndex((item) => item.id === id);
-    if (index < 0) {
-      throw screenshotNotFound();
-    }
+  public delete(id: string): Promise<ScreenshotState> {
+    return this.enqueueMutation(async () => {
+      try {
+        await this.initialization;
+        const index = this.items.findIndex((item) => item.id === id);
+        if (index < 0) {
+          throw screenshotNotFound();
+        }
 
-    const [item] = this.items.splice(index, 1);
-    await unlink(join(this.directory, `${item.id}.png`)).catch(() => undefined);
-    return this.getState();
+        const [item] = this.items.splice(index, 1);
+        await unlink(join(this.directory, `${item.id}.png`)).catch(() => undefined);
+        return this.getState();
+      } finally {
+        this.emitState();
+      }
+    });
   }
 
-  public async clear(): Promise<ScreenshotState> {
-    const items = this.items.splice(0);
-    await Promise.all(items.map((item) => unlink(join(this.directory, `${item.id}.png`)).catch(() => undefined)));
-    return this.getState();
+  public clear(): Promise<ScreenshotState> {
+    return this.enqueueMutation(async () => {
+      try {
+        await this.initialization;
+        const items = this.items.splice(0);
+        await Promise.all(items.map((item) => unlink(join(this.directory, `${item.id}.png`)).catch(() => undefined)));
+        await this.cleanupManagedFiles();
+        return this.getState();
+      } finally {
+        this.emitState();
+      }
+    });
   }
 
   public dispose(): void {
     this.disposed = true;
+  }
+
+  private enqueueMutation<T>(mutation: () => Promise<T>): Promise<T> {
+    const operation = this.mutationTail.then(mutation, mutation);
+    this.mutationTail = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  private emitState(): void {
+    try {
+      this.options.onStateChanged?.(this.getState());
+    } catch {
+      // A state subscriber must not break capture or queue mutations.
+    }
   }
 
   private readPermission(): ScreenshotPermission {
@@ -274,10 +343,17 @@ export class ScreenshotService {
     return this.platformDetector();
   }
 
-  private async selectSource(): Promise<ScreenshotSource> {
+  private async selectSource(
+    onTimeout: (settled: Promise<void>, error: ScreenshotServiceError) => void,
+  ): Promise<ScreenshotSource> {
     const point = this.options.screen.getCursorScreenPoint();
     const display = this.options.screen.getDisplayNearestPoint(point);
-    const sources = await this.getSourcesWithTimeout();
+    const scaleFactor = Number.isFinite(display.scaleFactor) && display.scaleFactor > 0 ? display.scaleFactor : 1;
+    const thumbnailSize = {
+      width: Math.max(1, Math.round(display.bounds.width * scaleFactor)),
+      height: Math.max(1, Math.round(display.bounds.height * scaleFactor)),
+    };
+    const sources = await this.getSourcesWithTimeout(thumbnailSize, onTimeout);
     const source = sources.find((candidate) => candidate.display_id === String(display.id));
     if (!source) {
       throw captureFailed();
@@ -285,14 +361,22 @@ export class ScreenshotService {
     return source;
   }
 
-  private async getSourcesWithTimeout(): Promise<readonly ScreenshotSource[]> {
+  private async getSourcesWithTimeout(
+    thumbnailSize: ScreenshotSize,
+    onTimeout: (settled: Promise<void>, error: ScreenshotServiceError) => void,
+  ): Promise<readonly ScreenshotSource[]> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const sourcePromise = Promise.resolve().then(() => this.options.desktopCapturer.getSources({
       types: ["screen"],
-      thumbnailSize: { ...this.thumbnailSize },
+      thumbnailSize: { ...thumbnailSize },
     }));
+    const sourceSettled = sourcePromise.then(() => undefined, () => undefined);
     const timeoutPromise = new Promise<readonly ScreenshotSource[]>((_, reject) => {
-      timer = setTimeout(() => reject(captureFailed()), this.sourceTimeoutMs);
+      timer = setTimeout(() => {
+        const error = captureFailed();
+        onTimeout(sourceSettled, error);
+        reject(error);
+      }, this.sourceTimeoutMs);
     });
 
     try {
@@ -326,5 +410,18 @@ export class ScreenshotService {
       }
       await unlink(join(this.directory, `${oldest.id}.png`)).catch(() => undefined);
     }
+  }
+
+  private async cleanupManagedFiles(): Promise<void> {
+    let files: string[];
+    try {
+      files = await readdir(this.directory);
+    } catch {
+      return;
+    }
+
+    await Promise.all(files
+      .filter((file) => MANAGED_FILE_PATTERN.test(file))
+      .map((file) => unlink(join(this.directory, file)).catch(() => undefined)));
   }
 }

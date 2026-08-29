@@ -15,6 +15,11 @@ export interface ScreenshotSessionOptions<T> {
 
 let sessionActive = false;
 
+/** Returns whether a screenshot session currently owns visibility restoration. */
+export function isScreenshotSessionActive(): boolean {
+  return sessionActive;
+}
+
 const captureInProgress = {
   code: "CAPTURE_IN_PROGRESS",
   message: "A screenshot capture is already in progress.",

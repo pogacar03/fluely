@@ -18,16 +18,32 @@ test("preload exposes only the documented Fluely API groups", async () => {
     },
   };
   const calls = [];
+  const subscriptions = new Map();
   const ipcRenderer = {
     invoke(channel, ...args) {
       calls.push({ channel, args });
       return Promise.resolve({ ok: true, value: null });
+    },
+    on(channel, listener) {
+      subscriptions.set(channel, listener);
+    },
+    removeListener(channel, listener) {
+      if (subscriptions.get(channel) === listener) {
+        subscriptions.delete(channel);
+      }
     },
   };
 
   exposeFluelyApi(contextBridge, ipcRenderer);
 
   assert.deepEqual(Object.keys(exposedApi).sort(), ["app", "screenshots", "settings", "shortcuts"]);
+  assert.deepEqual(Object.keys(exposedApi.screenshots).sort(), [
+    "capture",
+    "clear",
+    "delete",
+    "get",
+    "onStateChanged",
+  ]);
   assert.equal(exposedApi.ipcRenderer, undefined);
   assert.equal(exposedApi.invoke, undefined);
   await exposedApi.settings.get();
@@ -38,6 +54,19 @@ test("preload exposes only the documented Fluely API groups", async () => {
   await exposedApi.screenshots.capture();
   await exposedApi.screenshots.delete("11111111-1111-4111-8111-111111111111");
   await exposedApi.screenshots.clear();
+  let receivedState;
+  const unsubscribe = exposedApi.screenshots.onStateChanged((state) => {
+    receivedState = state;
+  });
+  assert.equal(typeof unsubscribe, "function");
+  subscriptions.get("screenshots:state-changed")({}, {
+    items: [],
+    capturing: true,
+    permission: "granted",
+  });
+  assert.equal(receivedState.capturing, true);
+  unsubscribe();
+  assert.equal(subscriptions.size, 0);
   assert.deepEqual(calls.map((call) => call.channel), [
     "settings:get",
     "settings:update",
@@ -156,6 +185,7 @@ test("main IPC rejects unsafe screenshot IDs before calling the service", async 
 test("settings reset reapplies the default capture protection state", async () => {
   const registrations = new Map();
   const appliedPrivacy = [];
+  const appliedShortcuts = [];
   const ipcMain = {
     handle(channel, handler) {
       registrations.set(channel, handler);
@@ -190,6 +220,7 @@ test("settings reset reapplies the default capture protection state", async () =
       clear: async () => ({ items: [], capturing: false, permission: "unavailable" }),
     },
     applyPrivacy: (enabled) => appliedPrivacy.push(enabled),
+    applyShortcuts: (shortcuts) => appliedShortcuts.push(shortcuts),
     getAppStatus: () => ({ name: "Fluely", version: "0.1.0", platform: "darwin", visible: true }),
   });
 
@@ -197,4 +228,118 @@ test("settings reset reapplies the default capture protection state", async () =
 
   assert.equal(result.ok, true);
   assert.deepEqual(appliedPrivacy, [true]);
+  assert.deepEqual(appliedShortcuts, [resetSettings.shortcuts]);
+});
+
+test("settings update reapplies persisted shortcuts after a successful save", async () => {
+  const registrations = new Map();
+  const appliedShortcuts = [];
+  const requested = {
+    toggleVisibility: "CommandOrControl+K",
+    captureScreenshot: "CommandOrControl+Shift+9",
+    analyzeQueue: "CommandOrControl+L",
+    captureAndAnalyze: "CommandOrControl+Shift+L",
+    cancelAndClear: "CommandOrControl+R",
+  };
+
+  const settings = {
+    get: () => ({ shortcuts: requested, window: { width: 960, height: 720 }, privacy: { captureProtection: true } }),
+    update: async () => ({ ok: true, value: {
+      shortcuts: requested,
+      window: { width: 960, height: 720 },
+      privacy: { captureProtection: true },
+    } }),
+    reset: async () => ({ ok: true, value: {
+      shortcuts: requested,
+      window: { width: 960, height: 720 },
+      privacy: { captureProtection: true },
+    } }),
+  };
+
+  registerIpcHandlers({
+    ipcMain: {
+      handle(channel, handler) {
+        registrations.set(channel, handler);
+      },
+    },
+    settings,
+    shortcuts: {
+      getStatus: () => ({ entries: [], updatedAt: new Date(0).toISOString() }),
+      update: () => ({ ok: true, value: {} }),
+    },
+    screenshots: {
+      getState: () => ({ items: [], capturing: false, permission: "unavailable" }),
+      capture: async () => ({
+        id: "88888888-8888-4888-8888-888888888888",
+        createdAt: "2026-08-30T00:00:00.000Z",
+        width: 1920,
+        height: 1080,
+      }),
+      delete: async () => ({ items: [], capturing: false, permission: "unavailable" }),
+      clear: async () => ({ items: [], capturing: false, permission: "unavailable" }),
+    },
+    applyShortcuts: (shortcuts) => appliedShortcuts.push(shortcuts),
+    getAppStatus: () => ({ name: "Fluely", version: "0.1.0", platform: "darwin", visible: true }),
+  });
+
+  const result = await registrations.get("settings:update")({}, { shortcuts: requested });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(appliedShortcuts, [requested]);
+});
+
+test("screenshot mutation handlers notify complete state snapshots on success and failure", async () => {
+  const registrations = new Map();
+  const notifications = [];
+  let state = { items: [], capturing: false, permission: "granted" };
+  const item = {
+    id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    createdAt: "2026-08-30T00:00:00.000Z",
+    width: 1920,
+    height: 1080,
+  };
+
+  registerIpcHandlers({
+    ipcMain: {
+      handle(channel, handler) {
+        registrations.set(channel, handler);
+      },
+    },
+    settings: {
+      get: () => ({ shortcuts: {}, window: {}, privacy: {} }),
+      update: async () => ({ ok: true, value: {} }),
+      reset: async () => ({ ok: true, value: {} }),
+    },
+    shortcuts: {
+      getStatus: () => ({ entries: [], updatedAt: new Date(0).toISOString() }),
+      update: () => ({ ok: true, value: {} }),
+    },
+    screenshots: {
+      getState: () => state,
+      capture: async () => {
+        state = { items: [item], capturing: false, permission: "granted" };
+        return item;
+      },
+      delete: async () => {
+        state = { items: [], capturing: false, permission: "granted" };
+        return state;
+      },
+      clear: async () => {
+        throw { code: "SCREEN_CAPTURE_FAILED", message: "clear failed", action: "retry" };
+      },
+    },
+    notifyScreenshotState: (nextState) => notifications.push(nextState),
+    getAppStatus: () => ({ name: "Fluely", version: "0.1.0", platform: "linux", visible: true }),
+  });
+
+  await registrations.get("screenshots:capture")();
+  await registrations.get("screenshots:delete")({}, item.id);
+  const clearResult = await registrations.get("screenshots:clear")();
+
+  assert.equal(clearResult.ok, false);
+  assert.equal(notifications.length, 3);
+  for (const notification of notifications) {
+    assert.deepEqual(Object.keys(notification).sort(), ["capturing", "items", "permission"]);
+  }
+  assert.equal(notifications.at(-1).capturing, false);
 });

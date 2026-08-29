@@ -54,6 +54,8 @@ export interface ScreenshotState {
   permission: ScreenshotPermission;
 }
 
+export type ScreenshotStateListener = (state: ScreenshotState) => void;
+
 export type IpcErrorCode =
   | "INVALID_ARGUMENT"
   | "SETTINGS_READ_FAILED"
@@ -121,6 +123,7 @@ export interface FluelyApi {
     capture: () => Promise<IpcResult<ScreenshotItem>>;
     delete: (id: string) => Promise<IpcResult<ScreenshotState>>;
     clear: () => Promise<IpcResult<ScreenshotState>>;
+    onStateChanged: (listener: ScreenshotStateListener) => () => void;
   };
   app: {
     getStatus: () => Promise<IpcResult<AppStatus>>;

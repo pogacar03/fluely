@@ -14,11 +14,21 @@
 
 - Use documented Electron and operating-system capabilities only; do not add monitoring/proctoring/security-product evasion.
 - macOS capture protection is best-effort and must not be described as universally invisible to ScreenCaptureKit.
-- Screen Recording permission remains mandatory; do not bypass or suppress it.
+- Screen Recording permission remains mandatory; do not bypass or suppress it. A first `not-determined` capture must call `desktopCapturer.getSources()` to let macOS present consent, then reread permission on failure.
 - Do not expose screenshot filesystem paths, generic IPC, filesystem, or shell access to the renderer.
-- Store only managed PNGs below `<userData>/screenshots` and retain at most five.
+- Store only session-scoped managed PNGs below `<userData>/screenshots` and retain at most five. On initialization and clear, remove only strict UUID `.png`/`.png.tmp` files; preserve unrelated files.
+- Use the public Electron Dock API on Darwin when capture protection is enabled; restore the Dock when disabled or disposed.
 - Follow strict TDD: add each behavior test, run it and record the expected failure, then implement.
 - Do not add runtime dependencies.
+
+### Fix round 1 decisions
+
+- `ScreenshotService` initializes before any mutation. Capture, delete, clear, and eviction run on one async mutation tail. An overlapping capture returns `CAPTURE_IN_PROGRESS`; delete/clear wait behind it and do not fake-cancel it.
+- Electron source enumeration has no AbortSignal. Fluely returns the stable five-second timeout error to the caller while retaining the underlying Promise as the active gate; `getState().capturing` stays true until it settles.
+- The selected display adapter supplies `id`, `bounds`, and `scaleFactor`; source requests use rounded native captured-pixel dimensions rather than a fixed size.
+- The main process emits full `screenshots:state-changed` snapshots. The preload allowlist adds only `onStateChanged(listener) => unsubscribe` to the four queue methods.
+- Settings update/reset apply saved/default shortcuts through an injected registration dependency after persistence. Conflicts remain represented as unavailable status entries while the requested value is retained.
+- `capture-workflow.ts` is the injectable composition boundary used by main and integration tests; no real Electron app is started by Node tests.
 
 ---
 
@@ -29,9 +39,11 @@
 - Create: `electron/services/CapturePrivacyController.ts`
 - Create: `electron/services/ScreenshotService.ts`
 - Create: `electron/services/screenshot-session.ts`
+- Create: `electron/services/capture-workflow.ts`
 - Create: `electron/services/__tests__/CapturePrivacyController.test.mjs`
 - Create: `electron/services/__tests__/ScreenshotService.test.mjs`
 - Create: `electron/services/__tests__/screenshot-session.test.mjs`
+- Create: `electron/services/__tests__/capture-workflow.test.mjs`
 - Modify: `src/shared/ipc.ts`
 - Modify: `electron/services/settings-core.ts`
 - Modify: `electron/services/ShortcutManager.ts`
@@ -52,7 +64,7 @@
 - `CapturePrivacyController.apply(window, enabled)`, `reassert()`, and `dispose()` own window protection listeners.
 - `ScreenshotService.capture(): Promise<ScreenshotItem>`, `getState(): ScreenshotState`, `delete(id): Promise<ScreenshotState>`, and `clear(): Promise<ScreenshotState>` own the managed queue.
 - `runScreenshotSession({ window, platform, capture, wait }): Promise<T>` owns concurrency-safe visibility restoration. Equivalent names are acceptable only if the resulting interfaces remain focused and typed.
-- Renderer IPC group: `screenshots.get()`, `screenshots.capture()`, `screenshots.delete(id)`, and `screenshots.clear()`.
+- Renderer IPC group: `screenshots.get()`, `screenshots.capture()`, `screenshots.delete(id)`, `screenshots.clear()`, and `screenshots.onStateChanged(listener)` with an unsubscribe return.
 
 - [ ] **Step 1: Add failing capture-protection tests**
 
@@ -76,19 +88,19 @@ Use temporary directories and a fake desktop-capture adapter. Cover permission m
 
 - [ ] **Step 6: Implement ScreenshotService minimally**
 
-Use `desktopCapturer.getSources({ types: ['screen'], thumbnailSize })`, Electron `screen` to choose the display nearest the cursor, `source.display_id` for matching, `thumbnail.toPNG()` for bytes, and `thumbnail.getSize()` for dimensions. Use `crypto.randomUUID()` for IDs. Create the managed directory recursively, write `<id>.png.tmp`, rename to `<id>.png`, and unlink evicted files best-effort. On Darwin consult `systemPreferences.getMediaAccessStatus('screen')`; return stable `IpcError` codes/messages without prompting or bypassing permission.
+Use `desktopCapturer.getSources({ types: ['screen'], thumbnailSize })`, Electron `screen` to choose the display nearest the cursor, `source.display_id` for matching, `thumbnail.toPNG()` for bytes, and `thumbnail.getSize()` for dimensions. Derive `thumbnailSize` from the selected display's rounded native bounds × scale factor. Use `crypto.randomUUID()` for IDs. Create the managed directory recursively, write `<id>.png.tmp`, rename to `<id>.png`, and unlink evicted files best-effort. On Darwin consult `systemPreferences.getMediaAccessStatus('screen')`; allow an initial `not-determined` source request to trigger consent, reread status after failure, and return stable `IpcError` codes without bypassing permission. Track a timed-out source Promise until settle because Electron provides no AbortSignal.
 
 - [ ] **Step 7: Extend settings, contracts, preload, and IPC test-first**
 
-First update settings and IPC tests to expect `privacy.captureProtection: true` and a `screenshots` preload group with only `get`, `capture`, `delete`, and `clear`. Add `SCREEN_CAPTURE_DENIED`, `SCREEN_CAPTURE_RESTRICTED`, `SCREEN_CAPTURE_PERMISSION_REQUIRED`, `SCREEN_CAPTURE_FAILED`, `CAPTURE_IN_PROGRESS`, and `SCREENSHOT_NOT_FOUND` to the error-code union. Add strict ID validation in IPC. Run the focused tests red, implement the typed contracts and handlers, then run them green.
+First update settings and IPC tests to expect `privacy.captureProtection: true` and a `screenshots` preload group with `get`, `capture`, `delete`, `clear`, and the narrow `onStateChanged`/unsubscribe subscription. Add `SCREEN_CAPTURE_DENIED`, `SCREEN_CAPTURE_RESTRICTED`, `SCREEN_CAPTURE_PERMISSION_REQUIRED`, `SCREEN_CAPTURE_FAILED`, `CAPTURE_IN_PROGRESS`, and `SCREENSHOT_NOT_FOUND` to the error-code union. Add strict ID validation in IPC. Run the focused tests red, implement the typed contracts and handlers, then run them green.
 
 - [ ] **Step 8: Wire main-process lifecycle and shortcuts test-first**
 
-Update `ShortcutManager` tests so `captureScreenshot` and `cancelAndClear` are active and invoke their supplied handlers while provider-dependent actions remain unavailable. In `main.ts`, load settings before creating the window, create/apply the privacy controller immediately after BrowserWindow construction, create the screenshot service below `userData`, wrap capture through the screenshot session, and connect shortcut/IPC dependencies. Shortcut errors must be caught and logged. On shutdown dispose controller, shortcuts, and screenshot resources. Run focused tests red then green.
+Update `ShortcutManager` tests so `captureScreenshot` and `cancelAndClear` are active and invoke their supplied handlers while provider-dependent actions remain unavailable. In `main.ts`, load settings before creating the window, create/apply the privacy controller immediately after BrowserWindow construction, apply the public Darwin Dock policy, create the screenshot service below `userData`, wrap capture through the screenshot session and active visibility gate, emit full screenshot state snapshots, and connect shortcut/IPC dependencies. Shortcut errors must be caught and logged. On shutdown dispose controller, shortcuts, and screenshot resources. Run focused tests red then green.
 
 - [ ] **Step 9: Add the renderer status and controls**
 
-Display capture protection state, permission state, queue count, newest dimensions, Capture, and Clear controls in the existing status panel. Refresh screenshot state after renderer actions and when the window regains focus. Preserve the current visual language and do not render paths or raw image bytes.
+Display capture protection state, permission state, queue count, newest dimensions, Capture, and Clear controls in the existing status panel. Subscribe to `screenshots.onStateChanged` with cleanup, and retain refreshes after renderer actions and when the window regains focus. Preserve the current visual language and do not render paths or raw image bytes.
 
 - [ ] **Step 10: Document the actual guarantee**
 
@@ -101,4 +113,3 @@ Run `npm run typecheck`, `npm test`, `npm run build`, and `npm run package:dir`.
 - [ ] **Step 12: Commit**
 
 Commit the complete vertical slice with message `feat: add capture privacy and background screenshots`. Write the required implementation report with RED/GREEN evidence, files changed, verification output, and any platform limitations that still require manual macOS validation.
-

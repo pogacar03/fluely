@@ -16,6 +16,8 @@ export interface WindowAdapter {
   isVisible(): boolean;
   show(): void;
   hide(): void;
+  isCaptureActive?: () => boolean;
+  toggleVisibility?: () => void;
 }
 
 export interface ShortcutActionHandlers {
@@ -152,9 +154,13 @@ export class ShortcutManager {
   private callbackFor(action: ShortcutAction): () => void {
     if (action === "toggleVisibility") {
       return () => this.invokeSafely(action, () => {
+        if (this.window.toggleVisibility) {
+          this.window.toggleVisibility();
+          return;
+        }
         if (this.window.isVisible()) {
           this.window.hide();
-        } else {
+        } else if (!this.window.isCaptureActive?.()) {
           this.window.show();
         }
       });

@@ -5,6 +5,7 @@ import type {
   IpcResult,
   SettingsPatch,
   ScreenshotItem,
+  ScreenshotStateListener,
   ScreenshotState,
   ShortcutSettings,
   ShortcutStatus,
@@ -16,6 +17,8 @@ export interface ContextBridgeAdapter {
 
 export interface IpcRendererAdapter {
   invoke(channel: string, ...args: unknown[]): Promise<unknown>;
+  on?: (channel: string, listener: (...args: unknown[]) => void) => unknown;
+  removeListener?: (channel: string, listener: (...args: unknown[]) => void) => unknown;
 }
 
 function invoke<T>(ipcRenderer: IpcRendererAdapter, channel: string, ...args: unknown[]): Promise<IpcResult<T>> {
@@ -41,6 +44,20 @@ export function exposeFluelyApi(
       capture: () => invoke<ScreenshotItem>(ipcRenderer, "screenshots:capture"),
       delete: (id: string) => invoke<ScreenshotState>(ipcRenderer, "screenshots:delete", id),
       clear: () => invoke<ScreenshotState>(ipcRenderer, "screenshots:clear"),
+      onStateChanged: (listener: ScreenshotStateListener) => {
+        if (!ipcRenderer.on || !ipcRenderer.removeListener) {
+          return () => undefined;
+        }
+
+        const eventListener = (...args: unknown[]) => {
+          const state = args[1] as ScreenshotState | undefined;
+          if (state) {
+            listener(state);
+          }
+        };
+        ipcRenderer.on("screenshots:state-changed", eventListener);
+        return () => ipcRenderer.removeListener?.("screenshots:state-changed", eventListener);
+      },
     },
     app: {
       getStatus: () => invoke<AppStatus>(ipcRenderer, "app:get-status"),

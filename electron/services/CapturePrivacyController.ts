@@ -8,6 +8,11 @@ export interface CapturePrivacyWindow {
   isDestroyed?: () => boolean;
 }
 
+export interface DockPrivacyAdapter {
+  hide(): void | PromiseLike<unknown>;
+  show(): void | PromiseLike<unknown>;
+}
+
 export type PlatformDetector = NodeJS.Platform | (() => NodeJS.Platform);
 
 function isDestroyed(window: CapturePrivacyWindow): boolean {
@@ -22,7 +27,10 @@ export class CapturePrivacyController {
     this.reassert();
   };
 
-  public constructor(platform: PlatformDetector = process.platform) {
+  public constructor(
+    platform: PlatformDetector = process.platform,
+    private readonly dock?: DockPrivacyAdapter,
+  ) {
     this.platformDetector = typeof platform === "function" ? platform : () => platform;
   }
 
@@ -36,6 +44,7 @@ export class CapturePrivacyController {
       return;
     }
 
+    this.applyToDock();
     this.applyToWindow(window);
     try {
       window.on("show", this.onShow);
@@ -49,11 +58,19 @@ export class CapturePrivacyController {
       return;
     }
 
+    this.applyToDock();
     this.applyToWindow(this.window);
   }
 
   public dispose(): void {
     this.detach();
+    if (this.platformDetector() === "darwin") {
+      try {
+        void Promise.resolve(this.dock?.show()).catch(() => undefined);
+      } catch {
+        // Dock restoration is best-effort during application teardown.
+      }
+    }
     this.window = null;
   }
 
@@ -92,6 +109,22 @@ export class CapturePrivacyController {
       this.window.removeListener("show", this.onShow);
     } catch {
       // Ignore teardown races with a destroyed BrowserWindow.
+    }
+  }
+
+  private applyToDock(): void {
+    if (this.platformDetector() !== "darwin" || !this.dock) {
+      return;
+    }
+
+    try {
+      if (this.enabled) {
+        void Promise.resolve(this.dock.hide()).catch(() => undefined);
+      } else {
+        void Promise.resolve(this.dock.show()).catch(() => undefined);
+      }
+    } catch {
+      // Dock visibility is best-effort and can be unavailable during teardown.
     }
   }
 }

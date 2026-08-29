@@ -5,7 +5,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const modulePath = path.resolve(__dirname, "../../../dist-electron/electron/services/screenshot-session.js");
-const { runScreenshotSession } = await import(pathToFileURL(modulePath).href);
+const shortcutModulePath = path.resolve(__dirname, "../../../dist-electron/electron/services/ShortcutManager.js");
+const { isScreenshotSessionActive, runScreenshotSession } = await import(pathToFileURL(modulePath).href);
+const { ShortcutManager } = await import(pathToFileURL(shortcutModulePath).href);
 
 function makeWindow(visible = true) {
   return {
@@ -178,4 +180,50 @@ test("screenshot session rejects an overlapping capture", async () => {
   releaseCapture();
   assert.equal(await firstCapture, "first capture");
   assert.equal(window.visible, true);
+});
+
+test("visibility toggle remains hidden while the screenshot session is waiting or capturing", async () => {
+  const window = makeWindow(true);
+  const callbacks = new Map();
+  const shortcuts = new ShortcutManager(
+    {
+      register: (accelerator, callback) => {
+        callbacks.set(accelerator, callback);
+        return true;
+      },
+      unregisterAll: () => callbacks.clear(),
+    },
+    {
+      isVisible: () => window.isVisible(),
+      show: () => window.show(),
+      hide: () => window.hide(),
+      isCaptureActive: () => isScreenshotSessionActive(),
+    },
+  );
+  shortcuts.registerAll({
+    toggleVisibility: "CommandOrControl+B",
+    captureScreenshot: "CommandOrControl+Shift+8",
+    analyzeQueue: "CommandOrControl+Enter",
+    captureAndAnalyze: "CommandOrControl+Shift+Enter",
+    cancelAndClear: "CommandOrControl+R",
+  });
+
+  await runScreenshotSession({
+    window,
+    platform: "linux",
+    capture: async () => {
+      callbacks.get("CommandOrControl+B")();
+      assert.equal(isScreenshotSessionActive(), true);
+      assert.equal(window.isVisible(), false);
+      return "captured";
+    },
+    wait: async () => {
+      callbacks.get("CommandOrControl+B")();
+      assert.equal(isScreenshotSessionActive(), true);
+      assert.equal(window.isVisible(), false);
+    },
+  });
+
+  assert.equal(isScreenshotSessionActive(), false);
+  assert.equal(window.isVisible(), true);
 });

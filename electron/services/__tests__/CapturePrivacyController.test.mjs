@@ -86,3 +86,39 @@ test("capture protection uses content protection on non-macOS platforms", () => 
   assert.deepEqual(window.calls.contentProtection, [true, true]);
   assert.deepEqual(window.calls.hiddenInMissionControl, []);
 });
+
+test("capture privacy hides the macOS Dock while enabled and restores it when disabled", () => {
+  const window = makeWindow();
+  const dockCalls = [];
+  const controller = new CapturePrivacyController("darwin", {
+    hide: () => dockCalls.push("hide"),
+    show: () => dockCalls.push("show"),
+  });
+
+  controller.apply(window, true);
+  assert.deepEqual(dockCalls, ["hide"]);
+
+  controller.reassert();
+  assert.deepEqual(dockCalls, ["hide", "hide"]);
+
+  controller.apply(window, false);
+  assert.deepEqual(dockCalls, ["hide", "hide", "show"]);
+});
+
+test("Dock policy is applied before content protection is reasserted", () => {
+  const order = [];
+  const window = makeWindow();
+  window.setContentProtection = () => order.push("content");
+  window.setHiddenInMissionControl = () => order.push("mission-control");
+  const controller = new CapturePrivacyController("darwin", {
+    hide: () => order.push("dock-hide"),
+    show: () => order.push("dock-show"),
+  });
+
+  controller.apply(window, true);
+  assert.deepEqual(order, ["dock-hide", "content", "mission-control"]);
+
+  order.length = 0;
+  controller.reassert();
+  assert.deepEqual(order, ["dock-hide", "content", "mission-control"]);
+});

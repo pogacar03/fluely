@@ -9,7 +9,7 @@ const corePath = path.resolve(__dirname, "../../../dist-electron/electron/servic
 const { ShortcutManager } = await import(pathToFileURL(modulePath).href);
 const { DEFAULT_SETTINGS } = await import(pathToFileURL(corePath).href);
 
-function makeManager({ failAccelerator, visible = false } = {}) {
+function makeManager({ failAccelerator, visible = false, captureActive = false } = {}) {
   const callbacks = new Map();
   const registerCalls = [];
   const unregisterCalls = [];
@@ -23,6 +23,9 @@ function makeManager({ failAccelerator, visible = false } = {}) {
     },
     hide() {
       this.visible = false;
+    },
+    isCaptureActive() {
+      return captureActive;
     },
   };
   const actions = { analyze: 0, capture: 0, cancel: 0 };
@@ -117,6 +120,15 @@ test("toggle shortcut changes visibility without invoking analysis", () => {
 
   assert.equal(window.visible, true);
   assert.equal(actions.analyze, 0);
+});
+
+test("toggle shortcut does not show a hidden window during an active capture", () => {
+  const { manager, callbacks, window } = makeManager({ visible: false, captureActive: true });
+  manager.registerAll(DEFAULT_SETTINGS.shortcuts);
+
+  callbacks.get(DEFAULT_SETTINGS.shortcuts.toggleVisibility)();
+
+  assert.equal(window.visible, false);
 });
 
 test("capture and cancel shortcuts invoke supplied handlers while provider shortcuts remain unavailable", () => {
