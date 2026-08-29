@@ -33,8 +33,8 @@ Fluely is currently in active early development. The first release is being deli
 
 | Milestone | Focus | Status |
 | --- | --- | --- |
-| 1 | Electron foundation, secure IPC, settings, shortcuts | Complete locally |
-| 2 | Screenshot queue, vision requests, streaming answers | Planned |
+| 1 | Electron foundation, secure IPC, settings, shortcuts, capture privacy, screenshot queue | Complete locally |
+| 2 | Vision requests, streaming answers | Planned |
 | 3 | Shared conversation context and phone mirror | Planned |
 | 4 | Microphone input, VAD, pluggable STT | Planned |
 | 5 | Packaging, performance, and release validation | Planned |
@@ -83,6 +83,14 @@ The renderer does not get filesystem, shell, or secret access. Provider adapters
 | Cancel / clear | `⌘ R` | Cancels the request and clears the queue |
 
 Shortcuts will be configurable, validated on registration, and surfaced when the operating system reports a conflict.
+
+## Background screenshots and capture privacy
+
+`⌘ ⇧ 8` captures the display nearest the pointer through Electron's documented `desktopCapturer` API, even when Fluely is in the background. Before capture, Fluely hides its own window, waits briefly for the compositor, and restores the previous visible state without activating the app on macOS. The managed queue stores at most five PNGs below Fluely's local user-data directory; the renderer receives only opaque IDs, timestamps, and dimensions, never filesystem paths or image bytes.
+
+Capture protection is enabled by default with Electron's `setContentProtection(true)` and is reapplied when the window is shown. On macOS, Screen Recording permission is required. Fluely does not prompt for, bypass, or suppress that operating-system consent: denied, restricted, and not-yet-decided states are reported with the corresponding Settings guidance.
+
+This protection is best-effort. macOS applications that capture through ScreenCaptureKit can still capture a protected Electron window, so Fluely does not claim universal invisibility. The hide-before-capture session is the additional measure used to keep Fluely out of the PNG it creates; supported capture tools may still differ in how they honor content protection.
 
 ## Technology direction
 

@@ -18,21 +18,53 @@ export interface WindowSettings {
   height: number;
 }
 
+export interface PrivacySettings {
+  captureProtection: boolean;
+}
+
 export interface FluelySettings {
   shortcuts: ShortcutSettings;
   window: WindowSettings;
+  privacy: PrivacySettings;
 }
 
 export type SettingsPatch = Partial<{
   shortcuts: Partial<ShortcutSettings>;
   window: Partial<WindowSettings>;
+  privacy: Partial<PrivacySettings>;
 }>;
+
+export type ScreenshotPermission =
+  | "granted"
+  | "denied"
+  | "restricted"
+  | "not-determined"
+  | "unavailable";
+
+export interface ScreenshotItem {
+  id: string;
+  createdAt: string;
+  width: number;
+  height: number;
+}
+
+export interface ScreenshotState {
+  items: ScreenshotItem[];
+  capturing: boolean;
+  permission: ScreenshotPermission;
+}
 
 export type IpcErrorCode =
   | "INVALID_ARGUMENT"
   | "SETTINGS_READ_FAILED"
   | "SETTINGS_WRITE_FAILED"
   | "SHORTCUT_CONFLICT"
+  | "SCREEN_CAPTURE_DENIED"
+  | "SCREEN_CAPTURE_RESTRICTED"
+  | "SCREEN_CAPTURE_PERMISSION_REQUIRED"
+  | "SCREEN_CAPTURE_FAILED"
+  | "CAPTURE_IN_PROGRESS"
+  | "SCREENSHOT_NOT_FOUND"
   | "INTERNAL_ERROR";
 
 export interface IpcError {
@@ -83,6 +115,12 @@ export interface FluelyApi {
   shortcuts: {
     get: () => Promise<IpcResult<ShortcutStatus>>;
     update: (shortcuts: ShortcutSettings) => Promise<IpcResult<ShortcutStatus>>;
+  };
+  screenshots: {
+    get: () => Promise<IpcResult<ScreenshotState>>;
+    capture: () => Promise<IpcResult<ScreenshotItem>>;
+    delete: (id: string) => Promise<IpcResult<ScreenshotState>>;
+    clear: () => Promise<IpcResult<ScreenshotState>>;
   };
   app: {
     getStatus: () => Promise<IpcResult<AppStatus>>;

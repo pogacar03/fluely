@@ -4,6 +4,8 @@ import type {
   FluelySettings,
   IpcResult,
   SettingsPatch,
+  ScreenshotItem,
+  ScreenshotState,
   ShortcutSettings,
   ShortcutStatus,
 } from "../src/shared/ipc";
@@ -33,6 +35,12 @@ export function exposeFluelyApi(
     shortcuts: {
       get: () => invoke<ShortcutStatus>(ipcRenderer, "shortcuts:get"),
       update: (shortcuts: ShortcutSettings) => invoke<ShortcutStatus>(ipcRenderer, "shortcuts:update", shortcuts),
+    },
+    screenshots: {
+      get: () => invoke<ScreenshotState>(ipcRenderer, "screenshots:get"),
+      capture: () => invoke<ScreenshotItem>(ipcRenderer, "screenshots:capture"),
+      delete: (id: string) => invoke<ScreenshotState>(ipcRenderer, "screenshots:delete", id),
+      clear: () => invoke<ScreenshotState>(ipcRenderer, "screenshots:clear"),
     },
     app: {
       getStatus: () => invoke<AppStatus>(ipcRenderer, "app:get-status"),

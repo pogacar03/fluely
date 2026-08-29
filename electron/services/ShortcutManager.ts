@@ -19,10 +19,10 @@ export interface WindowAdapter {
 }
 
 export interface ShortcutActionHandlers {
-  captureScreenshot?: () => void;
-  analyzeQueue?: () => void;
-  captureAndAnalyze?: () => void;
-  cancelAndClear?: () => void;
+  captureScreenshot?: () => void | Promise<void>;
+  analyzeQueue?: () => void | Promise<void>;
+  captureAndAnalyze?: () => void | Promise<void>;
+  cancelAndClear?: () => void | Promise<void>;
 }
 
 const SHORTCUT_ACTIONS: readonly ShortcutAction[] = [
@@ -34,10 +34,8 @@ const SHORTCUT_ACTIONS: readonly ShortcutAction[] = [
 ];
 
 const PLACEHOLDER_ACTIONS = new Set<ShortcutAction>([
-  "captureScreenshot",
   "analyzeQueue",
   "captureAndAnalyze",
-  "cancelAndClear",
 ]);
 
 function invalidShortcut(message: string): IpcError {
@@ -84,6 +82,9 @@ export class ShortcutManager {
     private readonly globalShortcut: GlobalShortcutAdapter,
     private readonly window: WindowAdapter,
     private readonly handlers: ShortcutActionHandlers = {},
+    private readonly onError: (action: ShortcutAction, error: unknown) => void = (action, error) => {
+      console.error(`Fluely ${action} shortcut failed.`, error);
+    },
   ) {}
 
   public registerAll(shortcuts: ShortcutSettings): IpcResult<ShortcutStatus> {
@@ -150,15 +151,27 @@ export class ShortcutManager {
 
   private callbackFor(action: ShortcutAction): () => void {
     if (action === "toggleVisibility") {
-      return () => {
+      return () => this.invokeSafely(action, () => {
         if (this.window.isVisible()) {
           this.window.hide();
         } else {
           this.window.show();
         }
-      };
+      });
     }
 
-    return this.handlers[action] ?? (() => undefined);
+    const handler = this.handlers[action];
+    return handler ? () => this.invokeSafely(action, handler) : () => undefined;
+  }
+
+  private invokeSafely(action: ShortcutAction, handler: () => void | Promise<void>): void {
+    try {
+      const result = handler();
+      if (result && typeof result === "object" && "catch" in result && typeof result.catch === "function") {
+        void result.catch((error: unknown) => this.onError(action, error));
+      }
+    } catch (error) {
+      this.onError(action, error);
+    }
   }
 }

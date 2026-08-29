@@ -3,6 +3,7 @@ import type {
   FluelySettings,
   IpcError,
   IpcResult,
+  ScreenshotState,
   ShortcutAction,
   ShortcutStatus,
 } from "../shared/ipc";
@@ -23,27 +24,54 @@ function getShortcutEntry(status: ShortcutStatus | null, action: ShortcutAction)
   return status?.entries.find((entry) => entry.action === action);
 }
 
+function permissionLabel(permission: ScreenshotState["permission"]): string {
+  switch (permission) {
+    case "granted":
+      return "Granted";
+    case "denied":
+      return "Denied";
+    case "restricted":
+      return "Restricted";
+    case "not-determined":
+      return "Needs permission";
+    default:
+      return "Unavailable";
+  }
+}
+
 export function App() {
   const [settings, setSettings] = useState<FluelySettings | null>(null);
   const [draft, setDraft] = useState<FluelySettings | null>(null);
   const [shortcutStatus, setShortcutStatus] = useState<ShortcutStatus | null>(null);
+  const [screenshotState, setScreenshotState] = useState<ScreenshotState | null>(null);
   const [appVersion, setAppVersion] = useState("0.1.0");
   const [busy, setBusy] = useState(true);
+  const [screenshotBusy, setScreenshotBusy] = useState(false);
   const [notice, setNotice] = useState<{ tone: "success" | "error"; text: string } | null>(null);
 
   useEffect(() => {
     let active = true;
 
+    async function refreshScreenshotState() {
+      const result = await window.fluely.screenshots.get();
+      if (result.ok) {
+        setScreenshotState(result.value);
+      } else {
+        setNotice({ tone: "error", text: `${result.error.message} ${result.error.action}` });
+      }
+    }
+
     Promise.all([
       window.fluely.settings.get(),
       window.fluely.shortcuts.get(),
       window.fluely.app.getStatus(),
-    ]).then(([settingsResult, shortcutsResult, appResult]) => {
+      window.fluely.screenshots.get(),
+    ]).then(([settingsResult, shortcutsResult, appResult, screenshotsResult]) => {
       if (!active) {
         return;
       }
 
-      const error = getError(settingsResult) ?? getError(shortcutsResult) ?? getError(appResult);
+      const error = getError(settingsResult) ?? getError(shortcutsResult) ?? getError(appResult) ?? getError(screenshotsResult);
       if (error) {
         setNotice({ tone: "error", text: `${error.message} ${error.action}` });
       } else {
@@ -57,6 +85,9 @@ export function App() {
         if (appResult.ok) {
           setAppVersion(appResult.value.version);
         }
+        if (screenshotsResult.ok) {
+          setScreenshotState(screenshotsResult.value);
+        }
       }
       setBusy(false);
     }).catch(() => {
@@ -69,10 +100,87 @@ export function App() {
       }
     });
 
+    const refreshOnFocus = () => {
+      void refreshScreenshotState().catch(() => {
+        if (active) {
+          setNotice({
+            tone: "error",
+            text: "Fluely could not refresh its screenshot queue. Restart the app and try again.",
+          });
+        }
+      });
+    };
+    window.addEventListener("focus", refreshOnFocus);
+
     return () => {
       active = false;
+      window.removeEventListener("focus", refreshOnFocus);
     };
   }, []);
+
+  async function captureScreenshot() {
+    setScreenshotBusy(true);
+    try {
+      const result = await window.fluely.screenshots.capture();
+      if (result.ok) {
+        setNotice({
+          tone: "success",
+          text: `Captured ${result.value.width} × ${result.value.height} display pixels.`,
+        });
+      } else {
+        setNotice({ tone: "error", text: `${result.error.message} ${result.error.action}` });
+      }
+    } catch {
+      setNotice({
+        tone: "error",
+        text: "Fluely could not capture the display. Restart the app and try again.",
+      });
+    } finally {
+      try {
+        const refreshed = await window.fluely.screenshots.get();
+        if (refreshed.ok) {
+          setScreenshotState(refreshed.value);
+        }
+      } catch {
+        setNotice({
+          tone: "error",
+          text: "Fluely could not refresh its screenshot queue. Restart the app and try again.",
+        });
+      }
+      setScreenshotBusy(false);
+    }
+  }
+
+  async function clearScreenshots() {
+    setScreenshotBusy(true);
+    try {
+      const result = await window.fluely.screenshots.clear();
+      if (result.ok) {
+        setScreenshotState(result.value);
+        setNotice({ tone: "success", text: "Screenshot queue cleared." });
+      } else {
+        setNotice({ tone: "error", text: `${result.error.message} ${result.error.action}` });
+      }
+    } catch {
+      setNotice({
+        tone: "error",
+        text: "Fluely could not clear its screenshot queue. Restart the app and try again.",
+      });
+    } finally {
+      try {
+        const refreshed = await window.fluely.screenshots.get();
+        if (refreshed.ok) {
+          setScreenshotState(refreshed.value);
+        }
+      } catch {
+        setNotice({
+          tone: "error",
+          text: "Fluely could not refresh its screenshot queue. Restart the app and try again.",
+        });
+      }
+      setScreenshotBusy(false);
+    }
+  }
 
   function updateShortcut(action: ShortcutAction, value: string) {
     setDraft((current) => current ? {
@@ -123,6 +231,7 @@ export function App() {
   }
 
   const activeSettings = draft ?? settings;
+  const newestScreenshot = screenshotState?.items.at(-1);
 
   return (
     <main className="app-shell">
@@ -158,7 +267,7 @@ export function App() {
           </p>
           <div className="hero-actions">
             <span className="build-chip">v{appVersion} · local preview</span>
-            <span className="muted-note">Capture and providers are next.</span>
+            <span className="muted-note">Capture protection and queue are local.</span>
           </div>
         </div>
         <div className="hero-orbit" aria-hidden="true">
@@ -231,6 +340,24 @@ export function App() {
               <span>AI provider</span>
               <span className="status-value pending">Not configured</span>
             </div>
+            <div className="status-row">
+              <span>Capture protection</span>
+              <span className={`status-value ${activeSettings?.privacy.captureProtection ? "ready" : "pending"}`}>
+                {activeSettings?.privacy.captureProtection ? "Enabled" : "Disabled"}
+              </span>
+            </div>
+            <div className="status-row">
+              <span>Screen Recording</span>
+              <span className={`status-value ${screenshotState?.permission === "granted" ? "ready" : "pending"}`}>
+                {screenshotState ? permissionLabel(screenshotState.permission) : "Loading"}
+              </span>
+            </div>
+            <div className="status-row">
+              <span>Screenshot queue</span>
+              <span className="status-value ready">
+                {screenshotState?.items.length ?? 0} / 5
+              </span>
+            </div>
           </div>
 
           <div className="settings-block">
@@ -265,6 +392,34 @@ export function App() {
                   } : current)}
                 />
               </label>
+            </div>
+          </div>
+
+          <div className="settings-block screenshot-block">
+            <div className="settings-block-heading">
+              <span>Background screenshots</span>
+              <span>{newestScreenshot ? `${newestScreenshot.width} × ${newestScreenshot.height}` : "No captures"}</span>
+            </div>
+            <p className="settings-help">
+              Captures the display nearest the pointer while Fluely stays out of the frame.
+            </p>
+            <div className="form-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => void clearScreenshots()}
+                disabled={busy || screenshotBusy || !screenshotState?.items.length}
+              >
+                Clear queue
+              </button>
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => void captureScreenshot()}
+                disabled={busy || screenshotBusy || screenshotState?.capturing === true}
+              >
+                {screenshotState?.capturing || screenshotBusy ? "Capturing…" : "Capture"}
+              </button>
             </div>
           </div>
 

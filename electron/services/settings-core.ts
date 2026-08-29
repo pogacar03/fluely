@@ -1,6 +1,7 @@
 import type {
   FluelySettings,
   IpcError,
+  PrivacySettings,
   SettingsPatch,
   ShortcutAction,
   ShortcutSettings,
@@ -23,9 +24,14 @@ const DEFAULT_SHORTCUTS: ShortcutSettings = {
   cancelAndClear: "CommandOrControl+R",
 };
 
+const DEFAULT_PRIVACY: PrivacySettings = {
+  captureProtection: true,
+};
+
 export const DEFAULT_SETTINGS: FluelySettings = {
   shortcuts: { ...DEFAULT_SHORTCUTS },
   window: { width: 960, height: 720 },
+  privacy: { ...DEFAULT_PRIVACY },
 };
 
 const MIN_WINDOW_WIDTH = 480;
@@ -41,6 +47,7 @@ function cloneDefaultSettings(): FluelySettings {
   return {
     shortcuts: { ...DEFAULT_SETTINGS.shortcuts },
     window: { ...DEFAULT_SETTINGS.window },
+    privacy: { ...DEFAULT_SETTINGS.privacy },
   };
 }
 
@@ -92,6 +99,10 @@ export function normalizeSettings(input: unknown): FluelySettings {
     );
   }
 
+  if (isRecord(input.privacy) && typeof input.privacy.captureProtection === "boolean") {
+    settings.privacy.captureProtection = input.privacy.captureProtection;
+  }
+
   return settings;
 }
 
@@ -121,6 +132,14 @@ export function normalizeSettingsPatch(input: unknown): SettingsPatch {
       window.height = input.window.height as number;
     }
     patch.window = window;
+  }
+
+  if (isRecord(input.privacy)) {
+    const privacy: Partial<PrivacySettings> = {};
+    if ("captureProtection" in input.privacy) {
+      privacy.captureProtection = input.privacy.captureProtection as boolean;
+    }
+    patch.privacy = privacy;
   }
 
   return patch;
@@ -177,6 +196,24 @@ export function validateSettingsPatch(input: unknown): IpcError | null {
     }
   }
 
+  if ("privacy" in input && !isRecord(input.privacy)) {
+    return {
+      code: "INVALID_ARGUMENT",
+      message: "Privacy settings must be an object.",
+      action: "Choose whether Fluely should protect its window from capture and try again.",
+    };
+  }
+
+  if (isRecord(input.privacy) &&
+    "captureProtection" in input.privacy &&
+    typeof input.privacy.captureProtection !== "boolean") {
+    return {
+      code: "INVALID_ARGUMENT",
+      message: "Privacy captureProtection must be a boolean.",
+      action: "Choose whether Fluely should protect its window from capture and try again.",
+    };
+  }
+
   return null;
 }
 
@@ -184,5 +221,6 @@ export function mergeSettings(current: FluelySettings, patch: SettingsPatch): Fl
   return normalizeSettings({
     shortcuts: { ...current.shortcuts, ...patch.shortcuts },
     window: { ...current.window, ...patch.window },
+    privacy: { ...current.privacy, ...patch.privacy },
   });
 }

@@ -25,7 +25,7 @@ function makeManager({ failAccelerator, visible = false } = {}) {
       this.visible = false;
     },
   };
-  const actions = { analyze: 0 };
+  const actions = { analyze: 0, capture: 0, cancel: 0 };
   const adapter = {
     register(accelerator, callback) {
       registerCalls.push(accelerator);
@@ -45,10 +45,10 @@ function makeManager({ failAccelerator, visible = false } = {}) {
     },
   };
   const manager = new ShortcutManager(adapter, window, {
-    captureScreenshot: () => undefined,
+    captureScreenshot: () => { actions.capture += 1; },
     analyzeQueue: () => { actions.analyze += 1; },
     captureAndAnalyze: () => undefined,
-    cancelAndClear: () => undefined,
+    cancelAndClear: () => { actions.cancel += 1; },
   });
 
   return { manager, callbacks, registerCalls, unregisterCalls, window, actions };
@@ -78,7 +78,10 @@ test("successful registration exposes each configured shortcut", () => {
   assert.equal(result.value.entries.length, 5);
   assert.deepEqual(registerCalls, Object.values(DEFAULT_SETTINGS.shortcuts));
   assert.equal(result.value.entries.find((entry) => entry.action === "toggleVisibility").available, true);
-  assert.equal(result.value.entries.filter((entry) => entry.action !== "toggleVisibility").every((entry) => !entry.available), true);
+  assert.equal(result.value.entries.find((entry) => entry.action === "captureScreenshot").available, true);
+  assert.equal(result.value.entries.find((entry) => entry.action === "cancelAndClear").available, true);
+  assert.equal(result.value.entries.find((entry) => entry.action === "analyzeQueue").available, false);
+  assert.equal(result.value.entries.find((entry) => entry.action === "captureAndAnalyze").available, false);
 });
 
 test("OS conflicts are reported without changing the requested accelerator", () => {
@@ -114,6 +117,21 @@ test("toggle shortcut changes visibility without invoking analysis", () => {
 
   assert.equal(window.visible, true);
   assert.equal(actions.analyze, 0);
+});
+
+test("capture and cancel shortcuts invoke supplied handlers while provider shortcuts remain unavailable", () => {
+  const { manager, callbacks, actions } = makeManager();
+  manager.registerAll(DEFAULT_SETTINGS.shortcuts);
+
+  callbacks.get(DEFAULT_SETTINGS.shortcuts.captureScreenshot)();
+  callbacks.get(DEFAULT_SETTINGS.shortcuts.cancelAndClear)();
+  callbacks.get(DEFAULT_SETTINGS.shortcuts.analyzeQueue)();
+
+  assert.equal(actions.capture, 1);
+  assert.equal(actions.cancel, 1);
+  assert.equal(actions.analyze, 1);
+  assert.equal(manager.getStatus().entries.find((entry) => entry.action === "analyzeQueue").available, false);
+  assert.equal(manager.getStatus().entries.find((entry) => entry.action === "captureAndAnalyze").available, false);
 });
 
 test("dispose unregisters every active shortcut", () => {

@@ -5,6 +5,8 @@ import type {
   FluelySettings,
   IpcResult,
   SettingsPatch,
+  ScreenshotItem,
+  ScreenshotState,
   ShortcutSettings,
   ShortcutStatus,
 } from "../src/shared/ipc";
@@ -22,6 +24,12 @@ const api: FluelyApi = {
   shortcuts: {
     get: () => invoke<ShortcutStatus>("shortcuts:get"),
     update: (shortcuts: ShortcutSettings) => invoke<ShortcutStatus>("shortcuts:update", shortcuts),
+  },
+  screenshots: {
+    get: () => invoke<ScreenshotState>("screenshots:get"),
+    capture: () => invoke<ScreenshotItem>("screenshots:capture"),
+    delete: (id: string) => invoke<ScreenshotState>("screenshots:delete", id),
+    clear: () => invoke<ScreenshotState>("screenshots:clear"),
   },
   app: {
     getStatus: () => invoke<AppStatus>("app:get-status"),

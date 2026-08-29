@@ -18,7 +18,14 @@ test("normalizeSettings returns Fluely defaults for empty input", () => {
       cancelAndClear: "CommandOrControl+R",
     },
     window: { width: 960, height: 720 },
+    privacy: { captureProtection: true },
   });
+});
+
+test("normalizeSettings keeps capture protection enabled by default and accepts an explicit choice", () => {
+  assert.equal(normalizeSettings({}).privacy.captureProtection, true);
+  assert.equal(normalizeSettings({ privacy: { captureProtection: false } }).privacy.captureProtection, false);
+  assert.equal(normalizeSettings({ privacy: { captureProtection: "no" } }).privacy.captureProtection, true);
 });
 
 test("normalizeSettings clamps unsafe window dimensions", () => {
@@ -64,4 +71,14 @@ test("validateSettingsPatch accepts clamped dimensions and partial shortcuts", (
     }),
     null,
   );
+});
+
+test("validateSettingsPatch rejects a non-boolean capture protection setting", () => {
+  const error = validateSettingsPatch({ privacy: { captureProtection: "disabled" } });
+
+  assert.deepEqual(error, {
+    code: "INVALID_ARGUMENT",
+    message: "Privacy captureProtection must be a boolean.",
+    action: "Choose whether Fluely should protect its window from capture and try again.",
+  });
 });
