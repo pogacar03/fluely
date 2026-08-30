@@ -1,8 +1,10 @@
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -22,6 +24,21 @@ async function makeExecutable(body) {
   await writeFile(executable, `#!/bin/sh\n${body}\n`, "utf8");
   await chmod(executable, 0o755);
   return executable;
+}
+
+function makeFakeProcess() {
+  const child = new EventEmitter();
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.killed = false;
+  child.killCalls = [];
+  child.kill = (signal) => {
+    child.killCalls.push(signal);
+    child.killed = true;
+    return true;
+  };
+  return child;
 }
 
 test("buildArgs preserves the Codex exec contract and repeats image flags", () => {
@@ -80,6 +97,23 @@ test("extractText supports event-msg agent deltas, plain text, and ignores error
   );
 });
 
+test("extractText reads completed agent messages and exposes completed item errors", () => {
+  assert.equal(
+    CodexCliService.extractText(JSON.stringify({
+      type: "item.completed",
+      item: { type: "agent_message", text: "completed answer" },
+    })),
+    "completed answer",
+  );
+  assert.equal(
+    CodexCliService.extractError(JSON.stringify({
+      type: "item.completed",
+      item: { type: "error", message: "completed provider failure" },
+    })),
+    "completed provider failure",
+  );
+});
+
 test("validateExecutable returns a resolved executable without throwing", async () => {
   const executable = await makeExecutable('printf "codex-cli test-version\\n"');
 
@@ -96,6 +130,23 @@ test("validateExecutable reports missing executables as actionable errors", asyn
   assert.equal(result.error.code, "NOT_FOUND");
   assert.match(result.error.message, /not found|could not start/i);
   assert.match(result.error.action, /codex/i);
+});
+
+test("validateExecutable force-kills timed out children and removes process listeners", async () => {
+  const child = makeFakeProcess();
+  const service = new CodexCliService({ spawn: () => child });
+
+  const resultPromise = service.validateExecutable("/tmp/fake-codex", 10);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const result = await resultPromise;
+
+  assert.equal(result.success, false);
+  assert.equal(result.error.code, "TIMEOUT");
+  assert.deepEqual(child.killCalls, ["SIGTERM", "SIGKILL"]);
+  assert.equal(child.listenerCount("error"), 0);
+  assert.equal(child.listenerCount("close"), 0);
+  assert.equal(child.stdout.listenerCount("data"), 0);
+  assert.equal(child.stderr.listenerCount("data"), 0);
 });
 
 test("stream yields parsed deltas and writes the prompt to stdin", async () => {
@@ -117,6 +168,50 @@ test("stream yields parsed deltas and writes the prompt to stdin", async () => {
   }
 
   assert.deepEqual(deltas, ["answer"]);
+});
+
+test("stream yields completed agent item text", async () => {
+  const executable = await makeExecutable([
+    "cat >/dev/null",
+    "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"completed answer\"}}'",
+  ].join("\n"));
+
+  const deltas = [];
+  for await (const delta of CodexCliService.stream(executable, {
+    prompt: "question",
+    model: "gpt-custom",
+    timeoutMs: 1000,
+  })) {
+    deltas.push(delta);
+  }
+
+  assert.deepEqual(deltas, ["completed answer"]);
+});
+
+test("stream handles stdin EPIPE without an unhandled error", async () => {
+  const child = makeFakeProcess();
+  const service = new CodexCliService({
+    spawn: () => {
+      queueMicrotask(() => {
+        child.stdin.emit("error", Object.assign(new Error("write EPIPE"), { code: "EPIPE" }));
+        child.emit("close", 0);
+      });
+      return child;
+    },
+  });
+
+  await assert.rejects(
+    (async () => {
+      for await (const _delta of service.stream("fake-codex", {
+        prompt: "question",
+        model: "gpt-custom",
+        timeoutMs: 1000,
+      })) {
+        // The fake process fails before producing an answer.
+      }
+    })(),
+    /EPIPE|stdin|failed/i,
+  );
 });
 
 test("stream terminates the child when its AbortSignal is aborted", async () => {

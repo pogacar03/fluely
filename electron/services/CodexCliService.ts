@@ -73,6 +73,7 @@ interface ParsedEvent {
   payload?: unknown;
   event?: unknown;
   item?: unknown;
+  text?: unknown;
   role?: unknown;
   message?: unknown;
   error?: unknown;
@@ -140,6 +141,11 @@ function getAgentDelta(value: unknown, depth = 0): string | null {
     }
   }
 
+  const completedAgentText = getCompletedAgentText(record);
+  if (completedAgentText !== null) {
+    return completedAgentText;
+  }
+
   for (const nested of [record.payload, record.event, record.data]) {
     const delta = getAgentDelta(nested, depth + 1);
     if (delta !== null) {
@@ -148,6 +154,18 @@ function getAgentDelta(value: unknown, depth = 0): string | null {
   }
 
   return null;
+}
+
+function getCompletedAgentText(value: unknown): string | null {
+  const record = asRecord(value);
+  if (!record || record.type !== "item.completed") {
+    return null;
+  }
+
+  const item = asRecord(record.item);
+  return item?.type === "agent_message" && typeof item.text === "string"
+    ? item.text
+    : null;
 }
 
 function getErrorMessage(value: unknown, depth = 0): string | null {
@@ -161,6 +179,18 @@ function getErrorMessage(value: unknown, depth = 0): string | null {
   }
 
   const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
+  if (type === "item.completed") {
+    const item = asRecord(record.item);
+    if (item?.type === "error") {
+      if (typeof item.message === "string" && item.message.trim()) {
+        return item.message.trim();
+      }
+      if (typeof item.error === "string" && item.error.trim()) {
+        return item.error.trim();
+      }
+      return "Codex CLI reported an error.";
+    }
+  }
   if (type === "error" || type.endsWith(".error") || type.endsWith("_error") || type === "stream_error") {
     for (const candidate of [record.message, record.error]) {
       if (typeof candidate === "string" && candidate.trim()) {
@@ -339,6 +369,7 @@ export class CodexCliService {
     }
 
     const deltas: string[] = [];
+    const completedMessages: string[] = [];
     const plainText: string[] = [];
     for (const line of raw.split(/\r?\n/)) {
       if (line.trim().length === 0) {
@@ -347,6 +378,11 @@ export class CodexCliService {
 
       try {
         const parsed: unknown = JSON.parse(line);
+        const completedMessage = getCompletedAgentText(parsed);
+        if (completedMessage !== null) {
+          completedMessages.push(completedMessage);
+          continue;
+        }
         const delta = getAgentDelta(parsed);
         if (delta !== null) {
           deltas.push(delta);
@@ -356,7 +392,13 @@ export class CodexCliService {
       }
     }
 
-    return deltas.length > 0 ? deltas.join("") : plainText.join("\n");
+    if (deltas.length > 0) {
+      return deltas.join("");
+    }
+    if (completedMessages.length > 0) {
+      return completedMessages.join("");
+    }
+    return plainText.join("\n");
   }
 
   public extractText(raw: string): string {
@@ -437,36 +479,53 @@ export class CodexCliService {
       let stdout = "";
       let stderr = "";
       let settled = false;
-      const timer = setTimeout(() => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        child.kill("SIGTERM");
-        resolve({
-          success: false,
-          error: createError(
-            "TIMEOUT",
-            `Codex CLI did not respond to --version within ${timeoutMs}ms.`,
-            "Check that the Codex executable is healthy, then retry validation.",
-          ),
-        });
-      }, timeoutMs);
+      let timedOut = false;
+      let timer: NodeJS.Timeout | undefined;
+      let forceKillTimer: NodeJS.Timeout | undefined;
+      const timeoutResult: CodexExecutableValidation = {
+        success: false,
+        error: createError(
+          "TIMEOUT",
+          `Codex CLI did not respond to --version within ${timeoutMs}ms.`,
+          "Check that the Codex executable is healthy, then retry validation.",
+        ),
+      };
 
-      child.stdout.on("data", (chunk: Buffer | string) => {
+      const onStdout = (chunk: Buffer | string): void => {
         stdout += chunk.toString();
-      });
-      child.stderr.on("data", (chunk: Buffer | string) => {
+      };
+      const onStderr = (chunk: Buffer | string): void => {
         stderr += chunk.toString();
-      });
-      child.once("error", (error) => {
+      };
+      const cleanup = (): void => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
+        if (forceKillTimer) {
+          clearTimeout(forceKillTimer);
+          forceKillTimer = undefined;
+        }
+        child.stdout.removeListener("data", onStdout);
+        child.stderr.removeListener("data", onStderr);
+        child.removeListener("error", onError);
+        child.removeListener("close", onClose);
+      };
+      const finish = (result: CodexExecutableValidation): void => {
         if (settled) {
           return;
         }
         settled = true;
-        clearTimeout(timer);
+        cleanup();
+        resolve(result);
+      };
+      const onError = (error: Error): void => {
+        if (timedOut) {
+          finish(timeoutResult);
+          return;
+        }
         const code = (error as NodeJS.ErrnoException).code;
-        resolve({
+        finish({
           success: false,
           error: createError(
             code === "ENOENT" ? "NOT_FOUND" : "VERSION_FAILED",
@@ -478,20 +537,19 @@ export class CodexCliService {
               : "Check the Codex executable permissions and try validation again.",
           ),
         });
-      });
-      child.once("close", (code) => {
-        if (settled) {
+      };
+      const onClose = (code: number | null): void => {
+        if (timedOut) {
+          finish(timeoutResult);
           return;
         }
-        settled = true;
-        clearTimeout(timer);
         if (code === 0) {
-          resolve({ success: true, resolvedPath: candidate });
+          finish({ success: true, resolvedPath: candidate });
           return;
         }
 
         const detail = formatOutput(stderr || stdout);
-        resolve({
+        finish({
           success: false,
           error: createError(
             "VERSION_FAILED",
@@ -499,7 +557,37 @@ export class CodexCliService {
             "Check the Codex executable and run codex --version in Terminal.",
           ),
         });
-      });
+      };
+      const onTimeout = (): void => {
+        if (settled || timedOut) {
+          return;
+        }
+        timedOut = true;
+        // Give a well-behaved CLI a chance to exit, then force-kill a child
+        // that ignores SIGTERM. The result remains a validation timeout in
+        // either case.
+        forceKillTimer = setTimeout(() => {
+          if (settled) {
+            return;
+          }
+          try {
+            child.kill("SIGKILL");
+          } finally {
+            finish(timeoutResult);
+          }
+        }, 250);
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // The force-kill timer still settles the validation result.
+        }
+      };
+
+      child.stdout.on("data", onStdout);
+      child.stderr.on("data", onStderr);
+      child.once("error", onError);
+      child.once("close", onClose);
+      timer = setTimeout(onTimeout, timeoutMs);
     });
   }
 
@@ -582,6 +670,8 @@ export class CodexCliService {
     let closed = false;
     let termination: "abort" | "timeout" | null = null;
     let providerError: string | undefined;
+    let sawAgentDelta = false;
+    const completedMessages: string[] = [];
     let timer: NodeJS.Timeout | undefined;
     let forceKillTimer: NodeJS.Timeout | undefined;
     let stdoutBuffer = "";
@@ -640,6 +730,19 @@ export class CodexCliService {
     options.signal?.addEventListener("abort", onAbort, { once: true });
     timer = setTimeout(() => terminate("timeout"), timeoutMs);
 
+    const onStdinError = (error: Error): void => {
+      processError = toError(error);
+      if (closed) {
+        return;
+      }
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // The process may already be exiting after closing its stdin pipe.
+      }
+      close();
+    };
+
     const handleOutputLine = (line: string): void => {
       if (!line.trim()) {
         return;
@@ -647,8 +750,14 @@ export class CodexCliService {
       try {
         const parsed: unknown = JSON.parse(line);
         providerError ??= getErrorMessage(parsed) ?? undefined;
+        const completedMessage = getCompletedAgentText(parsed);
+        if (completedMessage !== null) {
+          completedMessages.push(completedMessage);
+          return;
+        }
         const delta = getAgentDelta(parsed);
         if (delta !== null) {
+          sawAgentDelta = true;
           enqueue(delta);
         }
       } catch {
@@ -675,6 +784,7 @@ export class CodexCliService {
     child.stderr.on("data", (chunk: Buffer | string) => {
       stderr += chunk.toString();
     });
+    child.stdin.once("error", onStdinError);
     child.once("error", (error) => {
       processError = toError(error);
       close();
@@ -683,6 +793,11 @@ export class CodexCliService {
       if (stdoutBuffer.trim()) {
         handleOutputLine(stdoutBuffer);
         stdoutBuffer = "";
+      }
+      if (!sawAgentDelta) {
+        for (const completedMessage of completedMessages) {
+          enqueue(completedMessage);
+        }
       }
       closeCode = code;
       close();
@@ -708,6 +823,7 @@ export class CodexCliService {
       }
     } finally {
       options.signal?.removeEventListener("abort", onAbort);
+      child.stdin.removeListener("error", onStdinError);
       if (timer) {
         clearTimeout(timer);
       }
