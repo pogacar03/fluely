@@ -1,90 +1,115 @@
 import { useEffect, useRef, useState } from "react";
-import { subscribeToScreenshotState } from "../shared/ipc";
-import { runSettingsAction } from "../shared/settings-actions";
+import { subscribeToAnalysisState, subscribeToScreenshotState } from "../shared/ipc";
 import type {
+  AnalysisState,
+  CodexStatus,
   FluelySettings,
   IpcError,
   IpcResult,
+  SettingsPatch,
   ScreenshotState,
-  ShortcutAction,
-  ShortcutStatus,
 } from "../shared/ipc";
+import { selectWorkspaceMode } from "../shared/workspace-state";
+import { SetupView, type SetupNotice } from "./components/SetupView";
+import { WorkView, type WorkAnalysisRequest } from "./components/WorkView";
 
-const shortcutRows: Array<{ action: ShortcutAction; label: string; fallback: string }> = [
-  { action: "toggleVisibility", label: "Show / hide", fallback: "⌘ B" },
-  { action: "captureScreenshot", label: "Capture screenshot", fallback: "⌘ ⇧ 8" },
-  { action: "analyzeQueue", label: "Analyze queue", fallback: "⌘ Enter" },
-  { action: "captureAndAnalyze", label: "Capture and analyze", fallback: "⌘ ⇧ Enter" },
-  { action: "cancelAndClear", label: "Cancel / clear", fallback: "⌘ R" },
-];
-
-function getError<T>(result: IpcResult<T>): IpcError | null {
-  return result.ok ? null : result.error;
+function describeError(error: IpcError): string {
+  return `${error.message} ${error.action}`;
 }
 
-function getShortcutEntry(status: ShortcutStatus | null, action: ShortcutAction) {
-  return status?.entries.find((entry) => entry.action === action);
+function noticeFromResult(result: IpcResult<unknown>): SetupNotice | null {
+  return result.ok ? null : { tone: "error", text: describeError(result.error) };
 }
 
-function permissionLabel(permission: ScreenshotState["permission"]): string {
-  switch (permission) {
-    case "granted":
-      return "Granted";
-    case "denied":
-      return "Denied";
-    case "restricted":
-      return "Restricted";
-    case "not-determined":
-      return "Needs permission";
-    default:
-      return "Unavailable";
-  }
+function toAnalysisState(event: AnalysisState): AnalysisState {
+  return {
+    status: event.status,
+    text: event.text,
+    model: event.model,
+    screenshotIds: [...event.screenshotIds],
+    startedAt: event.startedAt,
+    updatedAt: event.updatedAt,
+    completedAt: event.completedAt,
+    ...(event.error ? { error: { ...event.error } } : {}),
+  };
+}
+
+function emptyScreenshotState(): ScreenshotState {
+  return { items: [], capturing: false, permission: "unavailable" };
+}
+
+function emptyAnalysisState(): AnalysisState {
+  return {
+    status: "idle",
+    text: "",
+    model: "",
+    screenshotIds: [],
+    startedAt: null,
+    updatedAt: new Date(0).toISOString(),
+    completedAt: null,
+  };
 }
 
 export function App() {
   const [settings, setSettings] = useState<FluelySettings | null>(null);
-  const [draft, setDraft] = useState<FluelySettings | null>(null);
-  const [shortcutStatus, setShortcutStatus] = useState<ShortcutStatus | null>(null);
   const [screenshotState, setScreenshotState] = useState<ScreenshotState | null>(null);
+  const [analysisState, setAnalysisState] = useState<AnalysisState | null>(null);
+  const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
   const [appVersion, setAppVersion] = useState("0.1.0");
   const [busy, setBusy] = useState(true);
-  const [screenshotBusy, setScreenshotBusy] = useState(false);
-  const [notice, setNotice] = useState<{ tone: "success" | "error"; text: string } | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [notice, setNotice] = useState<SetupNotice | null>(null);
   const mountedRef = useRef(true);
+  const opacityRequestRef = useRef(0);
 
   useEffect(() => {
-    mountedRef.current = true;
     let active = true;
+    mountedRef.current = true;
 
     async function refreshScreenshotState() {
-      const result = await window.fluely.screenshots.get();
-      if (result.ok) {
-        setScreenshotState(result.value);
-      } else {
-        setNotice({ tone: "error", text: `${result.error.message} ${result.error.action}` });
+      try {
+        const result = await window.fluely.screenshots.get();
+        if (!active) {
+          return;
+        }
+        if (result.ok) {
+          setScreenshotState(result.value);
+        } else {
+          setNotice(noticeFromResult(result));
+        }
+      } catch {
+        if (active) {
+          setNotice({
+            tone: "error",
+            text: "Fluely could not refresh its screenshot queue. Restart the app and try again.",
+          });
+        }
       }
     }
 
-    Promise.all([
-      window.fluely.settings.get(),
-      window.fluely.shortcuts.get(),
-      window.fluely.app.getStatus(),
-      window.fluely.screenshots.get(),
-    ]).then(([settingsResult, shortcutsResult, appResult, screenshotsResult]) => {
-      if (!active) {
-        return;
-      }
+    async function loadWorkspace() {
+      try {
+        const [settingsResult, shortcutsResult, appResult, screenshotsResult, codexResult, analysisResult] = await Promise.all([
+          window.fluely.settings.get(),
+          window.fluely.shortcuts.get(),
+          window.fluely.app.getStatus(),
+          window.fluely.screenshots.get(),
+          window.fluely.codex.getStatus(),
+          window.fluely.analysis.getStatus(),
+        ]);
 
-      const error = getError(settingsResult) ?? getError(shortcutsResult) ?? getError(appResult) ?? getError(screenshotsResult);
-      if (error) {
-        setNotice({ tone: "error", text: `${error.message} ${error.action}` });
-      } else {
+        if (!active) {
+          return;
+        }
+
+        const firstError = [settingsResult, shortcutsResult, appResult, screenshotsResult, codexResult, analysisResult]
+          .map((result) => noticeFromResult(result))
+          .find((value): value is SetupNotice => value !== null);
+        if (firstError) {
+          setNotice(firstError);
+        }
         if (settingsResult.ok) {
           setSettings(settingsResult.value);
-          setDraft(settingsResult.value);
-        }
-        if (shortcutsResult.ok) {
-          setShortcutStatus(shortcutsResult.value);
         }
         if (appResult.ok) {
           setAppVersion(appResult.value.version);
@@ -92,27 +117,28 @@ export function App() {
         if (screenshotsResult.ok) {
           setScreenshotState(screenshotsResult.value);
         }
-      }
-      setBusy(false);
-    }).catch(() => {
-      if (active) {
-        setNotice({
-          tone: "error",
-          text: "Fluely could not connect to its main process. Restart the app and try again.",
-        });
-        setBusy(false);
-      }
-    });
-
-    const refreshOnFocus = () => {
-      void refreshScreenshotState().catch(() => {
+        if (codexResult.ok) {
+          setCodexStatus(codexResult.value);
+        }
+        if (analysisResult.ok) {
+          setAnalysisState(toAnalysisState(analysisResult.value));
+        }
+      } catch {
         if (active) {
           setNotice({
             tone: "error",
-            text: "Fluely could not refresh its screenshot queue. Restart the app and try again.",
+            text: "Fluely could not connect to its main process. Restart the app and try again.",
           });
         }
-      });
+      } finally {
+        if (active) {
+          setBusy(false);
+        }
+      }
+    }
+
+    const refreshOnFocus = () => {
+      void refreshScreenshotState();
     };
     window.addEventListener("focus", refreshOnFocus);
     const unsubscribeScreenshotState = subscribeToScreenshotState(
@@ -120,332 +146,359 @@ export function App() {
       (state) => setScreenshotState(state),
       () => active,
     );
+    const unsubscribeAnalysisState = subscribeToAnalysisState(
+      window.fluely.analysis,
+      (event) => setAnalysisState(toAnalysisState(event)),
+      () => active,
+    );
+    void loadWorkspace();
 
     return () => {
       active = false;
       mountedRef.current = false;
       window.removeEventListener("focus", refreshOnFocus);
       unsubscribeScreenshotState();
+      unsubscribeAnalysisState();
     };
   }, []);
 
-  async function captureScreenshot() {
-    setScreenshotBusy(true);
-    try {
-      const result = await window.fluely.screenshots.capture();
-      if (result.ok) {
-        setNotice({
-          tone: "success",
-          text: `Captured ${result.value.width} × ${result.value.height} captured pixels.`,
-        });
-      } else {
-        setNotice({ tone: "error", text: `${result.error.message} ${result.error.action}` });
-      }
-    } catch {
-      setNotice({
-        tone: "error",
-        text: "Fluely could not capture the display. Restart the app and try again.",
-      });
-    } finally {
-      try {
-        const refreshed = await window.fluely.screenshots.get();
-        if (refreshed.ok) {
-          setScreenshotState(refreshed.value);
-        }
-      } catch {
-        setNotice({
-          tone: "error",
-          text: "Fluely could not refresh its screenshot queue. Restart the app and try again.",
-        });
-      }
-      setScreenshotBusy(false);
+  function showError(error: IpcError) {
+    if (mountedRef.current) {
+      setNotice({ tone: "error", text: describeError(error) });
     }
   }
 
-  async function clearScreenshots() {
-    setScreenshotBusy(true);
-    try {
-      const result = await window.fluely.screenshots.clear();
-      if (result.ok) {
-        setScreenshotState(result.value);
-        setNotice({ tone: "success", text: "Screenshot queue cleared." });
-      } else {
-        setNotice({ tone: "error", text: `${result.error.message} ${result.error.action}` });
-      }
-    } catch {
-      setNotice({
-        tone: "error",
-        text: "Fluely could not clear its screenshot queue. Restart the app and try again.",
-      });
-    } finally {
-      try {
-        const refreshed = await window.fluely.screenshots.get();
-        if (refreshed.ok) {
-          setScreenshotState(refreshed.value);
-        }
-      } catch {
-        setNotice({
-          tone: "error",
-          text: "Fluely could not refresh its screenshot queue. Restart the app and try again.",
-        });
-      }
-      setScreenshotBusy(false);
-    }
-  }
-
-  function updateShortcut(action: ShortcutAction, value: string) {
-    setDraft((current) => current ? {
-      ...current,
-      shortcuts: { ...current.shortcuts, [action]: value },
-    } : current);
-  }
-
-  async function saveSettings() {
-    if (!draft) {
+  async function startSetup(patch: SettingsPatch) {
+    if (!mountedRef.current) {
       return;
     }
+    setBusy(true);
+    try {
+      const requestedPath = patch.codex?.path;
+      if (typeof requestedPath !== "string" || !requestedPath.trim()) {
+        setNotice({
+          tone: "error",
+          text: "Add a Codex executable path before starting. Use codex when it is on your PATH.",
+        });
+        return;
+      }
 
-    await runSettingsAction({
-      action: "save",
-      api: window.fluely,
-      patch: {
-        shortcuts: draft.shortcuts,
-        window: draft.window,
-      },
-      callbacks: {
-        isActive: () => mountedRef.current,
-        setBusy,
-        setSettings,
-        setDraft,
-        setShortcutStatus,
-        setNotice,
-      },
-    });
+      const validation = await window.fluely.codex.validate(requestedPath.trim());
+      if (!mountedRef.current) {
+        return;
+      }
+      if (!validation.ok) {
+        showError(validation.error);
+        return;
+      }
+      setCodexStatus(validation.value);
+      if (!validation.value.available) {
+        showError(validation.value.error ?? {
+          code: "INTERNAL_ERROR",
+          message: `Fluely could not find ${requestedPath.trim()}.`,
+          action: "Install Codex or update the executable path, then try again.",
+        });
+        return;
+      }
+
+      const saveResult = await window.fluely.settings.update({ ...patch, setupComplete: true });
+      if (!mountedRef.current) {
+        return;
+      }
+      if (!saveResult.ok) {
+        showError(saveResult.error);
+        return;
+      }
+
+      const modeResult = await window.fluely.window.setMode("work");
+      if (!mountedRef.current) {
+        return;
+      }
+      if (!modeResult.ok) {
+        setSettings(saveResult.value);
+        showError(modeResult.error);
+        return;
+      }
+
+      setSettings(modeResult.value);
+      setNotice({ tone: "success", text: "Fluely is ready. Capture a screen and ask your first question." });
+    } catch {
+      if (mountedRef.current) {
+        setNotice({
+          tone: "error",
+          text: "Fluely could not finish setup. Check the Codex path and try again.",
+        });
+      }
+    } finally {
+      if (mountedRef.current) {
+        setBusy(false);
+      }
+    }
   }
 
-  async function resetSettings() {
-    await runSettingsAction({
-      action: "reset",
-      api: window.fluely,
-      callbacks: {
-        isActive: () => mountedRef.current,
-        setBusy,
-        setSettings,
-        setDraft,
-        setShortcutStatus,
-        setNotice,
-      },
-    });
+  async function openSettings() {
+    try {
+      const result = await window.fluely.window.setMode("setup");
+      if (!mountedRef.current) {
+        return;
+      }
+      if (!result.ok) {
+        showError(result.error);
+        return;
+      }
+      setSettings(result.value);
+    } catch {
+      if (mountedRef.current) {
+        setNotice({
+          tone: "error",
+          text: "Fluely could not open settings. Restart the app and try again.",
+        });
+      }
+    }
   }
 
-  const activeSettings = draft ?? settings;
-  const newestScreenshot = screenshotState?.items.at(-1);
+  async function changeOpacity(opacity: number) {
+    const requestId = ++opacityRequestRef.current;
+    try {
+      const result = await window.fluely.window.setOpacity(opacity);
+      if (!mountedRef.current || requestId !== opacityRequestRef.current) {
+        return;
+      }
+      if (!result.ok) {
+        showError(result.error);
+        return;
+      }
+      setSettings((current) => current ? { ...current, window: { ...current.window, ...result.value } } : current);
+    } catch {
+      if (mountedRef.current && requestId === opacityRequestRef.current) {
+        setNotice({
+          tone: "error",
+          text: "Fluely could not save the window opacity. Try again.",
+        });
+      }
+    }
+  }
+
+  async function startAnalysis(request: WorkAnalysisRequest, screenshotIds: string[]) {
+    setActionBusy(true);
+    try {
+      const result = await window.fluely.analysis.start({
+        prompt: request.prompt,
+        screenshotIds,
+        intent: request.intent,
+        fast: request.fast,
+      });
+      if (!mountedRef.current) {
+        return;
+      }
+      if (!result.ok) {
+        showError(result.error);
+        return;
+      }
+      setAnalysisState(result.value);
+    } catch {
+      if (mountedRef.current) {
+        setNotice({
+          tone: "error",
+          text: "Fluely could not start analysis. Check the Codex connection and try again.",
+        });
+      }
+    } finally {
+      if (mountedRef.current) {
+        setActionBusy(false);
+      }
+    }
+  }
+
+  async function captureAndAsk(request: WorkAnalysisRequest) {
+    setActionBusy(true);
+    try {
+      const capture = await window.fluely.screenshots.capture();
+      if (!mountedRef.current) {
+        return;
+      }
+      if (!capture.ok) {
+        showError(capture.error);
+        return;
+      }
+
+      const result = await window.fluely.analysis.start({
+        prompt: request.prompt,
+        screenshotIds: [capture.value.id],
+        intent: request.intent,
+        fast: request.fast,
+      });
+      if (!mountedRef.current) {
+        return;
+      }
+      if (!result.ok) {
+        showError(result.error);
+        return;
+      }
+      setAnalysisState(result.value);
+      setNotice({ tone: "success", text: "Captured the current screen. Fluely is preparing your answer." });
+    } catch {
+      if (mountedRef.current) {
+        setNotice({
+          tone: "error",
+          text: "Fluely could not capture the display. Check Screen Recording permission and try again.",
+        });
+      }
+    } finally {
+      try {
+        const refreshed = await window.fluely.screenshots.get();
+        if (mountedRef.current && refreshed.ok) {
+          setScreenshotState(refreshed.value);
+        }
+      } catch {
+        // The capture result and analysis state remain useful if the refresh races teardown.
+      }
+      if (mountedRef.current) {
+        setActionBusy(false);
+      }
+    }
+  }
+
+  async function askQueue(request: WorkAnalysisRequest) {
+    const ids = screenshotState?.items.map((item) => item.id) ?? [];
+    if (ids.length === 0) {
+      setNotice({ tone: "error", text: "Capture a screen before asking the queue." });
+      return;
+    }
+    await startAnalysis(request, ids);
+  }
+
+  async function cancelAnalysis() {
+    setActionBusy(true);
+    try {
+      const result = await window.fluely.analysis.cancel();
+      if (!mountedRef.current) {
+        return;
+      }
+      if (!result.ok) {
+        showError(result.error);
+        return;
+      }
+      setAnalysisState(result.value);
+      setNotice({ tone: "success", text: "Analysis cancelled. Your context queue is unchanged." });
+    } catch {
+      if (mountedRef.current) {
+        setNotice({
+          tone: "error",
+          text: "Fluely could not cancel the active request. Try again.",
+        });
+      }
+    } finally {
+      if (mountedRef.current) {
+        setActionBusy(false);
+      }
+    }
+  }
+
+  async function removeScreenshot(id: string) {
+    setActionBusy(true);
+    try {
+      const result = await window.fluely.screenshots.delete(id);
+      if (!mountedRef.current) {
+        return;
+      }
+      if (!result.ok) {
+        showError(result.error);
+        return;
+      }
+      setScreenshotState(result.value);
+    } catch {
+      if (mountedRef.current) {
+        setNotice({ tone: "error", text: "Fluely could not remove that screenshot. Refresh the queue and try again." });
+      }
+    } finally {
+      if (mountedRef.current) {
+        setActionBusy(false);
+      }
+    }
+  }
+
+  async function clearQueue() {
+    setActionBusy(true);
+    try {
+      const result = await window.fluely.screenshots.clear();
+      if (!mountedRef.current) {
+        return;
+      }
+      if (!result.ok) {
+        showError(result.error);
+        return;
+      }
+      setScreenshotState(result.value);
+      setNotice({ tone: "success", text: "Context queue cleared." });
+    } catch {
+      if (mountedRef.current) {
+        setNotice({ tone: "error", text: "Fluely could not clear the screenshot queue. Try again." });
+      }
+    } finally {
+      if (mountedRef.current) {
+        setActionBusy(false);
+      }
+    }
+  }
+
+  function showHideHint() {
+    setNotice({ tone: "success", text: "Use the Fluely shortcut to hide or show this window." });
+  }
+
+  if (busy && !settings) {
+    return (
+      <main className="loading-shell" aria-busy="true">
+        <div className="loading-mark" aria-hidden="true"><span /><span /><span /></div>
+        <p className="eyebrow accent">FLUELY</p>
+        <h1>Preparing your workspace…</h1>
+        <p>Connecting to your local settings and Codex CLI.</p>
+      </main>
+    );
+  }
+
+  if (!settings) {
+    return (
+      <main className="loading-shell">
+        <div className="loading-mark" aria-hidden="true"><span /><span /><span /></div>
+        <p className="eyebrow accent">FLUELY</p>
+        <h1>Workspace unavailable</h1>
+        {notice && <p className="loading-error">{notice.text}</p>}
+      </main>
+    );
+  }
+
+  const mode = selectWorkspaceMode(settings);
+  if (mode === "setup") {
+    return (
+      <SetupView
+        settings={settings}
+        codexStatus={codexStatus}
+        busy={busy}
+        notice={notice}
+        onStart={startSetup}
+      />
+    );
+  }
 
   return (
-    <main className="app-shell">
-      <div className="ambient ambient-one" />
-      <div className="ambient ambient-two" />
-
-      <header className="topbar">
-        <div className="brand-lockup">
-          <div className="brand-mark" aria-hidden="true">
-            <span />
-            <span />
-            <span />
-          </div>
-          <div>
-            <p className="eyebrow">PRIVATE DESKTOP COPILOT</p>
-            <h1>Fluely</h1>
-          </div>
-        </div>
-        <div className="status-pill">
-          <span className="status-dot" />
-          {busy ? "Syncing" : "Foundation online"}
-        </div>
-      </header>
-
-      <section className="hero-card" aria-labelledby="hero-title">
-        <div className="hero-copy">
-          <p className="eyebrow accent">MILESTONE 01 / FOUNDATION</p>
-          <h2 id="hero-title">Stay in the flow.</h2>
-          <p className="hero-description">
-            Fluely is being rebuilt around a shorter path from what is on your
-            screen to a useful answer. Capture context, ask clearly, and keep
-            moving.
-          </p>
-          <div className="hero-actions">
-            <span className="build-chip">v{appVersion} · local preview</span>
-            <span className="muted-note">Capture protection and queue are local.</span>
-          </div>
-        </div>
-        <div className="hero-orbit" aria-hidden="true">
-          <div className="orbit orbit-large" />
-          <div className="orbit orbit-small" />
-          <div className="orbit-core">
-            <div className="core-spark" />
-          </div>
-        </div>
-      </section>
-
-      {notice && (
-        <div className={`notice ${notice.tone}`} role="status">
-          <span>{notice.tone === "success" ? "✓" : "!"}</span>
-          {notice.text}
-        </div>
-      )}
-
-      <div className="content-grid">
-        <section className="panel" aria-labelledby="shortcuts-title">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">CONTROL SURFACE</p>
-              <h3 id="shortcuts-title">Shortcuts</h3>
-            </div>
-            <span className="panel-count">{String(shortcutRows.length).padStart(2, "0")}</span>
-          </div>
-          <div className="shortcut-list">
-            {shortcutRows.map(({ action, label, fallback }) => {
-              const entry = getShortcutEntry(shortcutStatus, action);
-              const value = activeSettings?.shortcuts[action] ?? fallback;
-              return (
-                <label className="shortcut-row" key={action}>
-                  <span className="shortcut-label">
-                    <span>{label}</span>
-                    <small className={entry?.available === false ? "unavailable" : ""}>
-                      {entry?.message ?? "Waiting for main process"}
-                    </small>
-                  </span>
-                  <input
-                    aria-label={`${label} shortcut`}
-                    value={value}
-                    onChange={(event) => updateShortcut(action, event.target.value)}
-                    spellCheck={false}
-                  />
-                </label>
-              );
-            })}
-          </div>
-        </section>
-
-        <section className="panel" aria-labelledby="status-title">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">RUNTIME</p>
-              <h3 id="status-title">System status</h3>
-            </div>
-            <span className="status-label">{busy ? "SYNC" : "READY"}</span>
-          </div>
-          <div className="status-list">
-            <div className="status-row">
-              <span>Secure IPC boundary</span>
-              <span className="status-value ready">Active</span>
-            </div>
-            <div className="status-row">
-              <span>Local settings</span>
-              <span className="status-value ready">{settings ? "Ready" : "Loading"}</span>
-            </div>
-            <div className="status-row">
-              <span>AI provider</span>
-              <span className="status-value pending">Not configured</span>
-            </div>
-            <div className="status-row">
-              <span>Capture protection</span>
-              <span className={`status-value ${activeSettings?.privacy.captureProtection ? "ready" : "pending"}`}>
-                {activeSettings?.privacy.captureProtection ? "Enabled" : "Disabled"}
-              </span>
-            </div>
-            <div className="status-row">
-              <span>Screen Recording</span>
-              <span className={`status-value ${screenshotState?.permission === "granted" ? "ready" : "pending"}`}>
-                {screenshotState ? permissionLabel(screenshotState.permission) : "Loading"}
-              </span>
-            </div>
-            <div className="status-row">
-              <span>Screenshot queue</span>
-              <span className="status-value ready">
-                {screenshotState?.items.length ?? 0} / 5
-              </span>
-            </div>
-          </div>
-
-          <div className="settings-block">
-            <div className="settings-block-heading">
-              <span>Window footprint</span>
-              <span>px</span>
-            </div>
-            <div className="dimension-grid">
-              <label>
-                Width
-                <input
-                  type="number"
-                  min="480"
-                  max="1600"
-                  value={activeSettings?.window.width ?? 960}
-                  onChange={(event) => setDraft((current) => current ? {
-                    ...current,
-                    window: { ...current.window, width: Number(event.target.value) },
-                  } : current)}
-                />
-              </label>
-              <label>
-                Height
-                <input
-                  type="number"
-                  min="360"
-                  max="1400"
-                  value={activeSettings?.window.height ?? 720}
-                  onChange={(event) => setDraft((current) => current ? {
-                    ...current,
-                    window: { ...current.window, height: Number(event.target.value) },
-                  } : current)}
-                />
-              </label>
-            </div>
-          </div>
-
-          <div className="settings-block screenshot-block">
-            <div className="settings-block-heading">
-              <span>Background screenshots</span>
-              <span>{newestScreenshot ? `${newestScreenshot.width} × ${newestScreenshot.height}` : "No captures"}</span>
-            </div>
-            <p className="settings-help">
-              Captures the display nearest the pointer while Fluely stays out of the frame.
-            </p>
-            <div className="form-actions">
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => void clearScreenshots()}
-                disabled={busy || screenshotBusy || !screenshotState?.items.length}
-              >
-                Clear queue
-              </button>
-              <button
-                type="button"
-                className="primary-button"
-                onClick={() => void captureScreenshot()}
-                disabled={busy || screenshotBusy || screenshotState?.capturing === true}
-              >
-                {screenshotState?.capturing || screenshotBusy ? "Capturing…" : "Capture"}
-              </button>
-            </div>
-          </div>
-
-          <div className="form-actions">
-            <button type="button" className="secondary-button" onClick={() => void resetSettings()} disabled={busy}>
-              Reset
-            </button>
-            <button type="button" className="primary-button" onClick={() => void saveSettings()} disabled={busy || !draft}>
-              Save settings
-            </button>
-          </div>
-        </section>
-      </div>
-
-      <footer className="footer-note">
-        <span>Built for clarity, speed, and control.</span>
-        <span>FLUELY / LOCAL FIRST</span>
-      </footer>
-    </main>
+    <WorkView
+      settings={settings}
+      screenshotState={screenshotState ?? emptyScreenshotState()}
+      analysisState={analysisState ?? emptyAnalysisState()}
+      codexStatus={codexStatus}
+      notice={notice}
+      busy={actionBusy}
+      onCaptureAsk={captureAndAsk}
+      onAskQueue={askQueue}
+      onCancel={cancelAnalysis}
+      onOpacityChange={changeOpacity}
+      onOpenSettings={openSettings}
+      onHide={showHideHint}
+      onRemoveScreenshot={removeScreenshot}
+      onClearQueue={clearQueue}
+    />
   );
 }
+
+export { buildIntentPrompt, formatOpacityLabel, getAnalysisActionState, getQueueCount, selectWorkspaceMode } from "../shared/workspace-state";

@@ -146,6 +146,29 @@ export interface AnalysisStateSubscriptionSource {
   onStateChanged(listener: AnalysisStateListener): () => void;
 }
 
+/** Keeps renderer analysis listeners scoped to a live component and idempotent. */
+export function subscribeToAnalysisState(
+  source: AnalysisStateSubscriptionSource,
+  listener: AnalysisStateListener,
+  isActive: () => boolean = () => true,
+): () => void {
+  let subscribed = true;
+  const wrappedListener: AnalysisStateListener = (event) => {
+    if (subscribed && isActive()) {
+      listener(event);
+    }
+  };
+  const unsubscribeSource = source.onStateChanged(wrappedListener);
+
+  return () => {
+    if (!subscribed) {
+      return;
+    }
+    subscribed = false;
+    unsubscribeSource();
+  };
+}
+
 export type IpcErrorCode =
   | "INVALID_ARGUMENT"
   | "SETTINGS_READ_FAILED"
