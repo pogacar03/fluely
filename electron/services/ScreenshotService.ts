@@ -84,6 +84,7 @@ export type ScreenshotServiceError = IpcError;
 const MAX_ITEMS = 5;
 const DEFAULT_SOURCE_TIMEOUT_MS = 5000;
 const MANAGED_FILE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.png(?:\.tmp)?$/i;
+const MANAGED_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SERVICE_ERROR_CODES = new Set<IpcError["code"]>([
   "SCREEN_CAPTURE_DENIED",
   "SCREEN_CAPTURE_RESTRICTED",
@@ -224,6 +225,21 @@ export class ScreenshotService {
       capturing: this.capturing,
       permission: this.permission,
     };
+  }
+
+  /**
+   * Resolves queue-owned PNG paths for main-process consumers only. Unknown,
+   * malformed, or otherwise unqueued IDs are deliberately omitted so a
+   * renderer-provided value can never escape the managed screenshot directory.
+   */
+  public getManagedPaths(ids?: readonly string[]): string[] {
+    const queuedIds = new Set(this.items.map((item) => item.id));
+    const requestedIds = ids === undefined
+      ? this.items.map((item) => item.id)
+      : Array.isArray(ids) ? ids : [];
+    return requestedIds
+      .filter((id): id is string => typeof id === "string" && MANAGED_ID_PATTERN.test(id) && queuedIds.has(id))
+      .map((id) => join(this.directory, `${id}.png`));
   }
 
   public capture(): Promise<ScreenshotItem> {

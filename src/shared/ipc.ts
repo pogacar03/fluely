@@ -102,6 +102,40 @@ export function subscribeToScreenshotState(
   };
 }
 
+export type AnalysisStatus = "idle" | "running" | "completed" | "cancelled" | "error";
+
+export type AnalysisIntent = "answer" | "explain" | "follow-up" | "recap";
+
+export interface AnalysisRequest {
+  prompt: string;
+  screenshotIds: string[];
+  intent: AnalysisIntent;
+  fast: boolean;
+}
+
+export type AnalysisStateEventType = "started" | "delta" | "completed" | "cancelled" | "error";
+
+export interface AnalysisState {
+  status: AnalysisStatus;
+  text: string;
+  model: string;
+  screenshotIds: string[];
+  startedAt: string | null;
+  updatedAt: string;
+  completedAt: string | null;
+  error?: IpcError;
+}
+
+export interface AnalysisStateChangedEvent extends AnalysisState {
+  event: AnalysisStateEventType;
+}
+
+export type AnalysisStateListener = (event: AnalysisStateChangedEvent) => void;
+
+export interface AnalysisStateSubscriptionSource {
+  onStateChanged(listener: AnalysisStateListener): () => void;
+}
+
 export type IpcErrorCode =
   | "INVALID_ARGUMENT"
   | "SETTINGS_READ_FAILED"
@@ -113,6 +147,8 @@ export type IpcErrorCode =
   | "SCREEN_CAPTURE_FAILED"
   | "CAPTURE_IN_PROGRESS"
   | "SCREENSHOT_NOT_FOUND"
+  | "ANALYSIS_IN_PROGRESS"
+  | "ANALYSIS_FAILED"
   | "INTERNAL_ERROR";
 
 export interface IpcError {

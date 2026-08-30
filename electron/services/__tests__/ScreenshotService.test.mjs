@@ -499,6 +499,40 @@ test("ScreenshotService deletes only known queue IDs and can clear the queue", a
   assert.deepEqual(await readdir(directory), []);
 });
 
+test("ScreenshotService resolves managed PNG paths only for queued strict UUID IDs", async () => {
+  const directory = await makeDirectory();
+  const ids = [
+    "12345678-1234-4123-8123-123456789012",
+    "abcdefab-cdef-4abc-8def-abcdefabcdef",
+  ];
+  let nextId = 0;
+  const service = makeService(directory, makeAdapters(), {
+    idFactory: () => ids[nextId++],
+  });
+
+  const first = await service.capture();
+  const second = await service.capture();
+
+  assert.deepEqual(
+    service.getManagedPaths([
+      second.id,
+      "not-a-uuid",
+      "../settings.json",
+      "12345678-1234-4123-8123-123456789013",
+      first.id,
+    ]),
+    [path.join(directory, `${second.id}.png`), path.join(directory, `${first.id}.png`)],
+  );
+  assert.deepEqual(service.getManagedPaths(), [
+    path.join(directory, `${first.id}.png`),
+    path.join(directory, `${second.id}.png`),
+  ]);
+
+  const paths = service.getManagedPaths([first.id]);
+  paths[0] = "/tmp/not-managed.png";
+  assert.deepEqual(service.getManagedPaths([first.id]), [path.join(directory, `${first.id}.png`)]);
+});
+
 test("ScreenshotService releases its capturing flag after adapter errors", async () => {
   const directory = await makeDirectory();
   let shouldFail = true;
