@@ -8,9 +8,19 @@ import {
   systemPreferences,
 } from "electron";
 import { join } from "node:path";
-import type { AppStatus, FluelySettings, IpcError, ScreenshotItem, ScreenshotState } from "../src/shared/ipc";
+import type {
+  AnalysisStateChangedEvent,
+  AppStatus,
+  CodexStatus,
+  FluelySettings,
+  IpcError,
+  ScreenshotItem,
+  ScreenshotState,
+} from "../src/shared/ipc";
 import { DEFAULT_SETTINGS } from "./services/settings-core";
+import { AnalysisService } from "./services/AnalysisService";
 import { CapturePrivacyController, DockPrivacyCoordinator } from "./services/CapturePrivacyController";
+import { CodexCliService } from "./services/CodexCliService";
 import { registerIpcHandlers } from "./services/ipcHandlers";
 import { SettingsService } from "./services/SettingsService";
 import { ScreenshotService } from "./services/ScreenshotService";
@@ -25,8 +35,20 @@ let settingsService: SettingsService | null = null;
 let shortcutManager: ShortcutManager | null = null;
 let capturePrivacyController: CapturePrivacyController | null = null;
 let screenshotService: ScreenshotService | null = null;
+let codexCliService: CodexCliService | null = null;
+let analysisService: AnalysisService | null = null;
 let dockPrivacyCoordinator: DockPrivacyCoordinator | null = null;
 let ipcHandlersRegistered = false;
+
+const MIN_WINDOW_OPACITY = 0.35;
+const MAX_WINDOW_OPACITY = 1;
+
+function clampWindowOpacity(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_SETTINGS.window.opacity;
+  }
+  return Math.min(MAX_WINDOW_OPACITY, Math.max(MIN_WINDOW_OPACITY, value));
+}
 
 function getDockPrivacyCoordinator(): DockPrivacyCoordinator | undefined {
   if (process.platform !== "darwin") {
@@ -54,6 +76,7 @@ export function createMainWindow(settings: FluelySettings = DEFAULT_SETTINGS): B
     title: "Fluely",
     webPreferences: getWindowPreferences(join(__dirname, "preload.js")),
   });
+  window.setOpacity(clampWindowOpacity(settings.window.opacity));
 
   capturePrivacyController?.dispose();
   capturePrivacyController = new CapturePrivacyController(
@@ -70,6 +93,7 @@ export function createMainWindow(settings: FluelySettings = DEFAULT_SETTINGS): B
     onReadyToShow: () => window.show(),
     onClosed: () => {
       if (mainWindow === window) {
+        analysisService?.cancel();
         mainWindow = null;
         capturePrivacyController?.dispose();
         capturePrivacyController = null;
@@ -107,6 +131,19 @@ function notifyScreenshotState(state?: ScreenshotState): void {
   }
 }
 
+function notifyAnalysisState(event: AnalysisStateChangedEvent): void {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) {
+    return;
+  }
+
+  try {
+    window.webContents.send("analysis:state-changed", event);
+  } catch {
+    // The renderer may be tearing down while a background request completes.
+  }
+}
+
 function getScreenshotService(): ScreenshotService {
   if (!screenshotService) {
     screenshotService = new ScreenshotService({
@@ -129,6 +166,69 @@ function getScreenshotService(): ScreenshotService {
     });
   }
   return screenshotService;
+}
+
+function getCodexCliService(): CodexCliService {
+  if (!codexCliService) {
+    codexCliService = new CodexCliService();
+  }
+  return codexCliService;
+}
+
+function getAnalysisService(settings: SettingsService): AnalysisService {
+  if (!analysisService) {
+    analysisService = new AnalysisService({
+      provider: getCodexCliService(),
+      getManagedPaths: (ids) => getScreenshotService().getManagedPaths(ids),
+      codex: settings.get().codex,
+    });
+  }
+  return analysisService;
+}
+
+async function getCodexStatus(settings: SettingsService): Promise<CodexStatus> {
+  const configuredPath = settings.get().codex.path;
+  const validation = await getCodexCliService().validateExecutable(
+    configuredPath,
+    settings.get().codex.timeoutMs,
+  );
+  const status: CodexStatus = {
+    available: validation.success,
+    configuredPath,
+  };
+  if (validation.resolvedPath) {
+    status.resolvedPath = validation.resolvedPath;
+  }
+  if (validation.error) {
+    status.error = {
+      code: "INTERNAL_ERROR",
+      message: validation.error.message,
+      action: validation.error.action,
+    };
+  }
+  return status;
+}
+
+async function validateCodexPath(path: string, settings: SettingsService): Promise<CodexStatus> {
+  const validation = await getCodexCliService().validateExecutable(
+    path,
+    settings.get().codex.timeoutMs,
+  );
+  const status: CodexStatus = {
+    available: validation.success,
+    configuredPath: path,
+  };
+  if (validation.resolvedPath) {
+    status.resolvedPath = validation.resolvedPath;
+  }
+  if (validation.error) {
+    status.error = {
+      code: "INTERNAL_ERROR",
+      message: validation.error.message,
+      action: validation.error.action,
+    };
+  }
+  return status;
 }
 
 function captureFailure(): IpcError {
@@ -176,6 +276,7 @@ async function ensureSettingsService(): Promise<SettingsService> {
 async function initializeServices(window: BrowserWindow): Promise<void> {
   const loadedSettings = await ensureSettingsService();
   getScreenshotService();
+  const analysis = getAnalysisService(loadedSettings);
 
   shortcutManager?.dispose();
   shortcutManager = new ShortcutManager(
@@ -240,9 +341,28 @@ async function initializeServices(window: BrowserWindow): Promise<void> {
           throw error;
         }),
       },
+      analysis,
+      codex: {
+        getStatus: () => getCodexStatus(loadedSettings),
+        validate: (path) => validateCodexPath(path, loadedSettings),
+      },
+      window: {
+        setOpacity: (opacity) => {
+          const currentWindow = mainWindow;
+          if (currentWindow && !currentWindow.isDestroyed()) {
+            currentWindow.setOpacity(opacity);
+          }
+        },
+      },
       applyPrivacy: (enabled) => {
         if (mainWindow && capturePrivacyController) {
           capturePrivacyController.apply(mainWindow, enabled);
+        }
+      },
+      applyOpacity: (opacity) => {
+        const currentWindow = mainWindow;
+        if (currentWindow && !currentWindow.isDestroyed()) {
+          currentWindow.setOpacity(opacity);
         }
       },
       applyShortcuts: (shortcuts) => shortcutManager?.update(shortcuts) ?? {
@@ -254,6 +374,7 @@ async function initializeServices(window: BrowserWindow): Promise<void> {
         },
       },
       notifyScreenshotState,
+      notifyAnalysisState,
       getAppStatus,
     });
     ipcHandlersRegistered = true;
@@ -286,6 +407,7 @@ app.whenReady().then(async () => {
 app.on("will-quit", () => {
   capturePrivacyController?.dispose();
   shortcutManager?.dispose();
+  analysisService?.cancel();
   screenshotService?.dispose();
 });
 

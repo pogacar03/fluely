@@ -36,7 +36,22 @@ test("preload exposes only the documented Fluely API groups", async () => {
 
   exposeFluelyApi(contextBridge, ipcRenderer);
 
-  assert.deepEqual(Object.keys(exposedApi).sort(), ["app", "screenshots", "settings", "shortcuts"]);
+  assert.deepEqual(Object.keys(exposedApi).sort(), [
+    "analysis",
+    "app",
+    "codex",
+    "screenshots",
+    "settings",
+    "shortcuts",
+    "window",
+  ]);
+  assert.deepEqual(Object.keys(exposedApi.analysis).sort(), [
+    "cancel",
+    "getStatus",
+    "onStateChanged",
+    "start",
+  ]);
+  assert.deepEqual(Object.keys(exposedApi.codex).sort(), ["getStatus", "validate"]);
   assert.deepEqual(Object.keys(exposedApi.screenshots).sort(), [
     "capture",
     "clear",
@@ -44,12 +59,25 @@ test("preload exposes only the documented Fluely API groups", async () => {
     "get",
     "onStateChanged",
   ]);
+  assert.deepEqual(Object.keys(exposedApi.window).sort(), ["setMode", "setOpacity"]);
   assert.equal(exposedApi.ipcRenderer, undefined);
   assert.equal(exposedApi.invoke, undefined);
   await exposedApi.settings.get();
   await exposedApi.settings.update({ window: { width: 800 } });
   await exposedApi.shortcuts.get();
   await exposedApi.app.getStatus();
+  await exposedApi.codex.getStatus();
+  await exposedApi.codex.validate("codex");
+  await exposedApi.analysis.start({
+    prompt: "What is on screen?",
+    screenshotIds: [],
+    intent: "answer",
+    fast: false,
+  });
+  await exposedApi.analysis.cancel();
+  await exposedApi.analysis.getStatus();
+  await exposedApi.window.setOpacity(0.8);
+  await exposedApi.window.setMode("work");
   await exposedApi.screenshots.get();
   await exposedApi.screenshots.capture();
   await exposedApi.screenshots.delete("11111111-1111-4111-8111-111111111111");
@@ -67,11 +95,36 @@ test("preload exposes only the documented Fluely API groups", async () => {
   assert.equal(receivedState.capturing, true);
   unsubscribe();
   assert.equal(subscriptions.size, 0);
+  let receivedAnalysisEvent;
+  const unsubscribeAnalysis = exposedApi.analysis.onStateChanged((event) => {
+    receivedAnalysisEvent = event;
+  });
+  assert.equal(typeof unsubscribeAnalysis, "function");
+  subscriptions.get("analysis:state-changed")({ sender: "private" }, {
+    event: "delta",
+    status: "running",
+    text: "answer",
+    model: "gpt-custom",
+    screenshotIds: [],
+    startedAt: "2026-08-30T00:00:00.000Z",
+    updatedAt: "2026-08-30T00:00:00.000Z",
+    completedAt: null,
+  });
+  assert.equal(receivedAnalysisEvent.text, "answer");
+  unsubscribeAnalysis();
+  assert.equal(subscriptions.size, 0);
   assert.deepEqual(calls.map((call) => call.channel), [
     "settings:get",
     "settings:update",
     "shortcuts:get",
     "app:get-status",
+    "codex:get-status",
+    "codex:validate",
+    "analysis:start",
+    "analysis:cancel",
+    "analysis:get-status",
+    "window:set-opacity",
+    "window:set-mode",
     "screenshots:get",
     "screenshots:capture",
     "screenshots:delete",
@@ -106,17 +159,38 @@ test("main IPC handlers register only the documented channels", () => {
     delete: async () => ({ items: [], capturing: false, permission: "unavailable" }),
     clear: async () => ({ items: [], capturing: false, permission: "unavailable" }),
   };
+  const analysis = {
+    start: () => ({ status: "running" }),
+    cancel: () => ({ status: "cancelled" }),
+    getState: () => ({ status: "idle" }),
+    onStateChanged: () => () => undefined,
+  };
+  const codex = {
+    getStatus: async () => ({ available: true, configuredPath: "codex" }),
+    validate: async () => ({ available: true, configuredPath: "codex" }),
+  };
+  const window = {
+    setOpacity: () => undefined,
+  };
 
   registerIpcHandlers({
     ipcMain,
     settings,
     shortcuts,
     screenshots,
+    analysis,
+    codex,
+    window,
     getAppStatus: () => ({ name: "Fluely", version: "0.1.0", platform: "darwin", visible: true }),
   });
 
   assert.deepEqual([...registrations.keys()].sort(), [
+    "analysis:cancel",
+    "analysis:get-status",
+    "analysis:start",
     "app:get-status",
+    "codex:get-status",
+    "codex:validate",
     "screenshots:capture",
     "screenshots:clear",
     "screenshots:delete",
@@ -126,6 +200,8 @@ test("main IPC handlers register only the documented channels", () => {
     "settings:update",
     "shortcuts:get",
     "shortcuts:update",
+    "window:set-mode",
+    "window:set-opacity",
   ]);
 });
 

@@ -37,6 +37,16 @@ export interface CodexCliSettings {
   modelReasoningEffort?: CodexModelReasoningEffort;
 }
 
+/** Public Codex health data; process handles and raw CLI objects stay in main. */
+export interface CodexStatus {
+  available: boolean;
+  configuredPath: string;
+  resolvedPath?: string;
+  error?: IpcError;
+}
+
+export type WindowMode = "setup" | "work";
+
 export interface FluelySettings {
   setupComplete: boolean;
   shortcuts: ShortcutSettings;
@@ -209,6 +219,20 @@ export interface FluelyApi {
   };
   app: {
     getStatus: () => Promise<IpcResult<AppStatus>>;
+  };
+  codex: {
+    getStatus: () => Promise<IpcResult<CodexStatus>>;
+    validate: (path: string) => Promise<IpcResult<CodexStatus>>;
+  };
+  analysis: {
+    start: (request: AnalysisRequest) => Promise<IpcResult<AnalysisState>>;
+    cancel: () => Promise<IpcResult<AnalysisState>>;
+    getStatus: () => Promise<IpcResult<AnalysisState>>;
+    onStateChanged: (listener: AnalysisStateListener) => () => void;
+  };
+  window: {
+    setOpacity: (opacity: number) => Promise<IpcResult<WindowSettings>>;
+    setMode: (mode: WindowMode) => Promise<IpcResult<FluelySettings>>;
   };
 }
 

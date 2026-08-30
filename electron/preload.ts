@@ -1,6 +1,11 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
+  AnalysisRequest,
+  AnalysisState,
+  AnalysisStateChangedEvent,
+  AnalysisStateListener,
   AppStatus,
+  CodexStatus,
   FluelyApi,
   FluelySettings,
   IpcResult,
@@ -10,6 +15,8 @@ import type {
   ScreenshotState,
   ShortcutSettings,
   ShortcutStatus,
+  WindowMode,
+  WindowSettings,
 } from "../src/shared/ipc";
 
 function invoke<T>(channel: string, ...args: unknown[]): Promise<IpcResult<T>> {
@@ -39,6 +46,26 @@ const api: FluelyApi = {
   },
   app: {
     getStatus: () => invoke<AppStatus>("app:get-status"),
+  },
+  codex: {
+    getStatus: () => invoke<CodexStatus>("codex:get-status"),
+    validate: (path: string) => invoke<CodexStatus>("codex:validate", path),
+  },
+  analysis: {
+    start: (request: AnalysisRequest) => invoke<AnalysisState>("analysis:start", request),
+    cancel: () => invoke<AnalysisState>("analysis:cancel"),
+    getStatus: () => invoke<AnalysisState>("analysis:get-status"),
+    onStateChanged: (listener: AnalysisStateListener) => {
+      const eventListener = (_event: Electron.IpcRendererEvent, event: AnalysisStateChangedEvent) => {
+        listener(event);
+      };
+      ipcRenderer.on("analysis:state-changed", eventListener);
+      return () => ipcRenderer.removeListener("analysis:state-changed", eventListener);
+    },
+  },
+  window: {
+    setOpacity: (opacity: number) => invoke<WindowSettings>("window:set-opacity", opacity),
+    setMode: (mode: WindowMode) => invoke<FluelySettings>("window:set-mode", mode),
   },
 };
 

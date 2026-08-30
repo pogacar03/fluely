@@ -1,5 +1,10 @@
 import type {
+  AnalysisRequest,
+  AnalysisState,
+  AnalysisStateChangedEvent,
+  AnalysisStateListener,
   AppStatus,
+  CodexStatus,
   FluelyApi,
   FluelySettings,
   IpcResult,
@@ -9,6 +14,8 @@ import type {
   ScreenshotState,
   ShortcutSettings,
   ShortcutStatus,
+  WindowMode,
+  WindowSettings,
 } from "../src/shared/ipc";
 
 export interface ContextBridgeAdapter {
@@ -61,6 +68,33 @@ export function exposeFluelyApi(
     },
     app: {
       getStatus: () => invoke<AppStatus>(ipcRenderer, "app:get-status"),
+    },
+    codex: {
+      getStatus: () => invoke<CodexStatus>(ipcRenderer, "codex:get-status"),
+      validate: (path: string) => invoke<CodexStatus>(ipcRenderer, "codex:validate", path),
+    },
+    analysis: {
+      start: (request: AnalysisRequest) => invoke<AnalysisState>(ipcRenderer, "analysis:start", request),
+      cancel: () => invoke<AnalysisState>(ipcRenderer, "analysis:cancel"),
+      getStatus: () => invoke<AnalysisState>(ipcRenderer, "analysis:get-status"),
+      onStateChanged: (listener: AnalysisStateListener) => {
+        if (!ipcRenderer.on || !ipcRenderer.removeListener) {
+          return () => undefined;
+        }
+
+        const eventListener = (...args: unknown[]) => {
+          const event = args[1] as AnalysisStateChangedEvent | undefined;
+          if (event) {
+            listener(event);
+          }
+        };
+        ipcRenderer.on("analysis:state-changed", eventListener);
+        return () => ipcRenderer.removeListener?.("analysis:state-changed", eventListener);
+      },
+    },
+    window: {
+      setOpacity: (opacity: number) => invoke<WindowSettings>(ipcRenderer, "window:set-opacity", opacity),
+      setMode: (mode: WindowMode) => invoke<FluelySettings>(ipcRenderer, "window:set-mode", mode),
     },
   });
 }
