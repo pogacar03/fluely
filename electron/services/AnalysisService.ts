@@ -21,6 +21,21 @@ const DEFAULT_CODEX_SETTINGS: CodexCliSettings = {
   modelReasoningEffort: "medium",
 };
 
+const CODEX_SANDBOX_MODES: readonly CodexCliSettings["sandboxMode"][] = [
+  "read-only",
+  "workspace-write",
+  "danger-full-access",
+];
+
+const CODEX_REASONING_EFFORTS: readonly NonNullable<CodexCliSettings["modelReasoningEffort"]>[] = [
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
 const SCREENSHOT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_PROMPT_LENGTH = 4000;
 const MAX_QUESTION_LENGTH = 3000;
@@ -66,6 +81,42 @@ interface ActiveRequest {
 interface ResolvedSelection {
   ids: string[];
   paths: string[];
+}
+
+function isCodexSandboxMode(value: unknown): value is CodexCliSettings["sandboxMode"] {
+  return typeof value === "string" && CODEX_SANDBOX_MODES.includes(value as CodexCliSettings["sandboxMode"]);
+}
+
+function isCodexReasoningEffort(
+  value: unknown,
+): value is NonNullable<CodexCliSettings["modelReasoningEffort"]> {
+  return typeof value === "string" &&
+    CODEX_REASONING_EFFORTS.includes(value as NonNullable<CodexCliSettings["modelReasoningEffort"]>);
+}
+
+function normalizeCodexSettings(settings: Partial<CodexCliSettings>): CodexCliSettings {
+  const merged = { ...DEFAULT_CODEX_SETTINGS, ...settings };
+  return {
+    enabled: typeof merged.enabled === "boolean" ? merged.enabled : DEFAULT_CODEX_SETTINGS.enabled,
+    path: typeof merged.path === "string" && merged.path.trim()
+      ? merged.path.trim()
+      : DEFAULT_CODEX_SETTINGS.path,
+    model: typeof merged.model === "string" && merged.model.trim()
+      ? merged.model.trim()
+      : DEFAULT_CODEX_SETTINGS.model,
+    fastModel: typeof merged.fastModel === "string" && merged.fastModel.trim()
+      ? merged.fastModel.trim()
+      : DEFAULT_CODEX_SETTINGS.fastModel,
+    timeoutMs: typeof merged.timeoutMs === "number" && Number.isFinite(merged.timeoutMs) && merged.timeoutMs > 0
+      ? Math.max(1, Math.round(merged.timeoutMs))
+      : DEFAULT_CODEX_SETTINGS.timeoutMs,
+    sandboxMode: isCodexSandboxMode(merged.sandboxMode)
+      ? merged.sandboxMode
+      : DEFAULT_CODEX_SETTINGS.sandboxMode,
+    modelReasoningEffort: isCodexReasoningEffort(merged.modelReasoningEffort)
+      ? merged.modelReasoningEffort
+      : DEFAULT_CODEX_SETTINGS.modelReasoningEffort,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -186,7 +237,8 @@ export class AnalysisService {
   private readonly provider: AnalysisProvider;
   private readonly pathSource?: AnalysisPathSource;
   private readonly getManagedPathsAccessor?: (ids?: readonly string[]) => string[];
-  private readonly codex: CodexCliSettings;
+  private codex: CodexCliSettings;
+  private pendingCodexSettings: CodexCliSettings | null = null;
   private readonly now: () => Date;
   private readonly listeners = new Set<AnalysisStateListener>();
   private state: AnalysisState;
@@ -206,19 +258,7 @@ export class AnalysisService {
       ...(options.config ?? {}),
       ...(options.codex ?? {}),
     };
-    this.codex = {
-      ...DEFAULT_CODEX_SETTINGS,
-      ...providedCodex,
-      path: typeof providedCodex.path === "string" && providedCodex.path.trim()
-        ? providedCodex.path.trim()
-        : DEFAULT_CODEX_SETTINGS.path,
-      model: typeof providedCodex.model === "string" && providedCodex.model.trim()
-        ? providedCodex.model.trim()
-        : DEFAULT_CODEX_SETTINGS.model,
-      fastModel: typeof providedCodex.fastModel === "string" && providedCodex.fastModel.trim()
-        ? providedCodex.fastModel.trim()
-        : DEFAULT_CODEX_SETTINGS.fastModel,
-    };
+    this.codex = normalizeCodexSettings(providedCodex);
     this.now = options.now ?? options.clock ?? (() => new Date());
     const timestamp = this.timestamp();
     this.state = {
@@ -244,7 +284,8 @@ export class AnalysisService {
     const safeRequest: Record<string, unknown> = isRecord(request) ? request : {};
     const requestedIds = normalizeScreenshotIds(safeRequest.screenshotIds);
     const selection = this.resolveSelection(requestedIds);
-    const model = safeRequest.fast === true ? this.codex.fastModel : this.codex.model;
+    const codex = this.codex;
+    const model = safeRequest.fast === true ? codex.fastModel : codex.model;
     const timestamp = this.timestamp();
     const controller = new AbortController();
     const token = Symbol("analysis");
@@ -263,7 +304,7 @@ export class AnalysisService {
     // the cancelled token and never starts a child with an already-aborted
     // request.
     this.runToken = token;
-    this.runPromise = Promise.resolve().then(() => this.consume(token, controller, safeRequest, selection));
+    this.runPromise = Promise.resolve().then(() => this.consume(token, controller, safeRequest, selection, codex));
     this.emit("started");
     return this.getState();
   }
@@ -277,6 +318,22 @@ export class AnalysisService {
     active.controller.abort();
     this.finish(active.token, "cancelled");
     return this.getState();
+  }
+
+  /**
+   * Refreshes the Codex configuration used by future requests. If a stream is
+   * active, the normalized settings are applied after it settles so the active
+   * provider invocation keeps its original executable and options.
+   */
+  public updateCodexSettings(settings: Partial<CodexCliSettings>): void {
+    const next = normalizeCodexSettings({ ...this.codex, ...settings });
+    if (this.active) {
+      this.pendingCodexSettings = next;
+      return;
+    }
+
+    this.codex = next;
+    this.pendingCodexSettings = null;
   }
 
   public getState(): AnalysisState {
@@ -329,6 +386,7 @@ export class AnalysisService {
     controller: AbortController,
     request: Record<string, unknown>,
     selection: ResolvedSelection,
+    codex: CodexCliSettings,
   ): Promise<void> {
     try {
       if (!this.isActive(token)) {
@@ -339,13 +397,13 @@ export class AnalysisService {
         prompt: buildAnalysisPrompt(request, selection.ids),
         model: this.state.model,
         imagePaths: selection.paths,
-        sandboxMode: this.codex.sandboxMode,
-        reasoningEffort: this.codex.modelReasoningEffort,
-        timeoutMs: this.codex.timeoutMs,
+        sandboxMode: codex.sandboxMode,
+        reasoningEffort: codex.modelReasoningEffort,
+        timeoutMs: codex.timeoutMs,
         signal: controller.signal,
       };
 
-      for await (const delta of this.provider.stream(this.codex.path, options)) {
+      for await (const delta of this.provider.stream(codex.path, options)) {
         if (!this.isActive(token)) {
           return;
         }
@@ -376,6 +434,7 @@ export class AnalysisService {
       if (this.active?.token === token) {
         this.active = null;
       }
+      this.applyPendingCodexSettings();
       if (this.runToken === token) {
         this.runPromise = null;
         this.runToken = null;
@@ -403,6 +462,7 @@ export class AnalysisService {
     // prevents a new child from overlapping one still being terminated.
     if (status === "completed") {
       this.active = null;
+      this.applyPendingCodexSettings();
     }
     this.emit(status === "completed" ? "completed" : "cancelled");
   }
@@ -425,7 +485,15 @@ export class AnalysisService {
       error,
     };
     this.active = null;
+    this.applyPendingCodexSettings();
     this.emit("error");
+  }
+
+  private applyPendingCodexSettings(): void {
+    if (!this.active && this.pendingCodexSettings) {
+      this.codex = this.pendingCodexSettings;
+      this.pendingCodexSettings = null;
+    }
   }
 
   private emit(event: AnalysisStateEventType): void {

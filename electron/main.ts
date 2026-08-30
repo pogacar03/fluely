@@ -346,6 +346,7 @@ async function initializeServices(window: BrowserWindow): Promise<void> {
         getStatus: () => getCodexStatus(loadedSettings),
         validate: (path) => validateCodexPath(path, loadedSettings),
       },
+      applyCodexSettings: (codexSettings) => analysis.updateCodexSettings(codexSettings),
       window: {
         setOpacity: (opacity) => {
           const currentWindow = mainWindow;

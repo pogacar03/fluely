@@ -5,7 +5,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const handlersPath = path.resolve(__dirname, "../../../dist-electron/electron/services/ipcHandlers.js");
+const analysisServicePath = path.resolve(__dirname, "../../../dist-electron/electron/services/AnalysisService.js");
 const { registerIpcHandlers } = await import(pathToFileURL(handlersPath).href);
+const { AnalysisService } = await import(pathToFileURL(analysisServicePath).href);
 
 const screenshotId = "11111111-1111-4111-8111-111111111111";
 const unknownScreenshotId = "22222222-2222-4222-8222-222222222222";
@@ -259,4 +261,113 @@ test("analysis state subscription forwards serializable snapshots to the rendere
     updatedAt: "1970-01-01T00:00:00.000Z",
     completedAt: null,
   }]);
+});
+
+test("settings updates refresh the next analysis provider call without changing an active request", async () => {
+  const initialCodex = {
+    ...settingsValue.codex,
+    path: "/old/codex",
+    model: "old-model",
+    fastModel: "old-fast-model",
+    timeoutMs: 1100,
+  };
+  let currentSettings = {
+    ...settingsValue,
+    codex: initialCodex,
+  };
+  const registrations = new Map();
+  const calls = [];
+  let releaseFirst;
+  let providerStarted;
+  const firstProviderStarted = new Promise((resolve) => {
+    providerStarted = resolve;
+  });
+  const firstProviderRelease = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const provider = {
+    stream: async function* (executable, options) {
+      calls.push({ executable, options });
+      if (calls.length === 1) {
+        providerStarted();
+        await firstProviderRelease;
+      }
+      yield "answer";
+    },
+  };
+  const analysis = new AnalysisService({
+    provider,
+    getManagedPaths: () => [],
+    codex: initialCodex,
+  });
+  const settings = {
+    get: () => currentSettings,
+    update: async (patch) => {
+      currentSettings = {
+        ...currentSettings,
+        ...patch,
+        codex: {
+          ...currentSettings.codex,
+          ...(patch.codex ?? {}),
+        },
+      };
+      return { ok: true, value: currentSettings };
+    },
+    reset: async () => ({ ok: true, value: currentSettings }),
+  };
+
+  registerIpcHandlers({
+    ipcMain: {
+      handle(channel, handler) {
+        registrations.set(channel, handler);
+      },
+    },
+    settings,
+    shortcuts: {
+      getStatus: () => ({ entries: [], updatedAt: new Date(0).toISOString() }),
+      update: () => ({ ok: true, value: {} }),
+    },
+    screenshots: {
+      getState: () => ({ items: [], capturing: false, permission: "unavailable" }),
+      capture: async () => screenshotState.items[0],
+      delete: async () => ({ items: [], capturing: false, permission: "unavailable" }),
+      clear: async () => ({ items: [], capturing: false, permission: "unavailable" }),
+    },
+    analysis,
+    applyCodexSettings: (codex) => analysis.updateCodexSettings(codex),
+    getAppStatus: () => ({ name: "Fluely", version: "0.1.0", platform: "linux", visible: true }),
+  });
+
+  const request = {
+    prompt: "What is shown?",
+    screenshotIds: [],
+    intent: "answer",
+    fast: false,
+  };
+  const first = await registrations.get("analysis:start")({}, request);
+  assert.equal(first.ok, true);
+  await firstProviderStarted;
+
+  const updated = await registrations.get("settings:update")({}, {
+    codex: {
+      path: "/new/codex",
+      model: "new-model",
+      timeoutMs: 2200,
+    },
+  });
+  assert.equal(updated.ok, true);
+  assert.equal(calls[0].executable, "/old/codex");
+  assert.equal(calls[0].options.model, "old-model");
+  assert.equal(calls[0].options.timeoutMs, 1100);
+
+  releaseFirst();
+  await analysis.whenIdle();
+  const second = await registrations.get("analysis:start")({}, request);
+  assert.equal(second.ok, true);
+  await analysis.whenIdle();
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].executable, "/new/codex");
+  assert.equal(calls[1].options.model, "new-model");
+  assert.equal(calls[1].options.timeoutMs, 2200);
 });

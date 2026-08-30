@@ -261,6 +261,7 @@ test("main IPC rejects unsafe screenshot IDs before calling the service", async 
 test("settings reset reapplies the default capture protection state", async () => {
   const registrations = new Map();
   const appliedPrivacy = [];
+  const appliedCodex = [];
   const appliedShortcuts = [];
   const ipcMain = {
     handle(channel, handler) {
@@ -271,6 +272,15 @@ test("settings reset reapplies the default capture protection state", async () =
     shortcuts: {},
     window: {},
     privacy: { captureProtection: true },
+    codex: {
+      enabled: true,
+      path: "codex",
+      model: "gpt-5.6-sol",
+      fastModel: "gpt-5.6-luna",
+      timeoutMs: 120000,
+      sandboxMode: "read-only",
+      modelReasoningEffort: "medium",
+    },
   };
 
   registerIpcHandlers({
@@ -296,6 +306,7 @@ test("settings reset reapplies the default capture protection state", async () =
       clear: async () => ({ items: [], capturing: false, permission: "unavailable" }),
     },
     applyPrivacy: (enabled) => appliedPrivacy.push(enabled),
+    applyCodexSettings: (codex) => appliedCodex.push(codex),
     applyShortcuts: (shortcuts) => appliedShortcuts.push(shortcuts),
     getAppStatus: () => ({ name: "Fluely", version: "0.1.0", platform: "darwin", visible: true }),
   });
@@ -304,6 +315,7 @@ test("settings reset reapplies the default capture protection state", async () =
 
   assert.equal(result.ok, true);
   assert.deepEqual(appliedPrivacy, [true]);
+  assert.deepEqual(appliedCodex, [resetSettings.codex]);
   assert.deepEqual(appliedShortcuts, [resetSettings.shortcuts]);
 });
 

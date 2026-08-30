@@ -4,6 +4,7 @@ import type {
   AnalysisState,
   AnalysisStateChangedEvent,
   AppStatus,
+  CodexCliSettings,
   CodexStatus,
   FluelySettings,
   IpcError,
@@ -77,6 +78,7 @@ export interface IpcHandlerDependencies {
   windowTarget?: WindowHandlerService;
   browserWindow?: WindowHandlerService;
   applyPrivacy?: (enabled: boolean) => void;
+  applyCodexSettings?: (settings: CodexCliSettings) => void | Promise<void>;
   applyOpacity?: (opacity: number) => void | Promise<void>;
   applyWindowOpacity?: (opacity: number) => void | Promise<void>;
   applyShortcuts?: (shortcuts: ShortcutSettings) => IpcResult<ShortcutStatus> | void;
@@ -436,6 +438,7 @@ export function registerIpcHandlers({
   codexCli,
   browserWindow,
   applyPrivacy,
+  applyCodexSettings,
   applyOpacity,
   applyWindowOpacity,
   applyShortcuts,
@@ -456,6 +459,17 @@ export function registerIpcHandlers({
     }
 
     const result = await settings.update(normalizeSettingsPatch(payload));
+    if (result.ok && applyCodexSettings && result.value.codex) {
+      try {
+        await applyCodexSettings(result.value.codex);
+      } catch {
+        return failure<FluelySettings>({
+          code: "INTERNAL_ERROR",
+          message: "Fluely saved the requested settings but could not apply the Codex configuration.",
+          action: "Restart Fluely and try again.",
+        });
+      }
+    }
     if (result.ok && applyPrivacy && result.value.privacy && isRecord(payload) && isRecord(payload.privacy) &&
       typeof payload.privacy.captureProtection === "boolean") {
       applyPrivacy?.(result.value.privacy.captureProtection);
@@ -471,6 +485,17 @@ export function registerIpcHandlers({
 
   ipcMain.handle("settings:reset", async () => {
     const result = await settings.reset();
+    if (result.ok && applyCodexSettings && result.value.codex) {
+      try {
+        await applyCodexSettings(result.value.codex);
+      } catch {
+        return failure<FluelySettings>({
+          code: "INTERNAL_ERROR",
+          message: "Fluely restored its settings but could not apply the Codex configuration.",
+          action: "Restart Fluely to apply the restored Codex settings.",
+        });
+      }
+    }
     if (result.ok && applyPrivacy && result.value.privacy) {
       applyPrivacy?.(result.value.privacy.captureProtection);
     }
