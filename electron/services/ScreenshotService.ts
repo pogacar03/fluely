@@ -262,8 +262,20 @@ export class ScreenshotService {
           : captureTimedOut();
         const source = await this.selectSource((settled) => {
           pendingSource = settled;
-          notifyTimeout?.(timeoutError);
+          let timeoutNotice = timeoutError;
+          if (this.getPlatform() === "darwin" && initialPermission !== "not-determined") {
+            this.permission = this.readPermission();
+            timeoutNotice = permissionError(this.permission) ?? timeoutError;
+          }
+          notifyTimeout?.(timeoutNotice);
         }, timeoutError);
+        if (this.getPlatform() === "darwin") {
+          this.permission = this.readPermission();
+          const permissionFailure = permissionError(this.permission);
+          if (permissionFailure) {
+            throw permissionFailure;
+          }
+        }
         const imageBytes = source.thumbnail.toPNG();
         const size = source.thumbnail.getSize();
         const item: ScreenshotItem = {
@@ -278,10 +290,10 @@ export class ScreenshotService {
         await this.evictOldest();
         return { ...item };
       } catch (error) {
-        if (this.getPlatform() === "darwin" && initialPermission === "not-determined") {
+        if (this.getPlatform() === "darwin") {
           this.permission = this.readPermission();
           const refreshedPermissionError = permissionError(this.permission);
-          if (refreshedPermissionError) {
+          if (refreshedPermissionError && this.permission !== "granted") {
             throw refreshedPermissionError;
           }
         }

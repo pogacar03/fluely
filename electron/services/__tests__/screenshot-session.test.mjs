@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const modulePath = path.resolve(__dirname, "../../../dist-electron/electron/services/screenshot-session.js");
 const shortcutModulePath = path.resolve(__dirname, "../../../dist-electron/electron/services/ShortcutManager.js");
-const { isScreenshotSessionActive, runScreenshotSession } = await import(pathToFileURL(modulePath).href);
+const { isScreenshotSessionActive, runScreenshotSession, waitForScreenshotSessionIdle } = await import(pathToFileURL(modulePath).href);
 const { ShortcutManager } = await import(pathToFileURL(shortcutModulePath).href);
 
 function makeWindow(visible = true) {
@@ -243,6 +243,31 @@ test("screenshot session rejects an overlapping capture", async () => {
   await assert.rejects(secondCapture, (error) => error?.code === "CAPTURE_IN_PROGRESS");
   releaseCapture();
   assert.equal(await firstCapture, "first capture");
+  assert.equal(window.visible, true);
+});
+
+test("screenshot session idle gate resolves only after the active session restores", async () => {
+  assert.equal(typeof waitForScreenshotSessionIdle, "function");
+  const window = makeWindow(true);
+  let releaseCapture;
+  const capture = new Promise((resolve) => { releaseCapture = resolve; });
+  const session = runScreenshotSession({
+    window,
+    platform: "linux",
+    capture: () => capture,
+    wait: async () => undefined,
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  let idleResolved = false;
+  const idle = waitForScreenshotSessionIdle().then(() => { idleResolved = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(idleResolved, false);
+
+  releaseCapture("captured");
+  await session;
+  await idle;
+  assert.equal(idleResolved, true);
   assert.equal(window.visible, true);
 });
 

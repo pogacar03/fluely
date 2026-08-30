@@ -15,7 +15,7 @@ const { createScreenshotWorkflow, attachWindowLifecycle, attachApplicationLifecy
 const { ShortcutManager } = await import(pathToFileURL(shortcutPath).href);
 const { registerIpcHandlers } = await import(pathToFileURL(handlersPath).href);
 const { ScreenshotService } = await import(pathToFileURL(screenshotServicePath).href);
-const { isScreenshotSessionActive } = await import(pathToFileURL(sessionPath).href);
+const { isScreenshotSessionActive, waitForScreenshotSessionIdle } = await import(pathToFileURL(sessionPath).href);
 
 function makeWindow(visible = true) {
   return {
@@ -270,6 +270,41 @@ test("window lifecycle does not show a window when a screenshot session is activ
   assert.equal(closed, 1);
 });
 
+test("window lifecycle retries a ready window after the screenshot session gate releases", async () => {
+  const listeners = new Map();
+  const window = {
+    showCalls: 0,
+    once(event, listener) {
+      listeners.set(event, listener);
+    },
+    on() {},
+    show() {
+      this.showCalls += 1;
+    },
+    isDestroyed() {
+      return false;
+    },
+  };
+  let active = true;
+  let releaseIdle;
+  const idle = new Promise((resolve) => { releaseIdle = resolve; });
+
+  attachWindowLifecycle({
+    window,
+    isCaptureActive: () => active,
+    waitForCaptureIdle: () => idle,
+    onReadyToShow: () => window.show(),
+    onClosed: () => undefined,
+  });
+
+  listeners.get("ready-to-show")();
+  assert.equal(window.showCalls, 0);
+  active = false;
+  releaseIdle();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(window.showCalls, 1);
+});
+
 test("application lifecycle reasserts privacy on activate and recreates a closed window", () => {
   let activateListener;
   const app = {
@@ -322,6 +357,7 @@ test("composition holds the hidden window and session gate through a timed-out n
   attachWindowLifecycle({
     window,
     isCaptureActive: isScreenshotSessionActive,
+    waitForCaptureIdle: waitForScreenshotSessionIdle,
     onReadyToShow: () => window.show(),
     onClosed: () => service.dispose(),
   });
@@ -339,6 +375,7 @@ test("composition holds the hidden window and session gate through a timed-out n
   await service.whenIdle();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(window.visible, true);
+  assert.equal(window.showCalls, 2);
   service.dispose();
   await rm(directory, { recursive: true, force: true });
 });

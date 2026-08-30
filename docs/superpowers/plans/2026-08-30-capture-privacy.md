@@ -38,6 +38,12 @@
 - `validateShortcutSettings` is shared by settings-core and `ShortcutManager`. Registration throws return `INTERNAL_ERROR` with best-effort rollback; settings IPC propagates an `applyShortcuts` failure. The OS-conflict `ok:true`/unavailable status remains unchanged.
 - `ScreenshotService` accepts a focused filesystem adapter (default `node:fs/promises`) so tests verify temp write → rename and temp unlink after either failure. The shared `subscribeToScreenshotState` helper owns renderer listener activity and idempotent cleanup.
 
+### Final review decisions
+
+- A Darwin permission transition is checked after source enumeration and before thumbnail bytes are generated or persisted. Native rejection and timeout errors use the current permission, except an initial `not-determined` timeout which retains the first-use permission-required guidance.
+- The shared screenshot-session idle promise is the `ready-to-show` release signal. The lifecycle helper remembers readiness, retries after release, and keeps destroyed or never-settling windows hidden.
+- Renderer settings save/reset are handled by `runSettingsAction`, which guards all post-await updates, reports transport failures, and clears busy state in `finally`; the App effect reactivates its mounted ref on each setup for React StrictMode.
+
 ---
 
 ### Task 1: Complete capture-privacy vertical slice
@@ -74,7 +80,8 @@
 - `CapturePrivacyController.apply(window, enabled)`, `reassert()`, and `dispose()` own window protection listeners.
 - `ScreenshotService.capture(): Promise<ScreenshotItem>`, `getState(): ScreenshotState`, `delete(id): Promise<ScreenshotState>`, and `clear(): Promise<ScreenshotState>` own the managed queue.
 - `runScreenshotSession({ window, platform, capture, whenIdle, wait }): Promise<T>` owns concurrency-safe visibility restoration; `whenIdle` is optional for callers that do not have a native mutation tail.
-- `attachWindowLifecycle({ window, isCaptureActive, onReadyToShow, onClosed })` gates real `ready-to-show` and close handling.
+- `attachWindowLifecycle({ window, isCaptureActive, waitForCaptureIdle, onReadyToShow, onClosed })` retains a ready event observed during capture and retries only after the injected idle gate releases.
+- `waitForScreenshotSessionIdle(): Promise<void>` resolves when the shared screenshot-session visibility gate has restored and released.
 - `attachApplicationLifecycle({ app, hasWindows, reassertPrivacy, createWindow })` keeps activation reassertion and recreation injectable and is used by `main.ts`.
 - `DockPrivacyCoordinator.setHidden(hidden, onSettled?)` serializes documented Darwin Dock visibility operations.
 - `ScreenshotService.whenIdle(): Promise<void>` and its injected filesystem adapter are internal main-process seams.

@@ -16,10 +16,31 @@ export interface ScreenshotSessionOptions<T> {
 }
 
 let sessionActive = false;
+const sessionIdleResolvers = new Set<() => void>();
 
 /** Returns whether a screenshot session currently owns visibility restoration. */
 export function isScreenshotSessionActive(): boolean {
   return sessionActive;
+}
+
+/** Resolves when the current screenshot session has released its visibility gate. */
+export function waitForScreenshotSessionIdle(): Promise<void> {
+  if (!sessionActive) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    sessionIdleResolvers.add(resolve);
+  });
+}
+
+function releaseScreenshotSession(): void {
+  sessionActive = false;
+  const resolvers = [...sessionIdleResolvers];
+  sessionIdleResolvers.clear();
+  for (const resolve of resolvers) {
+    resolve();
+  }
 }
 
 const captureInProgress = {
@@ -70,7 +91,7 @@ export async function runScreenshotSession<T>({
     } catch {
       // A teardown race must not strand the session gate or create an unhandled rejection.
     } finally {
-      sessionActive = false;
+      releaseScreenshotSession();
     }
   };
 

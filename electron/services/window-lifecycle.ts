@@ -8,6 +8,7 @@ export interface WindowLifecycleTarget {
 export interface WindowLifecycleOptions {
   window: WindowLifecycleTarget;
   isCaptureActive: () => boolean;
+  waitForCaptureIdle?: () => Promise<void>;
   onReadyToShow?: () => void;
   onClosed: () => void;
 }
@@ -27,16 +28,60 @@ export interface ApplicationLifecycleOptions {
 export function attachWindowLifecycle({
   window,
   isCaptureActive,
+  waitForCaptureIdle,
   onReadyToShow = () => window.show(),
   onClosed,
 }: WindowLifecycleOptions): void {
-  window.once("ready-to-show", () => {
-    if (isCaptureActive() || window.isDestroyed?.()) {
+  let ready = false;
+  let shown = false;
+  let closed = false;
+  let waitingForCaptureIdle: Promise<void> | undefined;
+
+  const attemptShow = (): void => {
+    if (!ready || shown || closed || window.isDestroyed?.()) {
       return;
     }
+
+    if (isCaptureActive()) {
+      if (!waitForCaptureIdle || waitingForCaptureIdle) {
+        return;
+      }
+
+      let idle: Promise<void>;
+      try {
+        idle = Promise.resolve(waitForCaptureIdle());
+      } catch {
+        return;
+      }
+      waitingForCaptureIdle = idle;
+      void idle.then(
+        () => {
+          if (waitingForCaptureIdle === idle) {
+            waitingForCaptureIdle = undefined;
+          }
+          attemptShow();
+        },
+        () => {
+          if (waitingForCaptureIdle === idle) {
+            waitingForCaptureIdle = undefined;
+          }
+        },
+      );
+      return;
+    }
+
+    shown = true;
     onReadyToShow();
+  };
+
+  window.once("ready-to-show", () => {
+    ready = true;
+    attemptShow();
   });
-  window.on("closed", onClosed);
+  window.on("closed", () => {
+    closed = true;
+    onClosed();
+  });
 }
 
 /** Keeps app activation on the same privacy/recreation path as the real main process. */

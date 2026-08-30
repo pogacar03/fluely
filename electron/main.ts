@@ -16,7 +16,7 @@ import { SettingsService } from "./services/SettingsService";
 import { ScreenshotService } from "./services/ScreenshotService";
 import { ShortcutManager } from "./services/ShortcutManager";
 import { createScreenshotWorkflow } from "./services/capture-workflow";
-import { isScreenshotSessionActive } from "./services/screenshot-session";
+import { isScreenshotSessionActive, waitForScreenshotSessionIdle } from "./services/screenshot-session";
 import { attachApplicationLifecycle, attachWindowLifecycle } from "./services/window-lifecycle";
 import { getWindowPreferences } from "./windowConfig";
 
@@ -66,6 +66,7 @@ export function createMainWindow(settings: FluelySettings = DEFAULT_SETTINGS): B
   attachWindowLifecycle({
     window,
     isCaptureActive: isScreenshotSessionActive,
+    waitForCaptureIdle: waitForScreenshotSessionIdle,
     onReadyToShow: () => window.show(),
     onClosed: () => {
       if (mainWindow === window) {

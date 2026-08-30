@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { subscribeToScreenshotState } from "../shared/ipc";
+import { runSettingsAction } from "../shared/settings-actions";
 import type {
   FluelySettings,
   IpcError,
@@ -49,8 +50,10 @@ export function App() {
   const [busy, setBusy] = useState(true);
   const [screenshotBusy, setScreenshotBusy] = useState(false);
   const [notice, setNotice] = useState<{ tone: "success" | "error"; text: string } | null>(null);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
+    mountedRef.current = true;
     let active = true;
 
     async function refreshScreenshotState() {
@@ -120,6 +123,7 @@ export function App() {
 
     return () => {
       active = false;
+      mountedRef.current = false;
       window.removeEventListener("focus", refreshOnFocus);
       unsubscribeScreenshotState();
     };
@@ -201,40 +205,37 @@ export function App() {
       return;
     }
 
-    setBusy(true);
-    const result = await window.fluely.settings.update({
-      shortcuts: draft.shortcuts,
-      window: draft.window,
+    await runSettingsAction({
+      action: "save",
+      api: window.fluely,
+      patch: {
+        shortcuts: draft.shortcuts,
+        window: draft.window,
+      },
+      callbacks: {
+        isActive: () => mountedRef.current,
+        setBusy,
+        setSettings,
+        setDraft,
+        setShortcutStatus,
+        setNotice,
+      },
     });
-    if (result.ok) {
-      setSettings(result.value);
-      setDraft(result.value);
-      const shortcutsResult = await window.fluely.shortcuts.get();
-      if (shortcutsResult.ok) {
-        setShortcutStatus(shortcutsResult.value);
-      }
-      setNotice({ tone: "success", text: "Settings saved locally." });
-    } else {
-      setNotice({ tone: "error", text: `${result.error.message} ${result.error.action}` });
-    }
-    setBusy(false);
   }
 
   async function resetSettings() {
-    setBusy(true);
-    const result = await window.fluely.settings.reset();
-    if (result.ok) {
-      setSettings(result.value);
-      setDraft(result.value);
-      const shortcutsResult = await window.fluely.shortcuts.get();
-      if (shortcutsResult.ok) {
-        setShortcutStatus(shortcutsResult.value);
-      }
-      setNotice({ tone: "success", text: "Defaults restored." });
-    } else {
-      setNotice({ tone: "error", text: `${result.error.message} ${result.error.action}` });
-    }
-    setBusy(false);
+    await runSettingsAction({
+      action: "reset",
+      api: window.fluely,
+      callbacks: {
+        isActive: () => mountedRef.current,
+        setBusy,
+        setSettings,
+        setDraft,
+        setShortcutStatus,
+        setNotice,
+      },
+    });
   }
 
   const activeSettings = draft ?? settings;

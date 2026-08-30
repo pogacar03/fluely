@@ -77,6 +77,7 @@ The existing status panel displays capture-protection state, screen-capture perm
 ## Error Handling
 
 - `denied` and `restricted` states return distinct actionable errors. `not-determined` is allowed through the first protected `getSources()` call so macOS can register consent; after a failure the service rereads the status and maps the resulting state explicitly.
+- Darwin permission is reread after `getSources()` resolves and before `thumbnail.toPNG()` or persistence. A transition from `granted` to a non-granted state therefore produces the current actionable permission error and no PNG; native rejection and timeout paths likewise map the current state, while an initial `not-determined` timeout retains the first-use permission-required guidance.
 - Source enumeration has a five-second caller timeout. The native Promise remains tracked until settle; while it is pending, `capturing` stays true and no second enumeration can start.
 - If capture began with Darwin permission `not-determined`, that five-second caller error is `SCREEN_CAPTURE_PERMISSION_REQUIRED` with System Settings guidance; the eventual state is reread after native settlement.
 - An empty source list or unmatched display returns a stable capture error.

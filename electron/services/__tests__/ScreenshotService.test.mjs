@@ -175,6 +175,109 @@ test("ScreenshotService returns an actionable first-use permission timeout", asy
   assert.equal(states.at(-1).permission, "denied");
 });
 
+test("ScreenshotService blocks persistence when granted permission is revoked before source success", async () => {
+  const directory = await makeDirectory();
+  let permission = "granted";
+  let releaseSources;
+  let sourceStarted;
+  const started = new Promise((resolve) => { sourceStarted = resolve; });
+  let toPngCalls = 0;
+  const adapters = makeAdapters({
+    platform: "darwin",
+    getSources: () => {
+      return new Promise((resolve) => {
+        releaseSources = resolve;
+        sourceStarted();
+      });
+    },
+  });
+  adapters.systemPreferences.getMediaAccessStatus = () => permission;
+  const service = makeService(directory, adapters, {
+    idFactory: () => "44444444-4444-4444-8444-444444444444",
+  });
+  const source = {
+    display_id: "42",
+    thumbnail: {
+      toPNG: () => {
+        toPngCalls += 1;
+        return Buffer.from("revoked");
+      },
+      getSize: () => ({ width: 1920, height: 1080 }),
+    },
+  };
+
+  const capture = service.capture();
+  await started;
+  permission = "denied";
+  releaseSources([source]);
+
+  await assert.rejects(capture, (error) => error?.code === "SCREEN_CAPTURE_DENIED" && /System Settings/i.test(error.action));
+  assert.equal(toPngCalls, 0);
+  assert.equal(service.getState().items.length, 0);
+  assert.equal(service.getState().permission, "denied");
+  assert.deepEqual(await readdir(directory), []);
+});
+
+test("ScreenshotService maps a revoked permission at timeout instead of returning a generic timeout", async () => {
+  const directory = await makeDirectory();
+  let permission = "granted";
+  let releaseSources;
+  const sourcePromise = new Promise((resolve) => {
+    releaseSources = resolve;
+  });
+  let sourceStarted;
+  const started = new Promise((resolve) => { sourceStarted = resolve; });
+  const adapters = makeAdapters({
+    platform: "darwin",
+    getSources: () => {
+      sourceStarted();
+      return sourcePromise;
+    },
+  });
+  adapters.systemPreferences.getMediaAccessStatus = () => permission;
+  const service = makeService(directory, adapters, { sourceTimeoutMs: 5 });
+
+  const capture = service.capture();
+  const captureResult = assert.rejects(
+    capture,
+    (error) => error?.code === "SCREEN_CAPTURE_DENIED" && /System Settings/i.test(error.action),
+  );
+  await started;
+  permission = "denied";
+
+  await captureResult;
+  releaseSources([]);
+  await service.whenIdle();
+  assert.equal(service.getState().permission, "denied");
+});
+
+test("ScreenshotService remaps a native rejection to the current revoked permission", async () => {
+  const directory = await makeDirectory();
+  let permission = "granted";
+  let rejectSources;
+  let sourceStarted;
+  const started = new Promise((resolve) => { sourceStarted = resolve; });
+  const adapters = makeAdapters({
+    platform: "darwin",
+    getSources: () => {
+      sourceStarted();
+      return new Promise((resolve, reject) => { rejectSources = reject; });
+    },
+  });
+  adapters.systemPreferences.getMediaAccessStatus = () => permission;
+  const service = makeService(directory, adapters, { sourceTimeoutMs: 100 });
+
+  const capture = service.capture();
+  await started;
+  permission = "restricted";
+  rejectSources(new Error("native capture rejected"));
+
+  await assert.rejects(capture, (error) => error?.code === "SCREEN_CAPTURE_RESTRICTED" && /administrator/i.test(error.action));
+  assert.equal(service.getState().items.length, 0);
+  assert.equal(service.getState().permission, "restricted");
+  assert.deepEqual(await readdir(directory), []);
+});
+
 test("ScreenshotService whenIdle waits for a late native rejection without an unhandled rejection", async () => {
   const directory = await makeDirectory();
   let rejectSources;
