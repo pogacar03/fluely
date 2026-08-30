@@ -14,10 +14,18 @@ export interface DockPrivacyAdapter {
 }
 
 export interface DockPrivacyPolicy {
-  setHidden(hidden: boolean, onSettled?: () => void): void | PromiseLike<void>;
+  setHidden(hidden: boolean, onSettled?: () => void, owner?: object): void | PromiseLike<void>;
 }
 
 export type PlatformDetector = NodeJS.Platform | (() => NodeJS.Platform);
+
+interface DockPrivacyTask {
+  hidden: boolean;
+  generation: number;
+  onSettled?: () => void;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}
 
 function isDestroyed(window: CapturePrivacyWindow): boolean {
   return window.isDestroyed?.() ?? false;
@@ -31,55 +39,80 @@ function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
 /** Serializes public Dock hide/show calls and keeps the newest settled intent authoritative. */
 export class DockPrivacyCoordinator implements DockPrivacyPolicy {
   private generation = 0;
-  private busy = false;
-  private tail: Promise<void> = Promise.resolve();
+  private processing = false;
+  private readonly queue: DockPrivacyTask[] = [];
+  private readonly owners = new Set<object>();
+  private directIntent = false;
 
   public constructor(private readonly adapter: DockPrivacyAdapter) {}
 
-  public setHidden(hidden: boolean, onSettled?: () => void): Promise<void> {
+  public setHidden(hidden: boolean, onSettled?: () => void, owner?: object): Promise<void> {
     const generation = ++this.generation;
-    const start = () => this.startAction(hidden, generation, onSettled);
-
-    if (!this.busy) {
-      this.busy = true;
-      try {
-        const action = start();
-        if (!isPromiseLike(action)) {
-          this.busy = false;
-          this.tail = Promise.resolve();
-          return Promise.resolve();
-        }
-
-        const operation = Promise.resolve(action).then(
-          () => {
-            this.busy = false;
-          },
-          (error: unknown) => {
-            this.busy = false;
-            throw error;
-          },
-        );
-        this.tail = operation.then(() => undefined, () => undefined);
-        return operation;
-      } catch (error) {
-        this.busy = false;
-        const operation = Promise.reject(error);
-        this.tail = operation.then(() => undefined, () => undefined);
-        return operation;
+    let actionHidden = hidden;
+    if (owner) {
+      if (hidden) {
+        this.owners.add(owner);
+      } else {
+        this.owners.delete(owner);
       }
+      actionHidden = this.owners.size > 0 || this.directIntent;
+    } else {
+      this.directIntent = hidden;
+      actionHidden = this.owners.size > 0 || hidden;
     }
 
-    const operation = this.tail.then(start, start).then(
+    let resolveTask!: () => void;
+    let rejectTask!: (error: unknown) => void;
+    const operation = new Promise<void>((resolve, reject) => {
+      resolveTask = resolve;
+      rejectTask = reject;
+    });
+
+    this.queue.push({ hidden: actionHidden, generation, onSettled, resolve: resolveTask, reject: rejectTask });
+    this.drain();
+    return operation;
+  }
+
+  private drain(): void {
+    if (this.processing) {
+      return;
+    }
+
+    const task = this.queue.shift();
+    if (!task) {
+      return;
+    }
+
+    this.processing = true;
+    let action: void | PromiseLike<unknown>;
+    try {
+      action = this.startAction(task.hidden, task.generation, task.onSettled);
+    } catch (error) {
+      task.reject(error);
+      this.processing = false;
+      this.drain();
+      return;
+    }
+
+    if (!isPromiseLike(action)) {
+      task.resolve();
+      this.processing = false;
+      this.drain();
+      return;
+    }
+
+    void Promise.resolve(action).then(
       () => {
-        this.busy = false;
+        task.resolve();
+        this.processing = false;
+        this.drain();
       },
       (error: unknown) => {
-        this.busy = false;
-        throw error;
+        task.reject(error);
+        this.processing = false;
+        this.drain();
       },
     );
-    this.tail = operation.then(() => undefined, () => undefined);
-    return operation;
   }
 
   private startAction(
@@ -117,6 +150,7 @@ export class CapturePrivacyController {
   private window: CapturePrivacyWindow | null = null;
   private enabled = true;
   private ownsDockHide = false;
+  private readonly dockOwner = {};
   private readonly platformDetector: () => NodeJS.Platform;
   private readonly dockPolicy: DockPrivacyPolicy | undefined;
   private readonly onShow = (): void => {
@@ -150,17 +184,26 @@ export class CapturePrivacyController {
     this.window = null;
     this.enabled = enabled;
 
-    if (isDestroyed(window)) {
+    const nextOwnsDockHide = this.platformDetector() === "darwin" && enabled && !!this.dockPolicy && !isDestroyed(window);
+    if (previouslyOwnedDockHide && !nextOwnsDockHide) {
       this.ownsDockHide = false;
-      if (previouslyOwnedDockHide) {
-        this.requestDockPolicy(false);
-      }
+      this.requestDockPolicy(false, this.dockOwner);
+    }
+
+    if (isDestroyed(window)) {
       return;
     }
 
     this.window = window;
-    this.ownsDockHide = this.platformDetector() === "darwin" && enabled;
-    if (!this.requestDockPolicy()) {
+    this.ownsDockHide = nextOwnsDockHide;
+    if (nextOwnsDockHide) {
+      if (!this.requestDockPolicy(true, this.dockOwner)) {
+        this.applyToWindow(window);
+      }
+    } else if (!previouslyOwnedDockHide && !this.requestDockPolicy(false)) {
+      this.applyToWindow(window);
+    } else if (previouslyOwnedDockHide) {
+      // The release request above owns Dock ordering; protect the replacement window now.
       this.applyToWindow(window);
     }
     try {
@@ -185,7 +228,7 @@ export class CapturePrivacyController {
     this.window = null;
     if (this.platformDetector() === "darwin" && this.ownsDockHide) {
       this.ownsDockHide = false;
-      this.requestDockPolicy(false);
+      this.requestDockPolicy(false, this.dockOwner);
     }
   }
 
@@ -227,15 +270,13 @@ export class CapturePrivacyController {
     }
   }
 
-  private requestDockPolicy(forceEnabled?: boolean): boolean {
+  private requestDockPolicy(forceEnabled?: boolean, owner?: object): boolean {
     if (this.platformDetector() !== "darwin" || !this.dockPolicy) {
       return false;
     }
 
     const enabled = forceEnabled ?? this.enabled;
-    if (enabled) {
-      this.ownsDockHide = true;
-    }
+    const policyOwner = owner ?? (enabled ? this.dockOwner : undefined);
 
     try {
       let settledSynchronously = false;
@@ -244,7 +285,7 @@ export class CapturePrivacyController {
         if (this.window && !isDestroyed(this.window)) {
           this.applyToWindow(this.window);
         }
-      });
+      }, policyOwner);
       void Promise.resolve(result).catch(() => undefined);
       return settledSynchronously;
     } catch {

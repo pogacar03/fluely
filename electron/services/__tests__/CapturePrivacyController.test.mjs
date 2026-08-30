@@ -229,3 +229,54 @@ test("shared Dock coordinator continues with the latest intent after an async re
 
   assert.deepEqual(calls, ["hide", "show"]);
 });
+
+test("Dock coordinator keeps a queued intent ahead of a later intent after async settle", async () => {
+  const calls = [];
+  const settled = [];
+  let releaseFirstHide;
+  const coordinator = new DockPrivacyCoordinator({
+    hide: () => {
+      calls.push("hide");
+      if (calls.filter((call) => call === "hide").length === 1) {
+        return new Promise((resolve) => { releaseFirstHide = resolve; });
+      }
+      return Promise.resolve();
+    },
+    show: () => {
+      calls.push("show");
+      return Promise.resolve();
+    },
+  });
+
+  const first = coordinator.setHidden(true, () => settled.push("first"));
+  const second = coordinator.setHidden(false, () => settled.push("second"));
+  releaseFirstHide();
+  await Promise.resolve();
+  await Promise.resolve();
+  const third = coordinator.setHidden(true, () => settled.push("third"));
+
+  await Promise.all([first, second, third]);
+
+  assert.deepEqual(calls, ["hide", "show", "hide"]);
+  assert.deepEqual(settled, ["third"]);
+});
+
+test("shared Dock ownership keeps the Dock hidden until every hiding controller disposes", () => {
+  const calls = [];
+  const dock = {
+    hide: () => calls.push("hide"),
+    show: () => calls.push("show"),
+  };
+  const first = new CapturePrivacyController("darwin", dock);
+  const second = new CapturePrivacyController("darwin", dock);
+
+  first.apply(makeWindow(), true);
+  second.apply(makeWindow(), true);
+  first.dispose();
+
+  assert.deepEqual(calls, ["hide", "hide", "hide"]);
+
+  second.dispose();
+
+  assert.deepEqual(calls, ["hide", "hide", "hide", "show"]);
+});
