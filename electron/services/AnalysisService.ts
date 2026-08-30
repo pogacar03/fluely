@@ -330,17 +330,21 @@ export class AnalysisService {
     request: Record<string, unknown>,
     selection: ResolvedSelection,
   ): Promise<void> {
-    const options: CodexCliStreamOptions = {
-      prompt: buildAnalysisPrompt(request, selection.ids),
-      model: this.state.model,
-      imagePaths: selection.paths,
-      sandboxMode: this.codex.sandboxMode,
-      reasoningEffort: this.codex.modelReasoningEffort,
-      timeoutMs: this.codex.timeoutMs,
-      signal: controller.signal,
-    };
-
     try {
+      if (!this.isActive(token)) {
+        return;
+      }
+
+      const options: CodexCliStreamOptions = {
+        prompt: buildAnalysisPrompt(request, selection.ids),
+        model: this.state.model,
+        imagePaths: selection.paths,
+        sandboxMode: this.codex.sandboxMode,
+        reasoningEffort: this.codex.modelReasoningEffort,
+        timeoutMs: this.codex.timeoutMs,
+        signal: controller.signal,
+      };
+
       for await (const delta of this.provider.stream(this.codex.path, options)) {
         if (!this.isActive(token)) {
           return;
@@ -394,7 +398,12 @@ export class AnalysisService {
       updatedAt: timestamp,
       completedAt: timestamp,
     };
-    this.active = null;
+    // Cancellation publishes the terminal state immediately, but keeps the
+    // active lock until the provider iterator's finally block settles. This
+    // prevents a new child from overlapping one still being terminated.
+    if (status === "completed") {
+      this.active = null;
+    }
     this.emit(status === "completed" ? "completed" : "cancelled");
   }
 

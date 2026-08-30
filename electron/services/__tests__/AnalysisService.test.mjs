@@ -78,6 +78,10 @@ test("AnalysisService rejects a second request while the first stream is running
     (error) => error?.code === "ANALYSIS_IN_PROGRESS",
   );
 
+  for (let attempt = 0; attempt < 20 && typeof release !== "function"; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(typeof release, "function");
   await service.cancel();
   release();
   await service.whenIdle();
@@ -156,6 +160,48 @@ test("AnalysisService cancellation aborts the provider and never completes the p
   await service.whenIdle();
   assert.equal(service.getState().status, "cancelled");
   assert.equal(events.some((event) => event.event === "completed"), false);
+});
+
+test("AnalysisService holds its start lock until a cancelled provider stream settles", async () => {
+  const releases = [];
+  const provider = {
+    stream: (_path, options) => {
+      return (async function* () {
+        yield "partial";
+        await new Promise((resolve) => releases.push(resolve));
+        if (options.signal.aborted) {
+          return;
+        }
+        yield "late";
+      })();
+    },
+  };
+  const service = makeService({ provider });
+
+  service.start({ prompt: "First", screenshotIds: [FIRST_ID], intent: "answer", fast: false });
+  for (let attempt = 0; attempt < 20 && releases.length === 0; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(releases.length, 1);
+
+  service.cancel();
+  assert.throws(
+    () => service.start({ prompt: "Overlapping", screenshotIds: [FIRST_ID], intent: "answer", fast: false }),
+    (error) => error?.code === "ANALYSIS_IN_PROGRESS",
+  );
+
+  releases.shift()();
+  await service.whenIdle();
+
+  service.start({ prompt: "After cleanup", screenshotIds: [FIRST_ID], intent: "answer", fast: false });
+  assert.equal(service.getState().status, "running");
+  for (let attempt = 0; attempt < 20 && releases.length === 0; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(releases.length, 1);
+  service.cancel();
+  releases.shift()();
+  await service.whenIdle();
 });
 
 test("AnalysisService reports provider failures without changing the screenshot queue", async () => {
