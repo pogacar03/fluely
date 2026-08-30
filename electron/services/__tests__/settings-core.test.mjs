@@ -17,9 +17,71 @@ test("normalizeSettings returns Fluely defaults for empty input", () => {
       captureAndAnalyze: "CommandOrControl+Shift+Enter",
       cancelAndClear: "CommandOrControl+R",
     },
-    window: { width: 960, height: 720 },
+    window: { width: 960, height: 720, opacity: 0.92 },
     privacy: { captureProtection: true },
+    setupComplete: false,
+    codex: {
+      enabled: true,
+      path: "codex",
+      model: "gpt-5.6-sol",
+      fastModel: "gpt-5.6-luna",
+      timeoutMs: 120000,
+      sandboxMode: "read-only",
+      modelReasoningEffort: "medium",
+    },
   });
+});
+
+test("normalizeSettings applies safe Codex and window defaults for invalid values", () => {
+  const settings = normalizeSettings({
+    setupComplete: "yes",
+    window: { opacity: "opaque" },
+    codex: {
+      enabled: "yes",
+      path: "   ",
+      model: "   ",
+      fastModel: "   ",
+      timeoutMs: -1,
+      sandboxMode: "unrestricted",
+      modelReasoningEffort: "extreme",
+    },
+  });
+
+  assert.equal(settings.setupComplete, false);
+  assert.equal(settings.window.opacity, 0.92);
+  assert.deepEqual(settings.codex, DEFAULT_SETTINGS.codex);
+});
+
+test("normalizeSettings clamps opacity and preserves valid Codex configuration", () => {
+  const settings = normalizeSettings({
+    setupComplete: true,
+    window: { opacity: 4 },
+    codex: {
+      enabled: false,
+      path: " /custom/bin/codex ",
+      model: " gpt-custom ",
+      fastModel: " gpt-fast ",
+      timeoutMs: 45000,
+      sandboxMode: "workspace-write",
+      modelReasoningEffort: "xhigh",
+    },
+  });
+
+  assert.equal(settings.setupComplete, true);
+  assert.equal(settings.window.opacity, 1);
+  assert.deepEqual(settings.codex, {
+    enabled: false,
+    path: "/custom/bin/codex",
+    model: "gpt-custom",
+    fastModel: "gpt-fast",
+    timeoutMs: 45000,
+    sandboxMode: "workspace-write",
+    modelReasoningEffort: "xhigh",
+  });
+});
+
+test("normalizeSettings clamps opacity at the minimum safe value", () => {
+  assert.equal(normalizeSettings({ window: { opacity: 0 } }).window.opacity, 0.35);
 });
 
 test("normalizeSettings keeps capture protection enabled by default and accepts an explicit choice", () => {

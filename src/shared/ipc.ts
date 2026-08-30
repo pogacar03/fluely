@@ -16,22 +16,41 @@ export interface ShortcutSettings {
 export interface WindowSettings {
   width: number;
   height: number;
+  opacity: number;
 }
 
 export interface PrivacySettings {
   captureProtection: boolean;
 }
 
+export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
+
+export type CodexModelReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export interface CodexCliSettings {
+  enabled: boolean;
+  path: string;
+  model: string;
+  fastModel: string;
+  timeoutMs: number;
+  sandboxMode: CodexSandboxMode;
+  modelReasoningEffort?: CodexModelReasoningEffort;
+}
+
 export interface FluelySettings {
+  setupComplete: boolean;
   shortcuts: ShortcutSettings;
   window: WindowSettings;
   privacy: PrivacySettings;
+  codex: CodexCliSettings;
 }
 
 export type SettingsPatch = Partial<{
+  setupComplete: boolean;
   shortcuts: Partial<ShortcutSettings>;
   window: Partial<WindowSettings>;
   privacy: Partial<PrivacySettings>;
+  codex: Partial<CodexCliSettings>;
 }>;
 
 export type ScreenshotPermission =

@@ -1,4 +1,7 @@
 import type {
+  CodexCliSettings,
+  CodexModelReasoningEffort,
+  CodexSandboxMode,
   FluelySettings,
   IpcError,
   PrivacySettings,
@@ -28,16 +31,45 @@ const DEFAULT_PRIVACY: PrivacySettings = {
   captureProtection: true,
 };
 
+export const DEFAULT_CODEX: CodexCliSettings = {
+  enabled: true,
+  path: "codex",
+  model: "gpt-5.6-sol",
+  fastModel: "gpt-5.6-luna",
+  timeoutMs: 120000,
+  sandboxMode: "read-only",
+  modelReasoningEffort: "medium",
+};
+
 export const DEFAULT_SETTINGS: FluelySettings = {
+  setupComplete: false,
   shortcuts: { ...DEFAULT_SHORTCUTS },
-  window: { width: 960, height: 720 },
+  window: { width: 960, height: 720, opacity: 0.92 },
   privacy: { ...DEFAULT_PRIVACY },
+  codex: { ...DEFAULT_CODEX },
 };
 
 const MIN_WINDOW_WIDTH = 480;
 const MAX_WINDOW_WIDTH = 1600;
 const MIN_WINDOW_HEIGHT = 360;
 const MAX_WINDOW_HEIGHT = 1400;
+const MIN_WINDOW_OPACITY = 0.35;
+const MAX_WINDOW_OPACITY = 1;
+
+const CODEX_SANDBOX_MODES: readonly CodexSandboxMode[] = [
+  "read-only",
+  "workspace-write",
+  "danger-full-access",
+];
+
+const CODEX_REASONING_EFFORTS: readonly CodexModelReasoningEffort[] = [
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -45,9 +77,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function cloneDefaultSettings(): FluelySettings {
   return {
+    setupComplete: DEFAULT_SETTINGS.setupComplete,
     shortcuts: { ...DEFAULT_SETTINGS.shortcuts },
     window: { ...DEFAULT_SETTINGS.window },
     privacy: { ...DEFAULT_SETTINGS.privacy },
+    codex: { ...DEFAULT_SETTINGS.codex },
   };
 }
 
@@ -66,6 +100,38 @@ function normalizeDimension(value: unknown, fallback: number, min: number, max: 
   }
 
   return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function normalizeOpacity(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.min(MAX_WINDOW_OPACITY, Math.max(MIN_WINDOW_OPACITY, value));
+}
+
+function normalizeTimeout(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+
+  const rounded = Math.round(value);
+  return rounded > 0 ? rounded : fallback;
+}
+
+function normalizeCodexSandboxMode(value: unknown, fallback: CodexSandboxMode): CodexSandboxMode {
+  return typeof value === "string" && CODEX_SANDBOX_MODES.includes(value as CodexSandboxMode)
+    ? value as CodexSandboxMode
+    : fallback;
+}
+
+function normalizeCodexReasoningEffort(
+  value: unknown,
+  fallback: CodexModelReasoningEffort,
+): CodexModelReasoningEffort {
+  return typeof value === "string" && CODEX_REASONING_EFFORTS.includes(value as CodexModelReasoningEffort)
+    ? value as CodexModelReasoningEffort
+    : fallback;
 }
 
 export function validateShortcutSettings(input: unknown): IpcError | null {
@@ -131,10 +197,39 @@ export function normalizeSettings(input: unknown): FluelySettings {
       MIN_WINDOW_HEIGHT,
       MAX_WINDOW_HEIGHT,
     );
+    settings.window.opacity = normalizeOpacity(
+      input.window.opacity,
+      DEFAULT_SETTINGS.window.opacity,
+    );
   }
 
   if (isRecord(input.privacy) && typeof input.privacy.captureProtection === "boolean") {
     settings.privacy.captureProtection = input.privacy.captureProtection;
+  }
+
+  if (typeof input.setupComplete === "boolean") {
+    settings.setupComplete = input.setupComplete;
+  }
+
+  if (isRecord(input.codex)) {
+    settings.codex.enabled = typeof input.codex.enabled === "boolean"
+      ? input.codex.enabled
+      : DEFAULT_SETTINGS.codex.enabled;
+    settings.codex.path = normalizeShortcut(input.codex.path, DEFAULT_SETTINGS.codex.path);
+    settings.codex.model = normalizeShortcut(input.codex.model, DEFAULT_SETTINGS.codex.model);
+    settings.codex.fastModel = normalizeShortcut(input.codex.fastModel, DEFAULT_SETTINGS.codex.fastModel);
+    settings.codex.timeoutMs = normalizeTimeout(
+      input.codex.timeoutMs,
+      DEFAULT_SETTINGS.codex.timeoutMs,
+    );
+    settings.codex.sandboxMode = normalizeCodexSandboxMode(
+      input.codex.sandboxMode,
+      DEFAULT_SETTINGS.codex.sandboxMode,
+    );
+    settings.codex.modelReasoningEffort = normalizeCodexReasoningEffort(
+      input.codex.modelReasoningEffort,
+      DEFAULT_SETTINGS.codex.modelReasoningEffort ?? "medium",
+    );
   }
 
   return settings;
@@ -146,6 +241,10 @@ export function normalizeSettingsPatch(input: unknown): SettingsPatch {
   }
 
   const patch: SettingsPatch = {};
+
+  if ("setupComplete" in input) {
+    patch.setupComplete = input.setupComplete as boolean;
+  }
 
   if (isRecord(input.shortcuts)) {
     const shortcuts: Partial<ShortcutSettings> = {};
@@ -165,6 +264,9 @@ export function normalizeSettingsPatch(input: unknown): SettingsPatch {
     if ("height" in input.window) {
       window.height = input.window.height as number;
     }
+    if ("opacity" in input.window) {
+      window.opacity = input.window.opacity as number;
+    }
     patch.window = window;
   }
 
@@ -176,6 +278,32 @@ export function normalizeSettingsPatch(input: unknown): SettingsPatch {
     patch.privacy = privacy;
   }
 
+  if (isRecord(input.codex)) {
+    const codex: Partial<CodexCliSettings> = {};
+    if ("enabled" in input.codex) {
+      codex.enabled = input.codex.enabled as boolean;
+    }
+    if ("path" in input.codex) {
+      codex.path = input.codex.path as string;
+    }
+    if ("model" in input.codex) {
+      codex.model = input.codex.model as string;
+    }
+    if ("fastModel" in input.codex) {
+      codex.fastModel = input.codex.fastModel as string;
+    }
+    if ("timeoutMs" in input.codex) {
+      codex.timeoutMs = input.codex.timeoutMs as number;
+    }
+    if ("sandboxMode" in input.codex) {
+      codex.sandboxMode = input.codex.sandboxMode as CodexSandboxMode;
+    }
+    if ("modelReasoningEffort" in input.codex) {
+      codex.modelReasoningEffort = input.codex.modelReasoningEffort as CodexModelReasoningEffort;
+    }
+    patch.codex = codex;
+  }
+
   return patch;
 }
 
@@ -185,6 +313,14 @@ export function validateSettingsPatch(input: unknown): IpcError | null {
       code: "INVALID_ARGUMENT",
       message: "Settings patch must be an object.",
       action: "Refresh Fluely and try again.",
+    };
+  }
+
+  if ("setupComplete" in input && typeof input.setupComplete !== "boolean") {
+    return {
+      code: "INVALID_ARGUMENT",
+      message: "setupComplete must be a boolean.",
+      action: "Finish setup or choose setup mode and try again.",
     };
   }
 
@@ -241,6 +377,15 @@ export function validateSettingsPatch(input: unknown): IpcError | null {
         };
       }
     }
+
+    if ("opacity" in input.window &&
+      (typeof input.window.opacity !== "number" || !Number.isFinite(input.window.opacity))) {
+      return {
+        code: "INVALID_ARGUMENT",
+        message: "Window opacity must be a finite number.",
+        action: "Choose a window opacity between 35% and 100% and try again.",
+      };
+    }
   }
 
   if ("privacy" in input && !isRecord(input.privacy)) {
@@ -261,13 +406,72 @@ export function validateSettingsPatch(input: unknown): IpcError | null {
     };
   }
 
+  if ("codex" in input && !isRecord(input.codex)) {
+    return {
+      code: "INVALID_ARGUMENT",
+      message: "Codex settings must be an object.",
+      action: "Review the Codex CLI settings and try again.",
+    };
+  }
+
+  if (isRecord(input.codex)) {
+    const codex = input.codex;
+    if ("enabled" in codex && typeof codex.enabled !== "boolean") {
+      return {
+        code: "INVALID_ARGUMENT",
+        message: "Codex enabled must be a boolean.",
+        action: "Choose whether Codex CLI is enabled and try again.",
+      };
+    }
+
+    for (const field of ["path", "model", "fastModel"] as const) {
+      if (field in codex && typeof codex[field] !== "string") {
+        return {
+          code: "INVALID_ARGUMENT",
+          message: `Codex ${field} must be a string.`,
+          action: "Enter a non-empty Codex CLI value and try again.",
+        };
+      }
+    }
+
+    if ("timeoutMs" in codex &&
+      (typeof codex.timeoutMs !== "number" || !Number.isFinite(codex.timeoutMs) || codex.timeoutMs <= 0)) {
+      return {
+        code: "INVALID_ARGUMENT",
+        message: "Codex timeoutMs must be a positive finite number.",
+        action: "Enter a positive Codex timeout and try again.",
+      };
+    }
+
+    if ("sandboxMode" in codex &&
+      (typeof codex.sandboxMode !== "string" || !CODEX_SANDBOX_MODES.includes(codex.sandboxMode as CodexSandboxMode))) {
+      return {
+        code: "INVALID_ARGUMENT",
+        message: "Codex sandboxMode is not supported.",
+        action: "Choose read-only, workspace-write, or danger-full-access and try again.",
+      };
+    }
+
+    if ("modelReasoningEffort" in codex &&
+      (typeof codex.modelReasoningEffort !== "string" ||
+        !CODEX_REASONING_EFFORTS.includes(codex.modelReasoningEffort as CodexModelReasoningEffort))) {
+      return {
+        code: "INVALID_ARGUMENT",
+        message: "Codex modelReasoningEffort is not supported.",
+        action: "Choose none, low, medium, high, xhigh, or max and try again.",
+      };
+    }
+  }
+
   return null;
 }
 
 export function mergeSettings(current: FluelySettings, patch: SettingsPatch): FluelySettings {
   return normalizeSettings({
+    setupComplete: patch.setupComplete ?? current.setupComplete,
     shortcuts: { ...current.shortcuts, ...patch.shortcuts },
     window: { ...current.window, ...patch.window },
     privacy: { ...current.privacy, ...patch.privacy },
+    codex: { ...current.codex, ...patch.codex },
   });
 }
