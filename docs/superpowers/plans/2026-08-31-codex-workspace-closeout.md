@@ -20,6 +20,9 @@
 - The screenshot queue remains capped at five managed items.
 - Cancellation must terminate or settle the active provider before managed screenshot files are deleted.
 - A task is not accepted from a written report alone: its requested diff, focused tests, full regression commands, and commit hash are mandatory evidence.
+- After every task commit, a `gpt-5.6-luna` worker with reasoning effort `max` must launch that exact committed application state and keep it running for user testing. Application startup is not acceptance; the next task may begin only after the user explicitly reports that the test passed.
+- If the user reports a defect, keep the current task open, have `gpt-5.6-luna` reproduce and fix it, repeat automated verification and coordinating-agent review, create a scoped follow-up commit, and relaunch for the user. Do not advance with a known user-test failure.
+- Before replacing a running test instance, terminate only the previously recorded Fluely development session or exact PID. Never use a broad process kill pattern.
 
 ---
 
@@ -40,6 +43,24 @@
 - `electron/services/__tests__/ipc-contract.test.mjs`: public API/channel allowlist and listener-unsubscribe tests.
 - `src/renderer/__tests__/shortcut-invocation.test.mjs`: pure renderer shortcut-routing tests.
 - `README.md`: supported flows, shortcuts, setup, and known platform limitations.
+
+## Mandatory Post-Task User Test Gate
+
+This gate applies after every accepted commit in Tasks 1-5:
+
+1. The `gpt-5.6-luna` worker records `git rev-parse HEAD` and proves the commit equals the accepted hash.
+2. If a prior Fluely test instance is still running, the worker stops only its recorded terminal session or exact process ID.
+3. The worker launches from `/Users/yu/Documents/cluely二开/fluely` with:
+
+   ```bash
+   npm run dev
+   ```
+
+4. The worker waits for Vite and Electron startup output, confirms the Fluely window is present, keeps the process running, and returns the commit hash plus startup evidence.
+5. The coordinating agent tells the user exactly what changed and the focused manual checks to perform.
+6. The workflow pauses until the user replies with pass/fail evidence. A pass closes the user-test gate; a failure returns to the same task's implementation and review cycle.
+
+For Task 6, launch the packaged `.app` produced by `npm run package:dir` instead of the development server, keep it open, and wait for the same explicit user verdict.
 
 ---
 
@@ -104,6 +125,10 @@ git status --short --branch
 ```
 
 Expected: one new commit and no tracked working-tree changes. Return the full commit hash.
+
+- [ ] **Step 6: Execute the mandatory post-task user test gate**
+
+Launch the accepted commit with `npm run dev`, keep Fluely running, and ask the user to verify queue refresh, Capture & ask, Ask queue, window hide, and scrolling. Do not begin Task 2 until the user explicitly passes this build.
 
 ---
 
@@ -218,6 +243,10 @@ git commit -m "feat: bridge analysis shortcuts to workspace draft"
 
 Expected: focused tests pass and the commit contains only the listed files. Return the full commit hash.
 
+- [ ] **Step 6: Execute the mandatory post-task user test gate**
+
+Launch the accepted commit with `npm run dev`, keep Fluely running, and ask the user to verify that both analysis shortcuts use the prompt, intent, and speed currently shown in WorkView. Do not begin Task 3 until the user explicitly passes this build.
+
 ---
 
 ### Task 3: Compose global analysis shortcuts and safe cancel-and-clear
@@ -309,6 +338,10 @@ git commit -m "feat: wire global analysis workspace shortcuts"
 
 Expected: one commit containing only the composition slice. Return the full commit hash.
 
+- [ ] **Step 6: Execute the mandatory post-task user test gate**
+
+Launch the accepted commit with `npm run dev`, keep Fluely running, and ask the user to verify Analyze queue, Capture & ask ordering, and cancel-and-clear during an active response. Do not begin Task 4 until the user explicitly passes this build.
+
 ---
 
 ### Task 4: Enforce and restore Work window policy
@@ -359,6 +392,10 @@ git commit -m "fix: restore Work window policy after recreation"
 
 Expected: policy tests and the full suite pass. Return the full commit hash.
 
+- [ ] **Step 4: Execute the mandatory post-task user test gate**
+
+Launch the accepted commit with `npm run dev`, keep Fluely running, and ask the user to verify always-on-top, opacity, hide/show, capture privacy, and state restoration after recreating the window. Do not begin Task 5 until the user explicitly passes this build.
+
 ---
 
 ### Task 5: Update user-facing milestone documentation
@@ -397,6 +434,10 @@ git commit -m "docs: align Codex workspace milestone status"
 ```
 
 Expected: no stale claim that implemented Codex analysis is merely planned, and no claim that macOS release acceptance has passed. Return the full commit hash.
+
+- [ ] **Step 4: Execute the mandatory post-task user test gate**
+
+Launch the accepted commit with `npm run dev`, keep Fluely running, and ask the user for a final development-build regression pass before Task 6 packaging begins.
 
 ---
 
@@ -453,6 +494,10 @@ Release readiness passes only if development acceptance passes and the packaged 
 
 Return command exit codes, total tests, package size, allowlist result, Codex version/login status, manual checklist evidence, `git status`, and all commit hashes. The coordinating agent issues the final pass/fail decision; the worker must not self-approve.
 
+- [ ] **Step 6: Launch the packaged app for the user's final test**
+
+Launch the exact `.app` produced by the accepted `npm run package:dir` run, keep it open, report its absolute path and code-signing status, and pause for the user's explicit pass/fail verdict. Do not label the development milestone or release readiness accepted until that verdict is incorporated.
+
 ---
 
 ## Deferred Scope Requiring Separate Specs and Plans
@@ -474,3 +519,4 @@ Do not add these to the closeout commits. Plan them independently after the deve
 - The final tracked tree is clean and the local branch relationship to upstream is reported.
 - Documentation matches code and distinguishes code-level completion, macOS functional acceptance, and signed release readiness.
 - Deferred features remain explicitly out of scope for this milestone.
+- Every task has a recorded `luna-max` launch, focused user test instructions, and an explicit user pass/fail verdict before the next task starts.
