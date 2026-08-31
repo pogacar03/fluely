@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 
 const STDERR_TAIL_LIMIT = 4096;
 const HOME_DIRECTORY = homedir();
+const DIAGNOSTICS_LOG_LABEL = "Fluely Codex CLI diagnostics";
 
 export type CodexRunMilestone =
   | "spawn"
@@ -27,12 +28,10 @@ export interface CodexRunDiagnostics {
   snapshot(nowMs?: number): CodexRunDiagnosticsSnapshot;
 }
 
-function redactCookieValues(value: string): string {
-  return value.replace(
-    /([A-Za-z][A-Za-z0-9_-]*)\s*=\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s;,]+)/g,
-    "$1=[REDACTED]",
-  );
-}
+export type CodexRunDiagnosticsWriter = (
+  message: string,
+  snapshot: CodexRunDiagnosticsSnapshot,
+) => void;
 
 function redactSensitiveText(value: string): string {
   let redacted = value;
@@ -41,23 +40,50 @@ function redactSensitiveText(value: string): string {
     redacted = redacted.split(HOME_DIRECTORY).join("[HOME]");
   }
 
-  redacted = redacted.replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]");
+  redacted = redacted.replace(/\b(Bearer\s+)[^\r\n]*/gi, "$1[REDACTED]");
   redacted = redacted.replace(
-    /\b(Cookie|Set-Cookie)\s*:\s*([^\r\n]*)/gi,
-    (_match, header: string, cookies: string) => `${header}: ${redactCookieValues(cookies)}`,
+    /\b(Cookie|Set-Cookie)\s*:\s*[^\r\n]*/gi,
+    "$1: [REDACTED]",
   );
   redacted = redacted.replace(
-    /\b([A-Za-z_][A-Za-z0-9_]*\s*[=:]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;}\]]+)/gi,
-    (match: string, prefix: string, _value: string) => /(?:KEY|TOKEN|SECRET|PASSWORD)/i.test(prefix)
-      ? `${prefix}[REDACTED]`
-      : match,
+    /\b([A-Za-z_][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Za-z0-9_]*\s*[=:]\s*)[^\r\n]*/gi,
+    "$1[REDACTED]",
   );
   redacted = redacted.replace(
-    /(\b[A-Za-z0-9_-]*(?:cookie|session)[A-Za-z0-9_-]*\s*=\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;}\]]+)/gi,
+    /(\b[A-Za-z0-9_-]*(?:cookie|session)[A-Za-z0-9_-]*\s*=\s*)[^\r\n]*/gi,
     "$1[REDACTED]",
   );
 
   return redacted;
+}
+
+function truncateUtf8Tail(value: string, maxBytes = STDERR_TAIL_LIMIT): string {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.byteLength <= maxBytes) {
+    return value;
+  }
+
+  let start = bytes.byteLength - maxBytes;
+  while (start < bytes.byteLength && (bytes[start] & 0xc0) === 0x80) {
+    start += 1;
+  }
+  return bytes.subarray(start).toString("utf8");
+}
+
+function sanitizedSnapshot(snapshot: CodexRunDiagnosticsSnapshot): CodexRunDiagnosticsSnapshot {
+  return Object.freeze({
+    elapsedMs: snapshot.elapsedMs,
+    milestones: Object.freeze({ ...snapshot.milestones }),
+    exitCode: snapshot.exitCode,
+    exitSignal: snapshot.exitSignal,
+    stderrTail: truncateUtf8Tail(redactSensitiveText(snapshot.stderrTail)),
+  });
+}
+
+export function createCodexRunDiagnosticsSink(
+  write: CodexRunDiagnosticsWriter = (message, snapshot) => console.warn(message, snapshot),
+): (snapshot: CodexRunDiagnosticsSnapshot) => void {
+  return (snapshot) => write(DIAGNOSTICS_LOG_LABEL, sanitizedSnapshot(snapshot));
 }
 
 function elapsedSince(startedAtMs: number, atMs: number): number {
@@ -93,7 +119,7 @@ export class CodexRunDiagnosticsImpl implements CodexRunDiagnostics {
     if (typeof chunk !== "string" || chunk.length === 0) {
       return;
     }
-    this.stderrTail = redactSensitiveText(`${this.stderrTail}${chunk}`).slice(-STDERR_TAIL_LIMIT);
+    this.stderrTail = truncateUtf8Tail(redactSensitiveText(`${this.stderrTail}${chunk}`));
   }
 
   public snapshot(nowMs = Date.now()): CodexRunDiagnosticsSnapshot {

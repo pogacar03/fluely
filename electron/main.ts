@@ -20,7 +20,10 @@ import type {
 import { DEFAULT_SETTINGS } from "./services/settings-core";
 import { AnalysisService } from "./services/AnalysisService";
 import { CapturePrivacyController, DockPrivacyCoordinator } from "./services/CapturePrivacyController";
-import { CodexCliService } from "./services/CodexCliService";
+import {
+  CodexCliService,
+  createMainProcessCodexCliService,
+} from "./services/CodexCliService";
 import { registerIpcHandlers } from "./services/ipcHandlers";
 import { SettingsService } from "./services/SettingsService";
 import { ScreenshotService } from "./services/ScreenshotService";
@@ -170,7 +173,7 @@ function getScreenshotService(): ScreenshotService {
 
 function getCodexCliService(): CodexCliService {
   if (!codexCliService) {
-    codexCliService = new CodexCliService();
+    codexCliService = createMainProcessCodexCliService();
   }
   return codexCliService;
 }

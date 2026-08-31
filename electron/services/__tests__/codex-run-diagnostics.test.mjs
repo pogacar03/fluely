@@ -6,7 +6,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const modulePath = path.resolve(__dirname, "../../../dist-electron/electron/services/codex-run-diagnostics.js");
-const { CodexRunDiagnostics } = await import(pathToFileURL(modulePath).href);
+const {
+  CodexRunDiagnostics,
+  createCodexRunDiagnosticsSink,
+} = await import(pathToFileURL(modulePath).href);
 
 test("CodexRunDiagnostics records first milestones and refreshes last-event", () => {
   const diagnostics = new CodexRunDiagnostics(1000);
@@ -53,6 +56,59 @@ test("CodexRunDiagnostics caps stderr and redacts sensitive values", () => {
   assert.doesNotMatch(snapshot.stderrTail, /redacted-bearer-value|redacted-cookie-value|redacted-refresh-value/);
   assert.doesNotMatch(snapshot.stderrTail, /redacted-key-value|redacted-token-value|redacted-password-value/);
   assert.doesNotMatch(snapshot.stderrTail, new RegExp(homedir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("CodexRunDiagnostics redacts complete unquoted assignments through line boundaries", () => {
+  const diagnostics = new CodexRunDiagnostics(1000);
+  diagnostics.appendStderr([
+    "FLUELY_API_KEY=alpha bravo; charlie,delta]omega",
+    "refresh_token: first segment; second segment, third segment",
+    "Cookie: session=one two; Path=/private, refresh=three four",
+    "session_cookie=primary value; trailing value, final value",
+    "safe=value remains visible",
+  ].join("\n"));
+
+  const { stderrTail } = diagnostics.snapshot(1500);
+
+  assert.doesNotMatch(stderrTail, /alpha|bravo|charlie|delta|omega/);
+  assert.doesNotMatch(stderrTail, /first segment|second segment|third segment/);
+  assert.doesNotMatch(stderrTail, /one two|\/private|three four/);
+  assert.doesNotMatch(stderrTail, /primary value|trailing value|final value/);
+  assert.match(stderrTail, /safe=value remains visible/);
+});
+
+test("CodexRunDiagnostics caps stderr at 4096 UTF-8 bytes without splitting code points", () => {
+  const diagnostics = new CodexRunDiagnostics(1000);
+  diagnostics.appendStderr("🙂".repeat(1025));
+
+  const { stderrTail } = diagnostics.snapshot(1500);
+
+  assert.equal(Buffer.byteLength(stderrTail, "utf8"), 4096);
+  assert.doesNotMatch(stderrTail, /�/);
+  assert.equal([...stderrTail].length, 1024);
+});
+
+test("main-process diagnostics sink logs only re-sanitized structured snapshots", () => {
+  const writes = [];
+  const sink = createCodexRunDiagnosticsSink((message, snapshot) => {
+    writes.push({ message, snapshot });
+  });
+
+  sink({
+    elapsedMs: 42,
+    milestones: { spawn: 0, "last-event": 20 },
+    exitCode: 1,
+    exitSignal: "SIGTERM",
+    stderrTail: `workspace=${homedir()}/private\nAPI_TOKEN=alpha beta; trailing-secret`,
+  });
+
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].message, "Fluely Codex CLI diagnostics");
+  assert.equal(writes[0].snapshot.elapsedMs, 42);
+  const logged = JSON.stringify(writes[0].snapshot);
+  assert.match(logged, /\[HOME\]|\[REDACTED\]/);
+  assert.doesNotMatch(logged, /alpha beta|trailing-secret/);
+  assert.doesNotMatch(logged, new RegExp(homedir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
 test("CodexRunDiagnostics snapshots are immutable and isolated from later marks", () => {

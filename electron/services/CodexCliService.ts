@@ -9,7 +9,9 @@ import type {
 } from "../../src/shared/ipc";
 import {
   CodexRunDiagnostics,
+  createCodexRunDiagnosticsSink,
   type CodexRunDiagnosticsSnapshot,
+  type CodexRunDiagnosticsWriter,
 } from "./codex-run-diagnostics";
 
 const DEFAULT_TIMEOUT_MS = 120000;
@@ -260,7 +262,31 @@ function getErrorMessage(value: unknown, depth = 0): string | null {
   return null;
 }
 
-function isValidProtocolEvent(value: unknown, depth = 0): boolean {
+const CODEX_LIVENESS_EVENT_TYPES = new Set([
+  "thread_started",
+  "thread_completed",
+  "turn_started",
+  "turn_progress",
+  "turn_completed",
+  "item_started",
+  "item_progress",
+  "item_delta",
+  "item_completed",
+  "message_delta",
+  "output_text_delta",
+  "agent_message_delta",
+  "agent_message_content_delta",
+  "response_created",
+  "response_in_progress",
+  "response_output_item_added",
+  "response_content_part_added",
+  "response_output_text_delta",
+  "response_output_item_done",
+  "response_content_part_done",
+  "response_completed",
+]);
+
+function isLivenessProtocolEvent(value: unknown, depth = 0): boolean {
   if (depth > 5) {
     return false;
   }
@@ -272,18 +298,14 @@ function isValidProtocolEvent(value: unknown, depth = 0): boolean {
 
   const type = record.type.toLowerCase().replace(/[.:]/g, "_");
   if (type === "event_msg") {
-    return isValidProtocolEvent(record.payload, depth + 1);
+    return isLivenessProtocolEvent(record.payload, depth + 1);
   }
 
-  return type === "error" ||
-    type === "stream_error" ||
-    type.endsWith("_error") ||
-    /^(thread|turn|item)_/.test(type) ||
-    type === "message_delta" ||
-    type === "output_text_delta" ||
-    type === "response_output_text_delta" ||
-    type.startsWith("response_") ||
-    (type.includes("agent_message") && type.includes("delta"));
+  if (type === "item_completed" && asRecord(record.item)?.type === "error") {
+    return false;
+  }
+
+  return CODEX_LIVENESS_EVENT_TYPES.has(type);
 }
 
 function normalizeExecutableInput(value: unknown): string {
@@ -767,6 +789,9 @@ export class CodexCliService {
     }
 
     const executable = await this.findExecutable(path);
+    if (options.signal?.aborted) {
+      throw abortError();
+    }
     const imagePaths = options.imagePaths ?? options.images ?? [];
     const args = CodexCliService.buildArgs(
       options.model ?? "gpt-5.6-sol",
@@ -878,14 +903,26 @@ export class CodexCliService {
       }
       termination = reason;
       clearDeadlineTimers();
-      if (!child.killed) {
-        child.kill("SIGTERM");
-      }
       forceKillTimer = this.setTimeout(() => {
-        if (!closed) {
+        forceKillTimer = undefined;
+        if (closed) {
+          return;
+        }
+        try {
           child.kill("SIGKILL");
+        } catch {
+          // A failed signal must not leave the stream waiter pending.
+        } finally {
+          close();
         }
       }, 250);
+      try {
+        if (!child.killed) {
+          child.kill("SIGTERM");
+        }
+      } catch {
+        // The force-kill deadline still guarantees local settlement.
+      }
     };
 
     const recordProtocolEvent = (atMs: number): void => {
@@ -905,9 +942,6 @@ export class CodexCliService {
     };
 
     const onAbort = (): void => terminate("abort");
-    options.signal?.addEventListener("abort", onAbort, { once: true });
-    startupTimer = this.setTimeout(() => terminate("startup_timeout"), this.deadlinePolicy.startupMs);
-    hardTimer = this.setTimeout(() => terminate("hard_timeout"), this.deadlinePolicy.hardMs);
 
     const onStdinError = (error: Error): void => {
       processError = toError(error);
@@ -928,12 +962,10 @@ export class CodexCliService {
       }
       try {
         const parsed: unknown = JSON.parse(line);
-        if (!isValidProtocolEvent(parsed)) {
-          return;
-        }
-        const eventAtMs = this.now();
-        recordProtocolEvent(eventAtMs);
         providerError ??= getErrorMessage(parsed) ?? undefined;
+        if (isLivenessProtocolEvent(parsed)) {
+          recordProtocolEvent(this.now());
+        }
         const completedMessage = getCompletedAgentText(parsed);
         if (completedMessage !== null) {
           completedMessages.push(completedMessage);
@@ -994,8 +1026,17 @@ export class CodexCliService {
       close();
     });
 
+    startupTimer = this.setTimeout(() => terminate("startup_timeout"), this.deadlinePolicy.startupMs);
+    hardTimer = this.setTimeout(() => terminate("hard_timeout"), this.deadlinePolicy.hardMs);
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.signal?.aborted) {
+      onAbort();
+    }
+
     try {
-      child.stdin.end(typeof options.prompt === "string" ? options.prompt : "");
+      if (!closed) {
+        child.stdin.end(typeof options.prompt === "string" ? options.prompt : "");
+      }
       while (true) {
         if (pending.length > 0) {
           yield pending.shift() as string;
@@ -1085,3 +1126,13 @@ export class CodexCliService {
 
 export const buildCodexArgs = CodexCliService.buildArgs;
 export const extractCodexText = CodexCliService.extractText;
+
+export function createMainProcessCodexCliService(
+  dependencies: Omit<CodexCliDependencies, "onDiagnostics"> = {},
+  writeDiagnostics?: CodexRunDiagnosticsWriter,
+): CodexCliService {
+  return new CodexCliService({
+    ...dependencies,
+    onDiagnostics: createCodexRunDiagnosticsSink(writeDiagnostics),
+  });
+}

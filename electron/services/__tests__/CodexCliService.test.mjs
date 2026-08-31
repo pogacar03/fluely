@@ -9,7 +9,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const modulePath = path.resolve(__dirname, "../../../dist-electron/electron/services/CodexCliService.js");
-const { CodexCliService } = await import(pathToFileURL(modulePath).href);
+const {
+  CodexCliService,
+  createMainProcessCodexCliService,
+} = await import(pathToFileURL(modulePath).href);
 
 const temporaryDirectories = [];
 
@@ -341,6 +344,32 @@ test("stream records protocol milestones and publishes a redacted diagnostic sna
   assert.doesNotMatch(stderrTail, new RegExp(os.homedir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
+test("main-process Codex composition writes safe diagnostics", async () => {
+  const child = makeFakeProcess();
+  const writes = [];
+  const service = createMainProcessCodexCliService({
+    spawn: () => {
+      queueMicrotask(() => {
+        child.stderr.write(`workspace=${os.homedir()}/private\nAPI_TOKEN=alpha beta; trailing-secret`);
+        child.emit("close", 1, null);
+      });
+      return child;
+    },
+  }, (message, snapshot) => writes.push({ message, snapshot }));
+
+  await assert.rejects(async () => {
+    for await (const _delta of service.stream("fake-codex", { prompt: "question" })) {
+      // The fake process exits with a failure after diagnostics are captured.
+    }
+  }, /exited|answer/i);
+
+  assert.equal(writes.length, 1);
+  const logged = JSON.stringify(writes[0]);
+  assert.match(logged, /Fluely Codex CLI diagnostics/);
+  assert.doesNotMatch(logged, /alpha beta|trailing-secret/);
+  assert.doesNotMatch(logged, new RegExp(os.homedir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
 test("stream errors carry safe diagnostics without exposing raw stderr", async () => {
   const child = makeFakeProcess();
   const snapshots = [];
@@ -483,6 +512,76 @@ test("valid lifecycle events refresh the idle deadline", async () => {
   assert.equal(run.result.error.diagnostics.milestones["last-event"], 80);
 });
 
+test("provider error events do not satisfy the startup deadline", async () => {
+  const timers = makeFakeTimers();
+  const child = makeClosingFakeProcess();
+  const service = makeDeadlineService(timers, child, { startupMs: 100, idleMs: 100, hardMs: 500 });
+  const run = runFakeStream(service);
+  await flush();
+
+  timers.advance(80);
+  child.stdout.write(`${JSON.stringify({ type: "error", message: "provider unavailable" })}\n`);
+  child.stdout.write(`${JSON.stringify({ type: "stream_error", message: "transport unavailable" })}\n`);
+  child.stdout.write(`${JSON.stringify({ type: "response.error", message: "response unavailable" })}\n`);
+  child.stdout.write(`${JSON.stringify({
+    type: "item.completed",
+    item: { type: "error", message: "terminal provider failure" },
+  })}\n`);
+  await flush();
+  timers.advance(20);
+  await flush();
+
+  assert.equal(run.result.error?.code, "CLI_START_TIMEOUT");
+  await run.promise;
+  assert.equal(run.result.error.diagnostics.milestones["first-jsonl"], undefined);
+  assert.equal(run.result.error.diagnostics.milestones["last-event"], undefined);
+});
+
+test("unknown prefixed and error events do not refresh the idle deadline", async () => {
+  const timers = makeFakeTimers();
+  const child = makeClosingFakeProcess();
+  const service = makeDeadlineService(timers, child, { startupMs: 100, idleMs: 100, hardMs: 500 });
+  const run = runFakeStream(service);
+  await flush();
+
+  child.stdout.write(`${JSON.stringify({ type: "turn.started" })}\n`);
+  await flush();
+  timers.advance(80);
+  for (const type of ["thread.metadata", "turn.error", "item.telemetry", "response.failed"]) {
+    child.stdout.write(`${JSON.stringify({ type, message: "not liveness" })}\n`);
+  }
+  await flush();
+  timers.advance(20);
+  await flush();
+
+  assert.equal(run.result.error?.code, "CLI_IDLE_TIMEOUT");
+  await run.promise;
+  assert.equal(run.result.error.diagnostics.milestones["last-event"], 0);
+});
+
+test("terminal lifecycle events refresh idle even when they contain no output", async () => {
+  const timers = makeFakeTimers();
+  const child = makeClosingFakeProcess();
+  const service = makeDeadlineService(timers, child, { startupMs: 100, idleMs: 100, hardMs: 500 });
+  const run = runFakeStream(service);
+  await flush();
+
+  child.stdout.write(`${JSON.stringify({ type: "turn.started" })}\n`);
+  await flush();
+  timers.advance(80);
+  child.stdout.write(`${JSON.stringify({ type: "turn.completed" })}\n`);
+  await flush();
+  timers.advance(99);
+  await flush();
+  assert.equal(run.result.error, null);
+
+  timers.advance(1);
+  await flush();
+  await run.promise;
+  assert.equal(run.result.error.code, "CLI_IDLE_TIMEOUT");
+  assert.equal(run.result.error.diagnostics.milestones["last-event"], 80);
+});
+
 test("malformed stdout and raw stderr do not refresh the idle deadline", async () => {
   const timers = makeFakeTimers();
   const child = makeClosingFakeProcess();
@@ -564,5 +663,121 @@ test("cancellation is distinct from every timeout category", async () => {
   assert.equal(run.result.error.name, "AbortError");
   assert.equal(run.result.error.code, "ABORTED");
   assert.equal(run.result.error.diagnostics, undefined);
+  assert.equal(timers.pending(), 0);
+});
+
+test("force-kill settles a timed-out stream when the child never closes", async () => {
+  const timers = makeFakeTimers();
+  const child = makeFakeProcess();
+  const service = makeDeadlineService(timers, child, { startupMs: 100, idleMs: 100, hardMs: 500 });
+  const run = runFakeStream(service);
+  await flush();
+
+  timers.advance(100);
+  await flush();
+  assert.deepEqual(child.killCalls, ["SIGTERM"]);
+  timers.advance(250);
+  await flush();
+
+  assert.equal(run.result.error?.code, "CLI_START_TIMEOUT");
+  await run.promise;
+  assert.deepEqual(child.killCalls, ["SIGTERM", "SIGKILL"]);
+  assert.equal(timers.pending(), 0);
+});
+
+test("failed termination signals still settle a timed-out stream", async () => {
+  const timers = makeFakeTimers();
+  const child = makeFakeProcess();
+  child.kill = (signal) => {
+    child.killCalls.push(signal);
+    throw new Error(`${signal} failed`);
+  };
+  const service = makeDeadlineService(timers, child, { startupMs: 100, idleMs: 100, hardMs: 500 });
+  const run = runFakeStream(service);
+  await flush();
+
+  timers.advance(100);
+  timers.advance(250);
+  await flush();
+  await run.promise;
+
+  assert.equal(run.result.error.code, "CLI_START_TIMEOUT");
+  assert.deepEqual(child.killCalls, ["SIGTERM", "SIGKILL"]);
+  assert.equal(timers.pending(), 0);
+});
+
+test("synchronous close during SIGTERM does not leave a force-kill timer", async () => {
+  const timers = makeFakeTimers();
+  const child = makeFakeProcess();
+  child.kill = (signal) => {
+    child.killCalls.push(signal);
+    child.killed = true;
+    child.emit("close", null, signal);
+    return true;
+  };
+  const service = makeDeadlineService(timers, child, { startupMs: 100, idleMs: 100, hardMs: 500 });
+  const run = runFakeStream(service);
+  await flush();
+
+  timers.advance(100);
+  await flush();
+  await run.promise;
+
+  assert.equal(run.result.error.code, "CLI_START_TIMEOUT");
+  assert.deepEqual(child.killCalls, ["SIGTERM"]);
+  assert.equal(timers.pending(), 0);
+});
+
+test("abort during executable lookup prevents child creation", async () => {
+  const child = makeFakeProcess();
+  let spawnCount = 0;
+  const controller = new AbortController();
+  const service = new CodexCliService({
+    spawn: () => {
+      spawnCount += 1;
+      return child;
+    },
+  });
+  const iterator = service.stream("/definitely/missing/fluely-abort-race", {
+    prompt: "question",
+    signal: controller.signal,
+  });
+  const outcome = iterator.next().then(
+    () => ({ error: null }),
+    (error) => ({ error }),
+  );
+
+  await Promise.resolve();
+  controller.abort();
+  await flush();
+
+  assert.equal(spawnCount, 0);
+  assert.equal((await outcome).error?.code, "ABORTED");
+});
+
+test("abort during spawn is caught immediately after listener registration", async () => {
+  const timers = makeFakeTimers();
+  const child = makeFakeProcess();
+  const controller = new AbortController();
+  const service = new CodexCliService({
+    spawn: () => {
+      controller.abort();
+      return child;
+    },
+    now: timers.now,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    deadlinePolicy: { startupMs: 100, idleMs: 100, hardMs: 500 },
+  });
+  const run = runFakeStream(service, { signal: controller.signal });
+  await flush();
+
+  assert.deepEqual(child.killCalls, ["SIGTERM"]);
+  timers.advance(250);
+  await flush();
+  await run.promise;
+
+  assert.equal(run.result.error.code, "ABORTED");
+  assert.deepEqual(child.killCalls, ["SIGTERM", "SIGKILL"]);
   assert.equal(timers.pending(), 0);
 });
