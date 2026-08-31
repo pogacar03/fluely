@@ -9,7 +9,13 @@ import type {
   SettingsPatch,
   ScreenshotState,
 } from "../shared/ipc";
-import { getAnalysisScreenshotIds, getQueueIds, selectWorkspaceMode } from "../shared/workspace-state";
+import {
+  canOpenWork,
+  initialWorkspaceView,
+  navigateWorkspaceView,
+  type WorkspaceView,
+} from "../shared/workspace-view";
+import { getAnalysisScreenshotIds, getQueueIds } from "../shared/workspace-state";
 import { SetupView, type SetupNotice } from "./components/SetupView";
 import { WorkView, type WorkAnalysisRequest } from "./components/WorkView";
 
@@ -52,6 +58,8 @@ function emptyAnalysisState(): AnalysisState {
 
 export function App() {
   const [settings, setSettings] = useState<FluelySettings | null>(null);
+  // View navigation is session-only; setupComplete remains persisted onboarding state.
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView | null>(null);
   const [screenshotState, setScreenshotState] = useState<ScreenshotState | null>(null);
   const [analysisState, setAnalysisState] = useState<AnalysisState | null>(null);
   const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
@@ -110,6 +118,7 @@ export function App() {
         }
         if (settingsResult.ok) {
           setSettings(settingsResult.value);
+          setWorkspaceView((current) => current ?? initialWorkspaceView(settingsResult.value.setupComplete));
         }
         if (appResult.ok) {
           setAppVersion(appResult.value.version);
@@ -210,17 +219,12 @@ export function App() {
         return;
       }
 
-      const modeResult = await window.fluely.window.setMode("work");
-      if (!mountedRef.current) {
-        return;
-      }
-      if (!modeResult.ok) {
-        setSettings(saveResult.value);
-        showError(modeResult.error);
-        return;
-      }
-
-      setSettings(modeResult.value);
+      setSettings(saveResult.value);
+      setWorkspaceView((current) => navigateWorkspaceView(
+        current ?? initialWorkspaceView(saveResult.value.setupComplete),
+        "work",
+        saveResult.value.setupComplete,
+      ));
       setNotice({ tone: "success", text: "Fluely is ready. Capture a screen and ask your first question." });
     } catch {
       if (mountedRef.current) {
@@ -236,25 +240,30 @@ export function App() {
     }
   }
 
-  async function openSettings() {
-    try {
-      const result = await window.fluely.window.setMode("setup");
-      if (!mountedRef.current) {
-        return;
-      }
-      if (!result.ok) {
-        showError(result.error);
-        return;
-      }
-      setSettings(result.value);
-    } catch {
-      if (mountedRef.current) {
-        setNotice({
-          tone: "error",
-          text: "Fluely could not open settings. Restart the app and try again.",
-        });
-      }
+  function openSettings() {
+    if (!mountedRef.current || !settings) {
+      return;
     }
+    setWorkspaceView((current) => navigateWorkspaceView(
+      current ?? initialWorkspaceView(settings.setupComplete),
+      "settings",
+      settings.setupComplete,
+    ));
+  }
+
+  function openWork() {
+    if (!mountedRef.current || !settings) {
+      return;
+    }
+    if (!canOpenWork(settings.setupComplete)) {
+      setNotice({ tone: "error", text: "Finish setup before entering the workspace." });
+      return;
+    }
+    setWorkspaceView((current) => navigateWorkspaceView(
+      current ?? initialWorkspaceView(settings.setupComplete),
+      "work",
+      settings.setupComplete,
+    ));
   }
 
   async function changeOpacity(opacity: number) {
@@ -509,8 +518,8 @@ export function App() {
     );
   }
 
-  const mode = selectWorkspaceMode(settings);
-  if (mode === "setup") {
+  const view = workspaceView ?? initialWorkspaceView(settings.setupComplete);
+  if (view === "settings") {
     return (
       <SetupView
         settings={settings}
@@ -518,6 +527,7 @@ export function App() {
         busy={busy}
         notice={notice}
         onStart={startSetup}
+        onBackToWork={settings.setupComplete ? openWork : undefined}
       />
     );
   }

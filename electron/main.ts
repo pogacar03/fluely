@@ -24,6 +24,11 @@ import {
   CodexCliService,
   createMainProcessCodexCliService,
 } from "./services/CodexCliService";
+import {
+  acquireSingleInstance,
+  createApplicationInstancePort,
+  restoreAndFocusWindow,
+} from "./services/application-instance";
 import { registerIpcHandlers } from "./services/ipcHandlers";
 import { SettingsService } from "./services/SettingsService";
 import { ScreenshotService } from "./services/ScreenshotService";
@@ -34,6 +39,7 @@ import { attachApplicationLifecycle, attachWindowLifecycle } from "./services/wi
 import { getWindowPreferences } from "./windowConfig";
 
 let mainWindow: BrowserWindow | null = null;
+let pendingSecondInstanceFocus = false;
 let settingsService: SettingsService | null = null;
 let shortcutManager: ShortcutManager | null = null;
 let capturePrivacyController: CapturePrivacyController | null = null;
@@ -45,6 +51,17 @@ let ipcHandlersRegistered = false;
 
 const MIN_WINDOW_OPACITY = 0.35;
 const MAX_WINDOW_OPACITY = 1;
+
+function focusMainWindow(): void {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) {
+    pendingSecondInstanceFocus = true;
+    return;
+  }
+
+  pendingSecondInstanceFocus = false;
+  restoreAndFocusWindow(window);
+}
 
 function clampWindowOpacity(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -69,6 +86,10 @@ function getDockPrivacyCoordinator(): DockPrivacyCoordinator | undefined {
 }
 
 export function createMainWindow(settings: FluelySettings = DEFAULT_SETTINGS): BrowserWindow {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    return mainWindow;
+  }
+
   const window = new BrowserWindow({
     width: settings.window.width,
     height: settings.window.height,
@@ -93,7 +114,13 @@ export function createMainWindow(settings: FluelySettings = DEFAULT_SETTINGS): B
     window,
     isCaptureActive: isScreenshotSessionActive,
     waitForCaptureIdle: waitForScreenshotSessionIdle,
-    onReadyToShow: () => window.show(),
+    onReadyToShow: () => {
+      window.show();
+      if (pendingSecondInstanceFocus) {
+        pendingSecondInstanceFocus = false;
+        window.focus();
+      }
+    },
     onClosed: () => {
       if (mainWindow === window) {
         analysisService?.cancel();
@@ -393,36 +420,42 @@ async function initializeServices(window: BrowserWindow): Promise<void> {
 
 app.setName("Fluely");
 
-app.whenReady().then(async () => {
-  const loadedSettings = await ensureSettingsService();
-  const window = createMainWindow(loadedSettings.get());
-  await initializeServices(window);
+const applicationInstance = createApplicationInstancePort(app);
+if (acquireSingleInstance(applicationInstance, () => app.quit())) {
+  const removeSecondInstanceListener = applicationInstance.onSecondInstance(focusMainWindow);
 
-  attachApplicationLifecycle({
-    app,
-    hasWindows: () => BrowserWindow.getAllWindows().length > 0,
-    reassertPrivacy: () => capturePrivacyController?.reassert(),
-    createWindow: () => {
-      const nextWindow = createMainWindow(loadedSettings.get());
-      void initializeServices(nextWindow).catch((error) => {
-        console.error("Fluely could not restore its main window services.", error);
-      });
-    },
-  });
-}).catch((error) => {
-  console.error("Fluely could not initialize its main process.", error);
-  app.quit();
-});
+  app.whenReady().then(async () => {
+    const loadedSettings = await ensureSettingsService();
+    const window = createMainWindow(loadedSettings.get());
+    await initializeServices(window);
 
-app.on("will-quit", () => {
-  capturePrivacyController?.dispose();
-  shortcutManager?.dispose();
-  analysisService?.cancel();
-  screenshotService?.dispose();
-});
-
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
+    attachApplicationLifecycle({
+      app,
+      hasWindows: () => BrowserWindow.getAllWindows().length > 0,
+      reassertPrivacy: () => capturePrivacyController?.reassert(),
+      createWindow: () => {
+        const nextWindow = createMainWindow(loadedSettings.get());
+        void initializeServices(nextWindow).catch((error) => {
+          console.error("Fluely could not restore its main window services.", error);
+        });
+      },
+    });
+  }).catch((error) => {
+    console.error("Fluely could not initialize its main process.", error);
     app.quit();
-  }
-});
+  });
+
+  app.on("will-quit", () => {
+    removeSecondInstanceListener();
+    capturePrivacyController?.dispose();
+    shortcutManager?.dispose();
+    analysisService?.cancel();
+    screenshotService?.dispose();
+  });
+
+  app.on("window-all-closed", () => {
+    if (process.platform !== "darwin") {
+      app.quit();
+    }
+  });
+}

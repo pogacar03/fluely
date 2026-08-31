@@ -134,7 +134,7 @@ export function WorkView({
             />
             <output>{formatOpacityLabel(opacity)}</output>
           </label>
-          <button type="button" className="icon-button" onClick={() => void onOpenSettings()} aria-label="Open Fluely settings" title="Settings">⚙</button>
+          <button type="button" className="secondary-button settings-button" onClick={() => void onOpenSettings()} aria-label="Open Fluely settings">⚙ Settings</button>
           <button type="button" className="icon-button" onClick={() => void onHide?.()} disabled={!onHide} aria-label="Hide Fluely" title="Hide">—</button>
         </div>
       </header>

@@ -6,6 +6,7 @@ import type {
   FluelySettings,
   SettingsPatch,
 } from "../../shared/ipc";
+import { timeoutPolicyCopy } from "../../shared/workspace-view";
 
 export interface SetupNotice {
   tone: "success" | "error";
@@ -18,13 +19,13 @@ export interface SetupViewProps {
   busy?: boolean;
   notice?: SetupNotice | null;
   onStart: (settingsPatch: SettingsPatch) => Promise<void> | void;
+  onBackToWork?: () => Promise<void> | void;
 }
 
 interface SetupDraft {
   path: string;
   model: string;
   fastModel: string;
-  timeoutMs: string;
   reasoning: CodexModelReasoningEffort;
   captureProtection: boolean;
 }
@@ -45,7 +46,6 @@ function makeDraft(settings: FluelySettings): SetupDraft {
     path: settings.codex.path,
     model: settings.codex.model,
     fastModel: settings.codex.fastModel,
-    timeoutMs: String(settings.codex.timeoutMs),
     reasoning: settings.codex.modelReasoningEffort ?? "medium",
     captureProtection: settings.privacy.captureProtection,
   };
@@ -61,11 +61,6 @@ function validateDraft(draft: SetupDraft): SetupErrors {
   }
   if (!draft.fastModel.trim()) {
     errors.fastModel = "Choose a fast model for quick follow-ups.";
-  }
-
-  const timeout = Number(draft.timeoutMs);
-  if (!Number.isFinite(timeout) || timeout < 1_000 || timeout > 600_000) {
-    errors.timeoutMs = "Use a timeout between 1,000 ms and 600,000 ms.";
   }
 
   // The status shown above can be stale (for example, Codex may have been
@@ -101,7 +96,7 @@ function statusCopy(codexStatus: CodexStatus | null): { label: string; detail: s
   };
 }
 
-export function SetupView({ settings, codexStatus, busy = false, notice, onStart }: SetupViewProps) {
+export function SetupView({ settings, codexStatus, busy = false, notice, onStart, onBackToWork }: SetupViewProps) {
   const [draft, setDraft] = useState<SetupDraft>(() => makeDraft(settings));
   const [errors, setErrors] = useState<SetupErrors>({});
   const [submitting, setSubmitting] = useState(false);
@@ -127,6 +122,8 @@ export function SetupView({ settings, codexStatus, busy = false, notice, onStart
 
     setSubmitting(true);
     try {
+      // timeoutMs stays in persisted settings for legacy compatibility, but is
+      // intentionally not editable or rewritten by this fixed-deadline UI.
       await onStart({
         setupComplete: true,
         privacy: { captureProtection: draft.captureProtection },
@@ -135,7 +132,6 @@ export function SetupView({ settings, codexStatus, busy = false, notice, onStart
           path: draft.path.trim(),
           model: draft.model.trim(),
           fastModel: draft.fastModel.trim(),
-          timeoutMs: Number(draft.timeoutMs),
           sandboxMode: "read-only",
           modelReasoningEffort: draft.reasoning,
         },
@@ -282,25 +278,11 @@ export function SetupView({ settings, codexStatus, busy = false, notice, onStart
               </select>
               <span className="field-help">Balanced is a good place to start.</span>
             </label>
-            <label className="field">
-              <span className="field-label">Request timeout</span>
-              <span className="input-suffix">
-                <input
-                  aria-label="Codex request timeout"
-                  className={errors.timeoutMs ? "has-error" : ""}
-                  type="number"
-                  min="1000"
-                  max="600000"
-                  step="1000"
-                  value={draft.timeoutMs}
-                  onChange={(event) => updateDraft("timeoutMs", event.target.value)}
-                />
-                <span>ms</span>
-              </span>
-              <span className={`field-help ${errors.timeoutMs ? "error-text" : ""}`}>
-                {errors.timeoutMs ?? "The CLI is stopped when this limit is reached."}
-              </span>
-            </label>
+            <div className="field deadline-policy" role="note" aria-label="Codex request deadlines">
+              <span className="field-label">Request deadlines</span>
+              <span className="deadline-policy-copy">{timeoutPolicyCopy()}</span>
+              <span className="field-help">Progress keeps the idle deadline alive; the hard ceiling never resets.</span>
+            </div>
           </div>
 
           <div className="privacy-row">
@@ -327,10 +309,17 @@ export function SetupView({ settings, codexStatus, busy = false, notice, onStart
               <span className="safe-badge">✓</span>
               <span>Local queue · read-only sandbox · no API keys in Fluely</span>
             </div>
-            <button className="primary-button setup-submit" type="submit" disabled={disabled}>
-              <span>{submitting ? "Checking Codex…" : "Start using Fluely"}</span>
-              <span aria-hidden="true">↗</span>
-            </button>
+            <div className="setup-actions">
+              {onBackToWork && (
+                <button className="secondary-button" type="button" onClick={() => void onBackToWork()} disabled={disabled}>
+                  Back to workspace
+                </button>
+              )}
+              <button className="primary-button setup-submit" type="submit" disabled={disabled}>
+                <span>{submitting ? "Checking Codex…" : settings.setupComplete ? "Save and enter workspace" : "Start using Fluely"}</span>
+                <span aria-hidden="true">↗</span>
+              </button>
+            </div>
           </div>
         </form>
       </section>
