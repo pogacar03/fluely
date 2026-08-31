@@ -17,6 +17,20 @@ export interface OwnedWorkspaceWindow {
   focus(): void;
 }
 
+export interface ApplicationWindowFocusOptions {
+  getWindow(): OwnedWorkspaceWindow | null;
+  isReady(): boolean;
+  isCaptureActive(): boolean;
+  waitForCaptureIdle(): Promise<void>;
+}
+
+export interface ApplicationWindowFocusController {
+  requestFocus(): void;
+  notifyGateChanged(): boolean;
+  notifyWindowDestroyed(): void;
+  dispose(): void;
+}
+
 /** Adapts Electron's process-wide lock and second-instance event to a testable port. */
 export function createApplicationInstancePort(
   application: ApplicationInstanceTarget,
@@ -62,4 +76,80 @@ export function restoreAndFocusWindow(window: OwnedWorkspaceWindow | null): void
   }
   window.show();
   window.focus();
+}
+
+/** Coalesces duplicate-launch focus until readiness and capture visibility gates are open. */
+export function createApplicationWindowFocusController({
+  getWindow,
+  isReady,
+  isCaptureActive,
+  waitForCaptureIdle,
+}: ApplicationWindowFocusOptions): ApplicationWindowFocusController {
+  let pending = false;
+  let disposed = false;
+  let waitingForCaptureIdle: Promise<void> | undefined;
+
+  const attemptFocus = (): boolean => {
+    if (disposed || !pending || !isReady()) {
+      return false;
+    }
+
+    const window = getWindow();
+    if (!window || window.isDestroyed()) {
+      pending = false;
+      return false;
+    }
+
+    if (isCaptureActive()) {
+      if (waitingForCaptureIdle) {
+        return false;
+      }
+
+      let idle: Promise<void>;
+      try {
+        idle = Promise.resolve(waitForCaptureIdle());
+      } catch {
+        return false;
+      }
+      waitingForCaptureIdle = idle;
+      void idle.then(
+        () => {
+          if (waitingForCaptureIdle === idle) {
+            waitingForCaptureIdle = undefined;
+          }
+          attemptFocus();
+        },
+        () => {
+          if (waitingForCaptureIdle === idle) {
+            waitingForCaptureIdle = undefined;
+          }
+        },
+      );
+      return false;
+    }
+
+    pending = false;
+    restoreAndFocusWindow(window);
+    return true;
+  };
+
+  return {
+    requestFocus: () => {
+      if (disposed) {
+        return;
+      }
+      pending = true;
+      attemptFocus();
+    },
+    notifyGateChanged: attemptFocus,
+    notifyWindowDestroyed: () => {
+      pending = false;
+      waitingForCaptureIdle = undefined;
+    },
+    dispose: () => {
+      disposed = true;
+      pending = false;
+      waitingForCaptureIdle = undefined;
+    },
+  };
 }

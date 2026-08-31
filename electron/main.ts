@@ -26,8 +26,8 @@ import {
 } from "./services/CodexCliService";
 import {
   acquireSingleInstance,
+  createApplicationWindowFocusController,
   createApplicationInstancePort,
-  restoreAndFocusWindow,
 } from "./services/application-instance";
 import { registerIpcHandlers } from "./services/ipcHandlers";
 import { SettingsService } from "./services/SettingsService";
@@ -39,7 +39,7 @@ import { attachApplicationLifecycle, attachWindowLifecycle } from "./services/wi
 import { getWindowPreferences } from "./windowConfig";
 
 let mainWindow: BrowserWindow | null = null;
-let pendingSecondInstanceFocus = false;
+let mainWindowReady = false;
 let settingsService: SettingsService | null = null;
 let shortcutManager: ShortcutManager | null = null;
 let capturePrivacyController: CapturePrivacyController | null = null;
@@ -51,17 +51,12 @@ let ipcHandlersRegistered = false;
 
 const MIN_WINDOW_OPACITY = 0.35;
 const MAX_WINDOW_OPACITY = 1;
-
-function focusMainWindow(): void {
-  const window = mainWindow;
-  if (!window || window.isDestroyed()) {
-    pendingSecondInstanceFocus = true;
-    return;
-  }
-
-  pendingSecondInstanceFocus = false;
-  restoreAndFocusWindow(window);
-}
+const mainWindowFocusController = createApplicationWindowFocusController({
+  getWindow: () => mainWindow,
+  isReady: () => mainWindowReady,
+  isCaptureActive: isScreenshotSessionActive,
+  waitForCaptureIdle: waitForScreenshotSessionIdle,
+});
 
 function clampWindowOpacity(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -90,6 +85,8 @@ export function createMainWindow(settings: FluelySettings = DEFAULT_SETTINGS): B
     return mainWindow;
   }
 
+  mainWindowReady = false;
+
   const window = new BrowserWindow({
     width: settings.window.width,
     height: settings.window.height,
@@ -115,15 +112,16 @@ export function createMainWindow(settings: FluelySettings = DEFAULT_SETTINGS): B
     isCaptureActive: isScreenshotSessionActive,
     waitForCaptureIdle: waitForScreenshotSessionIdle,
     onReadyToShow: () => {
-      window.show();
-      if (pendingSecondInstanceFocus) {
-        pendingSecondInstanceFocus = false;
-        window.focus();
+      mainWindowReady = true;
+      if (!mainWindowFocusController.notifyGateChanged()) {
+        window.show();
       }
     },
     onClosed: () => {
       if (mainWindow === window) {
         analysisService?.cancel();
+        mainWindowFocusController.notifyWindowDestroyed();
+        mainWindowReady = false;
         mainWindow = null;
         capturePrivacyController?.dispose();
         capturePrivacyController = null;
@@ -422,7 +420,9 @@ app.setName("Fluely");
 
 const applicationInstance = createApplicationInstancePort(app);
 if (acquireSingleInstance(applicationInstance, () => app.quit())) {
-  const removeSecondInstanceListener = applicationInstance.onSecondInstance(focusMainWindow);
+  const removeSecondInstanceListener = applicationInstance.onSecondInstance(
+    mainWindowFocusController.requestFocus,
+  );
 
   app.whenReady().then(async () => {
     const loadedSettings = await ensureSettingsService();
@@ -447,6 +447,7 @@ if (acquireSingleInstance(applicationInstance, () => app.quit())) {
 
   app.on("will-quit", () => {
     removeSecondInstanceListener();
+    mainWindowFocusController.dispose();
     capturePrivacyController?.dispose();
     shortcutManager?.dispose();
     analysisService?.cancel();

@@ -199,7 +199,7 @@ test("analysis IPC forwards only the validated request and serializes service fa
   });
 });
 
-test("window IPC clamps opacity before applying and persists setup/work mode", async () => {
+test("window opacity IPC clamps valid values and rejects invalid input", async () => {
   const harness = makeHarness();
 
   const low = await harness.registrations.get("window:set-opacity")({}, -10);
@@ -216,17 +216,6 @@ test("window IPC clamps opacity before applying and persists setup/work mode", a
   assert.equal(invalid.ok, false);
   assert.equal(invalid.error.code, "INVALID_ARGUMENT");
 
-  const work = await harness.registrations.get("window:set-mode")({}, "work");
-  assert.equal(work.ok, true);
-  assert.deepEqual(harness.settingsUpdates.at(-1), { setupComplete: true });
-
-  const setup = await harness.registrations.get("window:set-mode")({}, "setup");
-  assert.equal(setup.ok, true);
-  assert.deepEqual(harness.settingsUpdates.at(-1), { setupComplete: false });
-
-  const unknown = await harness.registrations.get("window:set-mode")({}, "debug");
-  assert.equal(unknown.ok, false);
-  assert.equal(unknown.error.code, "INVALID_ARGUMENT");
 });
 
 test("Codex IPC returns a serializable status and never exposes child-process details", async () => {

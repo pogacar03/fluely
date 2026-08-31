@@ -11,12 +11,6 @@ const { subscribeToAnalysisState } = await import(pathToFileURL(ipcModulePath).h
 
 const FIRST_ID = "11111111-1111-4111-8111-111111111111";
 
-test("selectWorkspaceMode keeps first-run settings in setup and completed settings in work", () => {
-  assert.equal(workspaceState.selectWorkspaceMode({ setupComplete: false }), "setup");
-  assert.equal(workspaceState.selectWorkspaceMode({ setupComplete: true }), "work");
-  assert.equal(workspaceState.selectWorkspaceMode(null), "setup");
-});
-
 test("buildIntentPrompt adds an intent instruction while preserving the question", () => {
   assert.equal(
     workspaceState.buildIntentPrompt("explain", "What does this error mean?"),
@@ -92,13 +86,6 @@ test("getAnalysisActionState disables asks while running and enables cancel", ()
   });
   assert.equal(workspaceState.getAnalysisActionState("idle", 0).canAskQueue, false);
   assert.equal(workspaceState.getAnalysisActionState("completed", 1).canAskQueue, true);
-});
-
-test("successful setup state transition selects the work view", () => {
-  let settings = { setupComplete: false };
-  assert.equal(workspaceState.selectWorkspaceMode(settings), "setup");
-  settings = { ...settings, setupComplete: true };
-  assert.equal(workspaceState.selectWorkspaceMode(settings), "work");
 });
 
 test("analysis state subscription ignores stale events and unsubscribes once", () => {

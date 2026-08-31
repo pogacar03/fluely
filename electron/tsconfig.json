@@ -13,5 +13,5 @@
     "declaration": false,
     "types": ["node"]
   },
-  "include": ["**/*.ts", "../src/shared/**/*.ts"]
+  "include": ["**/*.ts", "../src/shared/**/*.ts", "../src/renderer/workspace-navigation.ts"]
 }

@@ -45,8 +45,6 @@ export interface CodexStatus {
   error?: IpcError;
 }
 
-export type WindowMode = "setup" | "work";
-
 export interface FluelySettings {
   setupComplete: boolean;
   shortcuts: ShortcutSettings;
@@ -258,7 +256,6 @@ export interface FluelyApi {
   };
   window: {
     setOpacity: (opacity: number) => Promise<IpcResult<WindowSettings>>;
-    setMode: (mode: WindowMode) => Promise<IpcResult<FluelySettings>>;
     hide: () => Promise<IpcResult<void>>;
   };
 }

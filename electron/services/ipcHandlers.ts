@@ -14,7 +14,6 @@ import type {
   SettingsPatch,
   ShortcutSettings,
   ShortcutStatus,
-  WindowMode,
   WindowSettings,
 } from "../../src/shared/ipc";
 import { normalizeSettingsPatch, validateSettingsPatch } from "./settings-core";
@@ -303,18 +302,6 @@ function invalidOpacity(): IpcError {
     message: "Window opacity must be a finite number.",
     action: "Choose a window opacity between 35% and 100% and try again.",
   };
-}
-
-function invalidWindowMode(): IpcError {
-  return {
-    code: "INVALID_ARGUMENT",
-    message: "Window mode must be setup or work.",
-    action: "Choose setup or work mode and try again.",
-  };
-}
-
-function isWindowMode(value: unknown): value is WindowMode {
-  return value === "setup" || value === "work";
 }
 
 function serializeAnalysisState(value: unknown): AnalysisState {
@@ -706,22 +693,6 @@ export function registerIpcHandlers({
         return failure<WindowSettings>(errorFromUnknown(error, {
           code: "SETTINGS_WRITE_FAILED",
           message: "Fluely could not save the window opacity.",
-          action: "Check the Fluely data directory permissions and try again.",
-        }));
-      }
-    });
-
-    ipcMain.handle("window:set-mode", async (_event, payload) => {
-      if (!isWindowMode(payload)) {
-        return failure<FluelySettings>(invalidWindowMode());
-      }
-
-      try {
-        return await settings.update({ setupComplete: payload === "work" });
-      } catch (error) {
-        return failure<FluelySettings>(errorFromUnknown(error, {
-          code: "SETTINGS_WRITE_FAILED",
-          message: "Fluely could not save the requested window mode.",
           action: "Check the Fluely data directory permissions and try again.",
         }));
       }

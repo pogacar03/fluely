@@ -59,7 +59,7 @@ test("preload exposes only the documented Fluely API groups", async () => {
     "get",
     "onStateChanged",
   ]);
-  assert.deepEqual(Object.keys(exposedApi.window).sort(), ["hide", "setMode", "setOpacity"]);
+  assert.deepEqual(Object.keys(exposedApi.window).sort(), ["hide", "setOpacity"]);
   assert.equal(exposedApi.ipcRenderer, undefined);
   assert.equal(exposedApi.invoke, undefined);
   await exposedApi.settings.get();
@@ -77,7 +77,6 @@ test("preload exposes only the documented Fluely API groups", async () => {
   await exposedApi.analysis.cancel();
   await exposedApi.analysis.getStatus();
   await exposedApi.window.setOpacity(0.8);
-  await exposedApi.window.setMode("work");
   await exposedApi.window.hide();
   await exposedApi.screenshots.get();
   await exposedApi.screenshots.capture();
@@ -125,7 +124,6 @@ test("preload exposes only the documented Fluely API groups", async () => {
     "analysis:cancel",
     "analysis:get-status",
     "window:set-opacity",
-    "window:set-mode",
     "window:hide",
     "screenshots:get",
     "screenshots:capture",
@@ -204,7 +202,6 @@ test("main IPC handlers register only the documented channels", () => {
     "shortcuts:get",
     "shortcuts:update",
     "window:hide",
-    "window:set-mode",
     "window:set-opacity",
   ]);
 });

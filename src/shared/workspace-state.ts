@@ -1,10 +1,8 @@
 import type {
   AnalysisIntent,
   AnalysisStatus,
-  FluelySettings,
   ScreenshotItem,
   ScreenshotState,
-  WindowMode,
 } from "./ipc";
 
 const MIN_OPACITY = 0.35;
@@ -16,13 +14,6 @@ const intentInstructions: Record<AnalysisIntent, string> = {
   "follow-up": "Follow up on the previous answer using the selected screenshots.",
   recap: "Recap the selected screenshots briefly.",
 };
-
-/** Selects the renderer surface from persisted first-run state. */
-export function selectWorkspaceMode(
-  settings: Pick<FluelySettings, "setupComplete"> | null | undefined,
-): WindowMode {
-  return settings?.setupComplete ? "work" : "setup";
-}
 
 /** Turns an intent chip and free-form question into a bounded prompt. */
 export function buildIntentPrompt(intent: AnalysisIntent, question = ""): string {

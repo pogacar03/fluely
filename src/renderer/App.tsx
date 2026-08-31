@@ -10,7 +10,6 @@ import type {
   ScreenshotState,
 } from "../shared/ipc";
 import {
-  canOpenWork,
   initialWorkspaceView,
   navigateWorkspaceView,
   type WorkspaceView,
@@ -18,6 +17,10 @@ import {
 import { getAnalysisScreenshotIds, getQueueIds } from "../shared/workspace-state";
 import { SetupView, type SetupNotice } from "./components/SetupView";
 import { WorkView, type WorkAnalysisRequest } from "./components/WorkView";
+import {
+  createWorkspaceNavigationCallbacks,
+  selectWorkspaceRoot,
+} from "./workspace-navigation";
 
 function describeError(error: IpcError): string {
   return `${error.message} ${error.action}`;
@@ -238,32 +241,6 @@ export function App() {
         setBusy(false);
       }
     }
-  }
-
-  function openSettings() {
-    if (!mountedRef.current || !settings) {
-      return;
-    }
-    setWorkspaceView((current) => navigateWorkspaceView(
-      current ?? initialWorkspaceView(settings.setupComplete),
-      "settings",
-      settings.setupComplete,
-    ));
-  }
-
-  function openWork() {
-    if (!mountedRef.current || !settings) {
-      return;
-    }
-    if (!canOpenWork(settings.setupComplete)) {
-      setNotice({ tone: "error", text: "Finish setup before entering the workspace." });
-      return;
-    }
-    setWorkspaceView((current) => navigateWorkspaceView(
-      current ?? initialWorkspaceView(settings.setupComplete),
-      "work",
-      settings.setupComplete,
-    ));
   }
 
   async function changeOpacity(opacity: number) {
@@ -519,7 +496,18 @@ export function App() {
   }
 
   const view = workspaceView ?? initialWorkspaceView(settings.setupComplete);
-  if (view === "settings") {
+  const navigation = createWorkspaceNavigationCallbacks({
+    setupComplete: settings.setupComplete,
+    getWorkspaceView: () => view,
+    setWorkspaceView,
+    onWorkBlocked: () => {
+      if (mountedRef.current) {
+        setNotice({ tone: "error", text: "Finish setup before entering the workspace." });
+      }
+    },
+  });
+  const root = selectWorkspaceRoot(view);
+  if (root.settings) {
     return (
       <SetupView
         settings={settings}
@@ -527,7 +515,7 @@ export function App() {
         busy={busy}
         notice={notice}
         onStart={startSetup}
-        onBackToWork={settings.setupComplete ? openWork : undefined}
+        onBackToWork={settings.setupComplete ? () => { navigation.openWork(); } : undefined}
       />
     );
   }
@@ -544,7 +532,7 @@ export function App() {
       onAskQueue={askQueue}
       onCancel={cancelAnalysis}
       onOpacityChange={changeOpacity}
-      onOpenSettings={openSettings}
+      onOpenSettings={navigation.openSettings}
       onHide={hideWindow}
       onRemoveScreenshot={removeScreenshot}
       onClearQueue={clearQueue}
@@ -559,5 +547,4 @@ export {
   getAnalysisScreenshotIds,
   getQueueCount,
   getQueueIds,
-  selectWorkspaceMode,
 } from "../shared/workspace-state";
