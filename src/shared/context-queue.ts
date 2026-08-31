@@ -19,6 +19,7 @@ export type ContextQueueAction =
 export const MAX_CONTEXT_SCREENSHOTS = 5;
 export const EMPTY_CONTEXT_PROMPT = "Analyze the attached screenshots.";
 export const CONTEXT_PREVIEW_PREFIX = "fluely-media://context/";
+export const MAX_COMPLETED_REQUEST_IDS = 512;
 
 export function contextPreviewUrl(screenshotId: string): string {
   return `${CONTEXT_PREVIEW_PREFIX}${encodeURIComponent(screenshotId)}`;
@@ -90,6 +91,31 @@ export class DuplicateRequestIdError extends Error {
   }
 }
 
+export interface WorkspaceRequestIdFactory {
+  next(action: string): string;
+}
+
+export type RendererSessionNonceFactory = () => string;
+
+function createRendererSessionNonce(): string {
+  return globalThis.crypto.randomUUID();
+}
+
+/** Creates request IDs that cannot collide with IDs from a previous renderer session. */
+export function createWorkspaceRequestIdFactory(
+  nonceFactory: RendererSessionNonceFactory = createRendererSessionNonce,
+): WorkspaceRequestIdFactory {
+  const sessionNonce = nonceFactory();
+  let sequence = 0;
+
+  return {
+    next(action) {
+      sequence += 1;
+      return `desktop-${sessionNonce}-${action}-${sequence}`;
+    },
+  };
+}
+
 export interface RequestIdDeduper<T> {
   run(requestId: string, fingerprint: string, operation: () => Promise<T> | T): Promise<T>;
   clear(): void;
@@ -98,11 +124,31 @@ export interface RequestIdDeduper<T> {
 interface RequestEntry<T> {
   fingerprint: string;
   promise: Promise<T>;
+  completed: boolean;
 }
 
 /** Coalesces retries while rejecting accidental request-id reuse for another action. */
 export function createRequestIdDeduper<T>(): RequestIdDeduper<T> {
   const entries = new Map<string, RequestEntry<T>>();
+  const completedRequestIds: string[] = [];
+
+  function markCompleted(requestId: string, entry: RequestEntry<T>): void {
+    if (entries.get(requestId) !== entry || entry.completed) {
+      return;
+    }
+
+    entry.completed = true;
+    completedRequestIds.push(requestId);
+    while (completedRequestIds.length > MAX_COMPLETED_REQUEST_IDS) {
+      const oldestRequestId = completedRequestIds.shift();
+      if (oldestRequestId) {
+        const oldestEntry = entries.get(oldestRequestId);
+        if (oldestEntry?.completed) {
+          entries.delete(oldestRequestId);
+        }
+      }
+    }
+  }
 
   return {
     run(requestId, fingerprint, operation) {
@@ -115,11 +161,17 @@ export function createRequestIdDeduper<T>(): RequestIdDeduper<T> {
       }
 
       const promise = Promise.resolve().then(operation);
-      entries.set(requestId, { fingerprint, promise });
+      const entry = { fingerprint, promise, completed: false };
+      entries.set(requestId, entry);
+      void promise.then(
+        () => markCompleted(requestId, entry),
+        () => markCompleted(requestId, entry),
+      );
       return promise;
     },
     clear() {
       entries.clear();
+      completedRequestIds.length = 0;
     },
   };
 }

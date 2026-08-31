@@ -12,6 +12,7 @@ const {
   clearContextQueue,
   createContextQueue,
   createRequestIdDeduper,
+  createWorkspaceRequestIdFactory,
   normalizeContextPrompt,
   removeContextScreenshot,
   selectQueuedScreenshots,
@@ -91,4 +92,64 @@ test("request-id deduper shares one pending result and rejects reuse for a diffe
     deduper.run("request-1", "remove", async () => "unexpected"),
     /already used/i,
   );
+});
+
+test("renderer request IDs use one injectable nonce per session and restart their sequence after reload", () => {
+  assert.equal(typeof createWorkspaceRequestIdFactory, "function");
+
+  const firstSession = createWorkspaceRequestIdFactory(() => "session-alpha");
+  const reloadedSession = createWorkspaceRequestIdFactory(() => "session-beta");
+
+  assert.equal(firstSession.next("capture"), "desktop-session-alpha-capture-1");
+  assert.equal(firstSession.next("send"), "desktop-session-alpha-send-2");
+  assert.equal(reloadedSession.next("capture"), "desktop-session-beta-capture-1");
+});
+
+test("request-id deduper retains exactly the 512 most recently completed requests", async () => {
+  const deduper = createRequestIdDeduper();
+  let calls = 0;
+
+  for (let index = 0; index < 513; index += 1) {
+    await deduper.run(`completed-${index}`, "capture", async () => {
+      calls += 1;
+      return index;
+    });
+  }
+
+  const newestCached = await deduper.run("completed-512", "capture", async () => {
+    calls += 1;
+    return "unexpected";
+  });
+  const evictedOldest = await deduper.run("completed-0", "capture", async () => {
+    calls += 1;
+    return "fresh";
+  });
+
+  assert.equal(newestCached, 512);
+  assert.equal(evictedOldest, "fresh");
+  assert.equal(calls, 514);
+});
+
+test("request-id deduper never evicts an in-flight request while completed entries rotate", async () => {
+  const deduper = createRequestIdDeduper();
+  let pendingCalls = 0;
+  let release;
+  const pendingResult = new Promise((resolve) => { release = resolve; });
+
+  const first = deduper.run("pending", "capture", async () => {
+    pendingCalls += 1;
+    return pendingResult;
+  });
+  for (let index = 0; index < 513; index += 1) {
+    await deduper.run(`other-${index}`, "capture", async () => index);
+  }
+  const duplicate = deduper.run("pending", "capture", async () => {
+    pendingCalls += 1;
+    return "unexpected";
+  });
+
+  release("shared result");
+  assert.equal(await first, "shared result");
+  assert.equal(await duplicate, "shared result");
+  assert.equal(pendingCalls, 1);
 });

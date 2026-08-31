@@ -16,7 +16,6 @@
     "test": "npm run build:electron && node --test",
     "package:dir": "npm run build && electron-builder --dir"
   },
-  "dependencies": {},
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.12",
@@ -24,6 +23,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^40.10.2",
     "electron-builder": "^25.1.8",
+    "jsdom": "^30.0.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "rimraf": "^6.0.1",

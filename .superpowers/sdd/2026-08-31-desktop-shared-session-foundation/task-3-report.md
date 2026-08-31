@@ -32,3 +32,29 @@ The Work view now exposes Capture, Send images, Capture & ask, Cancel, per-thumb
 - `npm run typecheck`: passed.
 - `npm run build`: passed.
 - App launch/user gate was intentionally deferred. The known spinner/no-output integration blocker remains; it was not hidden with local messages. Immutable sent attachment copies and canonical conversation/controller integration remain Task 4 work.
+
+## Fix Round 1
+
+### Findings and bounded design
+
+The renderer previously generated `desktop-<action>-<counter>` IDs, so a reload reset the counter while the process-lifetime main deduper retained old promises indefinitely. Request IDs now include one cryptographically random UUID nonce per renderer mount plus the action and monotonic sequence; the factory accepts an injectable nonce source for deterministic tests. The main deduper keeps all in-flight entries and exactly the 512 most recently completed IDs in deterministic completion-order FIFO. Same-ID/same-command requests still join one promise, and reuse for another command still fails.
+
+### RED/GREEN evidence
+
+- RED request-ID run: 15 tests produced 3 expected failures—the factory was absent in the pure and reload integration tests, and the 513th completion did not evict the oldest cached result. The pre-existing pending-join test remained green.
+- RED media run: 1 expected failure reported `private context media handler seam is missing` before the production protocol handler was extracted.
+- Renderer harness note: the six real-component interaction tests were characterization coverage for behavior already present and passed on their first run; they mount the compiled `App`/actual `WorkView`, use the production preload and workspace handler, and click the actual controls.
+- GREEN focused run: 61 passed, 0 failed, covering request IDs/deduplication, real WorkView interactions, workspace IPC, real screenshot store/private preview retrieval and cleanup, screenshot service, IPC contract, and renderer workspace state.
+- GREEN full verification: `npm test` 201/201; `npm run typecheck` passed; `npm run build` passed; `git diff --check` passed.
+
+### Queue/actions, IPC, and renderer behavior
+
+All binding Task 3 semantics remain unchanged: at most five PNGs; Capture only appends; Send images sends every queued ID with blank input normalized exactly to `Analyze the attached screenshots.`; Capture & ask completes capture before send; success, failure, and cancel retain the draft queue; only remove/clear-queue mutate it. The shared `WorkspaceCommand` remains the sole command union. The mounted renderer tests prove action ordering, all-image send, busy/disabled duplicate prevention, cancel routing, and retry after an error without queue loss or an optimistic answer. The real workspace handler plus real `ScreenshotService` and extracted production media handler prove opaque `fluely-media` retrieval, no serialized filesystem path, and 404 after clear-queue (including invalid traversal input).
+
+### Changed paths
+
+`src/shared/context-queue.ts`, `src/shared/__tests__/context-queue.test.mjs`, `src/renderer/App.tsx`, `src/renderer/__tests__/workview-interactions.test.mjs`, `electron/services/context-media.ts`, `electron/main.ts`, `electron/services/__tests__/workspace-command-ipc.test.mjs`, `electron/services/__tests__/workspace-media-integration.test.mjs`, `electron/tsconfig.json`, `package.json`, and `package-lock.json`. The requested commit subject is `fix: close screenshot queue review findings`.
+
+### Concerns
+
+No app was launched and packaged PID 34152 remained running. The known spinner/no-output issue remains a final integration blocker for controller/Task 4; this round found no new deterministic cause and added no optimistic local answer. Immutable sent copies remain Task 4. Installing the minimum renderer harness dependency (`jsdom`) left npm reporting 14 audit findings (13 high, 1 critical); no out-of-scope audit mutation was attempted.

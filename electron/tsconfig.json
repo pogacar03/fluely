@@ -7,11 +7,17 @@
     "strict": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
+    "jsx": "react-jsx",
     "rootDir": "..",
     "outDir": "../dist-electron",
     "sourceMap": false,
     "declaration": false,
     "types": ["node"]
   },
-  "include": ["**/*.ts", "../src/shared/**/*.ts", "../src/renderer/workspace-navigation.ts"]
+  "include": [
+    "**/*.ts",
+    "../src/shared/**/*.ts",
+    "../src/renderer/workspace-navigation.ts",
+    "../src/renderer/App.tsx"
+  ]
 }

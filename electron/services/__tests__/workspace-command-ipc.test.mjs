@@ -6,8 +6,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const bridgePath = path.resolve(__dirname, "../../../dist-electron/electron/preloadBridge.js");
 const handlersPath = path.resolve(__dirname, "../../../dist-electron/electron/services/ipcHandlers.js");
+const queuePath = path.resolve(__dirname, "../../../dist-electron/src/shared/context-queue.js");
 const { exposeFluelyApi } = await import(pathToFileURL(bridgePath).href);
 const { registerIpcHandlers } = await import(pathToFileURL(handlersPath).href);
+const { createWorkspaceRequestIdFactory } = await import(pathToFileURL(queuePath).href);
 
 const FIRST_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_ID = "22222222-2222-4222-8222-222222222222";
@@ -172,6 +174,29 @@ test("duplicate workspace request IDs share one result and do not repeat a send"
   assert.deepEqual(harness.calls, ["send"]);
   assert.equal((await execute({}, { ...command, prompt: "Different request" })).ok, false);
   assert.deepEqual(harness.calls, ["send"]);
+});
+
+test("a renderer reload uses a new session nonce and cannot receive a stale capture result", async () => {
+  assert.equal(typeof createWorkspaceRequestIdFactory, "function");
+  const harness = makeHarness();
+  const execute = harness.registrations.get("workspace:execute");
+  const firstSession = createWorkspaceRequestIdFactory(() => "before-reload");
+  const reloadedSession = createWorkspaceRequestIdFactory(() => "after-reload");
+
+  const first = await execute({}, {
+    type: "capture",
+    requestId: firstSession.next("capture"),
+  });
+  const afterReload = await execute({}, {
+    type: "capture",
+    requestId: reloadedSession.next("capture"),
+  });
+
+  assert.equal(first.ok, true);
+  assert.equal(afterReload.ok, true);
+  assert.deepEqual(harness.calls, ["capture", "capture"]);
+  assert.equal(first.value.queue.items.length, 3);
+  assert.equal(afterReload.value.queue.items.length, 4);
 });
 
 test("Capture & ask captures first and sends only after a successful capture", async () => {

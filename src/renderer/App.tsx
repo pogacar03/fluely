@@ -15,6 +15,10 @@ import {
   navigateWorkspaceView,
   type WorkspaceView,
 } from "../shared/workspace-view";
+import {
+  createWorkspaceRequestIdFactory,
+  type WorkspaceRequestIdFactory,
+} from "../shared/context-queue";
 import { SetupView, type SetupNotice } from "./components/SetupView";
 import { WorkView, type WorkAnalysisRequest } from "./components/WorkView";
 import {
@@ -72,8 +76,12 @@ export function App() {
   const [notice, setNotice] = useState<SetupNotice | null>(null);
   const mountedRef = useRef(true);
   const opacityRequestRef = useRef(0);
-  const workspaceRequestRef = useRef(0);
+  const workspaceRequestIdFactoryRef = useRef<WorkspaceRequestIdFactory | null>(null);
   const workspaceCommandBusyRef = useRef(false);
+
+  if (!workspaceRequestIdFactoryRef.current) {
+    workspaceRequestIdFactoryRef.current = createWorkspaceRequestIdFactory();
+  }
 
   useEffect(() => {
     let active = true;
@@ -268,8 +276,7 @@ export function App() {
   }
 
   function nextWorkspaceRequestId(action: WorkspaceCommand["type"]): string {
-    workspaceRequestRef.current += 1;
-    return `desktop-${action}-${workspaceRequestRef.current}`;
+    return workspaceRequestIdFactoryRef.current!.next(action);
   }
 
   async function executeWorkspaceCommand(command: WorkspaceCommand): Promise<boolean> {
