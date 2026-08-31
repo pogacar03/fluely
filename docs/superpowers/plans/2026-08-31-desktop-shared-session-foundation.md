@@ -209,7 +209,7 @@ Queue invariants:
 - [ ] Run focused tests, `npm test`, `npm run typecheck`, and `npm run build`.
 - [ ] Request a `gpt-5.6-luna` (`reasoning_effort=max`) review focused on accidental-send paths, queue ownership, IPC validation, accessibility, and retries; resolve blocking findings.
 - [ ] Commit only the task paths with message `feat: add explicit screenshot send controls`.
-- [ ] Independently verify commit contents and full checks.
+- [ ] Have a fresh `gpt-5.6-luna` (`reasoning_effort=max`) agent independently verify commit contents and full checks.
 - [ ] Launch the committed app with a fresh `gpt-5.6-luna` (`reasoning_effort=max`) agent and keep it running. The user gate checks standalone Capture, visible thumbnails, remove/clear, standalone Send images with no text, Capture & ask, the five-image cap, queue retention after send, and retry after cancel/failure.
 
 ---

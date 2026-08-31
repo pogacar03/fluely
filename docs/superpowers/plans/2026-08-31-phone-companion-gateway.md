@@ -94,7 +94,7 @@ Lifecycle and security constants:
 - [ ] Run focused tests, `npm test`, `npm run typecheck`, `npm run build`, `npm run package:dir`, and `npm run smoke:packaged`.
 - [ ] Request a `gpt-5.6-luna` (`reasoning_effort=max`) security/lifecycle review and resolve every blocking finding.
 - [ ] Commit only task paths with message `feat: add secure phone pairing gateway`.
-- [ ] Independently verify the commit and packaged dependency resolution.
+- [ ] Have a fresh `gpt-5.6-luna` (`reasoning_effort=max`) agent independently verify the commit and packaged dependency resolution.
 - [ ] Launch the committed app on LAN with a fresh `gpt-5.6-luna` (`reasoning_effort=max`) agent and keep it running. The user gate checks enable/disable, QR visibility, successful phone pairing, clean redirected URL, expiry/regeneration, and old-phone revocation after replacement pairing.
 
 ---
@@ -155,7 +155,7 @@ Media responses use exact MIME type, content length, `Cache-Control: no-store`, 
 - [ ] Run focused tests, `npm test`, `npm run typecheck`, `npm run build`, `npm run package:dir`, and `npm run smoke:packaged`.
 - [ ] Request a `gpt-5.6-luna` (`reasoning_effort=max`) review focused on canonical-state fidelity, auth on every byte route, path secrecy, reconnect correctness, and packaged assets; resolve blocking findings.
 - [ ] Commit only task paths with message `feat: mirror desktop conversation to phone`.
-- [ ] Independently verify commit, full checks, and a byte-for-byte media retrieval smoke through an authenticated test client.
+- [ ] Have a fresh `gpt-5.6-luna` (`reasoning_effort=max`) agent independently verify commit, full checks, and a byte-for-byte media retrieval smoke through an authenticated test client.
 - [ ] Launch the committed app with a fresh `gpt-5.6-luna` (`reasoning_effort=max`) agent and keep it running. The user gate checks that a screenshot captured on the computer appears on the phone before send, sent screenshots appear in the same chat turn on both devices, assistant text/order match, and reconnect restores the same history.
 
 ---
@@ -206,7 +206,7 @@ Operational limits:
 - [ ] Run focused tests, `npm test`, `npm run typecheck`, `npm run build`, `npm run package:dir`, and `npm run smoke:packaged`.
 - [ ] Request a `gpt-5.6-luna` (`reasoning_effort=max`) review focused on command authority, abuse limits, race conditions, idempotency, and desktop/phone convergence; resolve blocking findings.
 - [ ] Commit only task paths with message `feat: control shared session from phone`.
-- [ ] Independently verify commit and full checks.
+- [ ] Have a fresh `gpt-5.6-luna` (`reasoning_effort=max`) agent independently verify commit and full checks.
 - [ ] Launch the committed app with a fresh `gpt-5.6-luna` (`reasoning_effort=max`) agent and keep it running. The user gate checks phone-triggered computer capture, queue changes on both screens, phone send with and without text, queue retention after send, cancellation, duplicate taps, and reconnect while an answer is streaming.
 
 ---
@@ -234,7 +234,7 @@ Operational limits:
 - [ ] Run `npm test`, `npm run typecheck`, `npm run build`, `npm run package:dir`, and `npm run smoke:packaged`. Record exact commands and outcomes in the acceptance report.
 - [ ] Request separate `gpt-5.6-luna` (`reasoning_effort=max`) code/security and product/spec reviews; resolve all blocking findings.
 - [ ] Commit only task paths with message `chore: finish phone companion acceptance`.
-- [ ] Independently verify final HEAD, commit path set, all checks, packaged artifact, clean status, and every requirement in the approved spec.
+- [ ] Have a fresh `gpt-5.6-luna` (`reasoning_effort=max`) agent independently verify final HEAD, commit path set, all checks, packaged artifact, clean status, and every requirement in the approved spec.
 - [ ] Have a fresh `gpt-5.6-luna` (`reasoning_effort=max`) launch agent start the packaged final artifact and keep it running. The user performs the final real-phone matrix: pair by QR, desktop capture visible on phone, identical sent screenshot/chat history both ways, phone capture/send/cancel, reconnect, replacement pairing, LAN disable, and restart-clears-everything.
 
 ---
