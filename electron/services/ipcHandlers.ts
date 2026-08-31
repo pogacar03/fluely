@@ -62,6 +62,7 @@ export interface CodexHandlerService {
 
 export interface WindowHandlerService {
   setOpacity?: (opacity: number) => void | Promise<void>;
+  hide?: () => void | Promise<void>;
 }
 
 export interface IpcHandlerDependencies {
@@ -719,6 +720,28 @@ export function registerIpcHandlers({
           code: "SETTINGS_WRITE_FAILED",
           message: "Fluely could not save the requested window mode.",
           action: "Check the Fluely data directory permissions and try again.",
+        }));
+      }
+    });
+
+    ipcMain.handle("window:hide", async () => {
+      const hide = windowHandler?.hide;
+      if (!hide) {
+        return failure<void>({
+          code: "INTERNAL_ERROR",
+          message: "Fluely could not hide its window.",
+          action: "Use the Fluely shortcut to hide the window and try again.",
+        });
+      }
+
+      try {
+        await hide();
+        return success<void>(undefined);
+      } catch (error) {
+        return failure<void>(errorFromUnknown(error, {
+          code: "INTERNAL_ERROR",
+          message: "Fluely could not hide its window.",
+          action: "Use the Fluely shortcut to hide the window and try again.",
         }));
       }
     });

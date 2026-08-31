@@ -59,7 +59,7 @@ test("preload exposes only the documented Fluely API groups", async () => {
     "get",
     "onStateChanged",
   ]);
-  assert.deepEqual(Object.keys(exposedApi.window).sort(), ["setMode", "setOpacity"]);
+  assert.deepEqual(Object.keys(exposedApi.window).sort(), ["hide", "setMode", "setOpacity"]);
   assert.equal(exposedApi.ipcRenderer, undefined);
   assert.equal(exposedApi.invoke, undefined);
   await exposedApi.settings.get();
@@ -78,6 +78,7 @@ test("preload exposes only the documented Fluely API groups", async () => {
   await exposedApi.analysis.getStatus();
   await exposedApi.window.setOpacity(0.8);
   await exposedApi.window.setMode("work");
+  await exposedApi.window.hide();
   await exposedApi.screenshots.get();
   await exposedApi.screenshots.capture();
   await exposedApi.screenshots.delete("11111111-1111-4111-8111-111111111111");
@@ -125,6 +126,7 @@ test("preload exposes only the documented Fluely API groups", async () => {
     "analysis:get-status",
     "window:set-opacity",
     "window:set-mode",
+    "window:hide",
     "screenshots:get",
     "screenshots:capture",
     "screenshots:delete",
@@ -171,6 +173,7 @@ test("main IPC handlers register only the documented channels", () => {
   };
   const window = {
     setOpacity: () => undefined,
+    hide: () => undefined,
   };
 
   registerIpcHandlers({
@@ -200,9 +203,45 @@ test("main IPC handlers register only the documented channels", () => {
     "settings:update",
     "shortcuts:get",
     "shortcuts:update",
+    "window:hide",
     "window:set-mode",
     "window:set-opacity",
   ]);
+});
+
+test("window hide IPC invokes only the injected narrow hide adapter", async () => {
+  const registrations = new Map();
+  let hideCalls = 0;
+  registerIpcHandlers({
+    ipcMain: {
+      handle(channel, handler) {
+        registrations.set(channel, handler);
+      },
+    },
+    settings: {
+      get: () => ({ shortcuts: {}, window: {}, privacy: {} }),
+      update: async () => ({ ok: true, value: {} }),
+      reset: async () => ({ ok: true, value: {} }),
+    },
+    shortcuts: {
+      getStatus: () => ({ entries: [], updatedAt: new Date(0).toISOString() }),
+      update: () => ({ ok: true, value: {} }),
+    },
+    screenshots: {
+      getState: () => ({ items: [], capturing: false, permission: "unavailable" }),
+      capture: async () => ({ id: "11111111-1111-4111-8111-111111111111", createdAt: "2026-08-30T00:00:00.000Z", width: 1, height: 1 }),
+      delete: async () => ({ items: [], capturing: false, permission: "unavailable" }),
+      clear: async () => ({ items: [], capturing: false, permission: "unavailable" }),
+    },
+    window: {
+      hide: () => { hideCalls += 1; },
+    },
+    getAppStatus: () => ({ name: "Fluely", version: "0.1.0", platform: "darwin", visible: true }),
+  });
+
+  const result = await registrations.get("window:hide")();
+  assert.deepEqual(result, { ok: true, value: undefined });
+  assert.equal(hideCalls, 1);
 });
 
 test("main IPC rejects unsafe screenshot IDs before calling the service", async () => {

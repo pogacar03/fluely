@@ -34,7 +34,7 @@ export interface WorkViewProps {
   onCancel: () => Promise<void> | void;
   onOpacityChange: (opacity: number) => Promise<void> | void;
   onOpenSettings: () => Promise<void> | void;
-  onHide?: () => void;
+  onHide?: () => Promise<void> | void;
   onRemoveScreenshot: (id: string) => Promise<void> | void;
   onClearQueue: () => Promise<void> | void;
 }
@@ -135,7 +135,7 @@ export function WorkView({
             <output>{formatOpacityLabel(opacity)}</output>
           </label>
           <button type="button" className="icon-button" onClick={() => void onOpenSettings()} aria-label="Open Fluely settings" title="Settings">⚙</button>
-          <button type="button" className="icon-button" onClick={onHide} disabled={!onHide} aria-label="Hide Fluely" title="Hide">—</button>
+          <button type="button" className="icon-button" onClick={() => void onHide?.()} disabled={!onHide} aria-label="Hide Fluely" title="Hide">—</button>
         </div>
       </header>
 

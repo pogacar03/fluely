@@ -9,7 +9,7 @@ import type {
   SettingsPatch,
   ScreenshotState,
 } from "../shared/ipc";
-import { selectWorkspaceMode } from "../shared/workspace-state";
+import { getAnalysisScreenshotIds, getQueueIds, selectWorkspaceMode } from "../shared/workspace-state";
 import { SetupView, type SetupNotice } from "./components/SetupView";
 import { WorkView, type WorkAnalysisRequest } from "./components/WorkView";
 
@@ -312,6 +312,8 @@ export function App() {
 
   async function captureAndAsk(request: WorkAnalysisRequest) {
     setActionBusy(true);
+    let queueRefreshAttempted = false;
+    let queueRefreshWarning: string | null = null;
     try {
       const capture = await window.fluely.screenshots.capture();
       if (!mountedRef.current) {
@@ -322,9 +324,24 @@ export function App() {
         return;
       }
 
+      let screenshotIds = [capture.value.id];
+      try {
+        const refreshed = await window.fluely.screenshots.get();
+        queueRefreshAttempted = true;
+        if (refreshed.ok) {
+          setScreenshotState(refreshed.value);
+          screenshotIds = getAnalysisScreenshotIds(refreshed.value, capture.value.id);
+        } else {
+          queueRefreshWarning = `Fluely could not refresh the context queue. ${describeError(refreshed.error)} Only this screen is being analyzed.`;
+        }
+      } catch {
+        queueRefreshAttempted = true;
+        queueRefreshWarning = "Fluely could not refresh the context queue. Only this screen is being analyzed.";
+      }
+
       const result = await window.fluely.analysis.start({
         prompt: request.prompt,
-        screenshotIds: [capture.value.id],
+        screenshotIds,
         intent: request.intent,
         fast: request.fast,
       });
@@ -336,7 +353,14 @@ export function App() {
         return;
       }
       setAnalysisState(result.value);
-      setNotice({ tone: "success", text: "Captured the current screen. Fluely is preparing your answer." });
+      setNotice({
+        tone: queueRefreshWarning ? "error" : "success",
+        text: queueRefreshWarning
+          ? `Captured the current screen. ${queueRefreshWarning}`
+          : queueRefreshAttempted && screenshotIds.length > 1
+            ? `Captured the current screen. Fluely is preparing an answer from all ${screenshotIds.length} queued contexts.`
+            : "Captured the current screen. Fluely is preparing your answer.",
+      });
     } catch {
       if (mountedRef.current) {
         setNotice({
@@ -345,13 +369,15 @@ export function App() {
         });
       }
     } finally {
-      try {
-        const refreshed = await window.fluely.screenshots.get();
-        if (mountedRef.current && refreshed.ok) {
-          setScreenshotState(refreshed.value);
+      if (!queueRefreshAttempted) {
+        try {
+          const refreshed = await window.fluely.screenshots.get();
+          if (mountedRef.current && refreshed.ok) {
+            setScreenshotState(refreshed.value);
+          }
+        } catch {
+          // The capture result and analysis state remain useful if the refresh races teardown.
         }
-      } catch {
-        // The capture result and analysis state remain useful if the refresh races teardown.
       }
       if (mountedRef.current) {
         setActionBusy(false);
@@ -360,7 +386,7 @@ export function App() {
   }
 
   async function askQueue(request: WorkAnalysisRequest) {
-    const ids = screenshotState?.items.map((item) => item.id) ?? [];
+    const ids = getQueueIds(screenshotState);
     if (ids.length === 0) {
       setNotice({ tone: "error", text: "Capture a screen before asking the queue." });
       return;
@@ -442,8 +468,23 @@ export function App() {
     }
   }
 
-  function showHideHint() {
-    setNotice({ tone: "success", text: "Use the Fluely shortcut to hide or show this window." });
+  async function hideWindow() {
+    try {
+      const result = await window.fluely.window.hide();
+      if (!mountedRef.current) {
+        return;
+      }
+      if (!result.ok) {
+        showError(result.error);
+      }
+    } catch {
+      if (mountedRef.current) {
+        setNotice({
+          tone: "error",
+          text: "Fluely could not hide its window. Use the Fluely shortcut and try again.",
+        });
+      }
+    }
   }
 
   if (busy && !settings) {
@@ -494,11 +535,19 @@ export function App() {
       onCancel={cancelAnalysis}
       onOpacityChange={changeOpacity}
       onOpenSettings={openSettings}
-      onHide={showHideHint}
+      onHide={hideWindow}
       onRemoveScreenshot={removeScreenshot}
       onClearQueue={clearQueue}
     />
   );
 }
 
-export { buildIntentPrompt, formatOpacityLabel, getAnalysisActionState, getQueueCount, selectWorkspaceMode } from "../shared/workspace-state";
+export {
+  buildIntentPrompt,
+  formatOpacityLabel,
+  getAnalysisActionState,
+  getAnalysisScreenshotIds,
+  getQueueCount,
+  getQueueIds,
+  selectWorkspaceMode,
+} from "../shared/workspace-state";

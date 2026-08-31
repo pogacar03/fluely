@@ -354,6 +354,12 @@ async function initializeServices(window: BrowserWindow): Promise<void> {
             currentWindow.setOpacity(opacity);
           }
         },
+        hide: () => {
+          const currentWindow = mainWindow;
+          if (currentWindow && !currentWindow.isDestroyed()) {
+            currentWindow.hide();
+          }
+        },
       },
       applyPrivacy: (enabled) => {
         if (mainWindow && capturePrivacyController) {

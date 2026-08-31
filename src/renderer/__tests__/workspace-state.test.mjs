@@ -44,6 +44,42 @@ test("getQueueCount reports metadata items without exposing paths", () => {
   assert.equal(workspaceState.getQueueCount(null), 0);
 });
 
+test("getQueueIds returns every managed queue ID in metadata order", () => {
+  const state = {
+    items: [
+      { id: FIRST_ID, createdAt: "2026-08-30T00:00:00.000Z", width: 1280, height: 720 },
+      { id: "22222222-2222-4222-8222-222222222222", createdAt: "2026-08-30T00:01:00.000Z", width: 1440, height: 900 },
+    ],
+    capturing: false,
+    permission: "granted",
+  };
+  assert.deepEqual(workspaceState.getQueueIds(state), [
+    FIRST_ID,
+    "22222222-2222-4222-8222-222222222222",
+  ]);
+  assert.deepEqual(workspaceState.getQueueIds(null), []);
+});
+
+test("getAnalysisScreenshotIds analyzes the refreshed queue plus the captured item", () => {
+  const state = {
+    items: [
+      { id: FIRST_ID, createdAt: "2026-08-30T00:00:00.000Z", width: 1280, height: 720 },
+      { id: "22222222-2222-4222-8222-222222222222", createdAt: "2026-08-30T00:01:00.000Z", width: 1440, height: 900 },
+    ],
+    capturing: false,
+    permission: "granted",
+  };
+  assert.deepEqual(workspaceState.getAnalysisScreenshotIds(state, FIRST_ID), [
+    FIRST_ID,
+    "22222222-2222-4222-8222-222222222222",
+  ]);
+  assert.deepEqual(workspaceState.getAnalysisScreenshotIds(state, "33333333-3333-4333-8333-333333333333"), [
+    FIRST_ID,
+    "22222222-2222-4222-8222-222222222222",
+    "33333333-3333-4333-8333-333333333333",
+  ]);
+});
+
 test("getAnalysisActionState disables asks while running and enables cancel", () => {
   assert.deepEqual(workspaceState.getAnalysisActionState("running", 2), {
     isRunning: true,

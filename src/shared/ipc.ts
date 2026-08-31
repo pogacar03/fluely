@@ -256,6 +256,7 @@ export interface FluelyApi {
   window: {
     setOpacity: (opacity: number) => Promise<IpcResult<WindowSettings>>;
     setMode: (mode: WindowMode) => Promise<IpcResult<FluelySettings>>;
+    hide: () => Promise<IpcResult<void>>;
   };
 }
 

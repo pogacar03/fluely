@@ -180,6 +180,14 @@ p {
     linear-gradient(145deg, #0c0c14 0%, #0a0a10 62%, #10101b 100%);
 }
 
+.setup-shell,
+.work-shell {
+  height: 100vh;
+  max-height: 100vh;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
 .setup-shell {
   padding: 28px 34px 24px;
 }
@@ -712,6 +720,8 @@ p {
 
 .loading-shell {
   display: grid;
+  height: 100vh;
+  max-height: 100vh;
   min-height: 100vh;
   place-content: center;
   padding: 30px;
@@ -750,7 +760,8 @@ p {
   display: flex;
   min-height: 100vh;
   flex-direction: column;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   background:
     radial-gradient(circle at 87% 3%, rgba(106, 76, 224, 0.17), transparent 30%),
     linear-gradient(145deg, #101018 0%, #0d0d14 54%, #151421 100%);

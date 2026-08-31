@@ -66,6 +66,7 @@ const api: FluelyApi = {
   window: {
     setOpacity: (opacity: number) => invoke<WindowSettings>("window:set-opacity", opacity),
     setMode: (mode: WindowMode) => invoke<FluelySettings>("window:set-mode", mode),
+    hide: () => invoke<void>("window:hide"),
   },
 };
 

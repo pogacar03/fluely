@@ -46,6 +46,22 @@ export function getQueueCount(
   return value && "items" in value ? value.items.length : value?.length ?? 0;
 }
 
+/** Returns the opaque IDs represented by a queue snapshot in display order. */
+export function getQueueIds(
+  value: Pick<ScreenshotState, "items"> | readonly ScreenshotItem[] | null | undefined,
+): string[] {
+  const items = value && "items" in value ? value.items : value;
+  return items?.map((item) => item.id) ?? [];
+}
+
+/** Builds a deduplicated analysis selection from the refreshed queue and capture result. */
+export function getAnalysisScreenshotIds(
+  value: Pick<ScreenshotState, "items"> | readonly ScreenshotItem[] | null | undefined,
+  capturedId: string | null | undefined,
+): string[] {
+  return [...new Set([...getQueueIds(value), ...(capturedId ? [capturedId] : [])])];
+}
+
 export interface AnalysisActionState {
   isRunning: boolean;
   canCaptureAsk: boolean;

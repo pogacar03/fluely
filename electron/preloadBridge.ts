@@ -95,6 +95,7 @@ export function exposeFluelyApi(
     window: {
       setOpacity: (opacity: number) => invoke<WindowSettings>(ipcRenderer, "window:set-opacity", opacity),
       setMode: (mode: WindowMode) => invoke<FluelySettings>(ipcRenderer, "window:set-mode", mode),
+      hide: () => invoke<void>(ipcRenderer, "window:hide"),
     },
   });
 }
