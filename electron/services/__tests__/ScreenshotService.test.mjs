@@ -353,9 +353,11 @@ test("ScreenshotService selects the source matching the display nearest the curs
   }]);
   assert.deepEqual(item, {
     id: "11111111-1111-4111-8111-111111111111",
-    createdAt: "2026-08-30T10:20:30.000Z",
+    capturedAt: new Date("2026-08-30T10:20:30.000Z").getTime(),
     width: 1440,
     height: 900,
+    mimeType: "image/png",
+    previewUrl: "fluely-media://context/11111111-1111-4111-8111-111111111111",
   });
 });
 
@@ -372,9 +374,11 @@ test("ScreenshotService persists PNG bytes through a temporary file and rename",
 
   assert.deepEqual(item, {
     id: "22222222-2222-4222-8222-222222222222",
-    createdAt: "2026-08-30T11:00:00.000Z",
+    capturedAt: new Date("2026-08-30T11:00:00.000Z").getTime(),
     width: 1920,
     height: 1080,
+    mimeType: "image/png",
+    previewUrl: "fluely-media://context/22222222-2222-4222-8222-222222222222",
   });
   assert.equal(await readFile(path.join(directory, `${item.id}.png`), "utf8"), "png-bytes");
   assert.deepEqual(files, [`${item.id}.png`]);

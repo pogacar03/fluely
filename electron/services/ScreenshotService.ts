@@ -2,11 +2,12 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
+  ContextScreenshot,
   IpcError,
-  ScreenshotItem,
   ScreenshotPermission,
   ScreenshotState,
 } from "../../src/shared/ipc";
+import { contextPreviewUrl, MAX_CONTEXT_SCREENSHOTS } from "../../src/shared/context-queue";
 
 export interface ScreenshotSize {
   width: number;
@@ -81,7 +82,6 @@ export interface ScreenshotServiceOptions {
 
 export type ScreenshotServiceError = IpcError;
 
-const MAX_ITEMS = 5;
 const DEFAULT_SOURCE_TIMEOUT_MS = 5000;
 const MANAGED_FILE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.png(?:\.tmp)?$/i;
 const MANAGED_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -193,7 +193,7 @@ export class ScreenshotService {
   private readonly idFactory: () => string;
   private readonly now: () => Date;
   private readonly fileSystem: ScreenshotFileSystem;
-  private readonly items: ScreenshotItem[] = [];
+  private readonly items: ContextScreenshot[] = [];
   private readonly initialization: Promise<void>;
   private mutationTail: Promise<void> = Promise.resolve();
   private capturing = false;
@@ -242,7 +242,7 @@ export class ScreenshotService {
       .map((id) => join(this.directory, `${id}.png`));
   }
 
-  public capture(): Promise<ScreenshotItem> {
+  public capture(): Promise<ContextScreenshot> {
     if (this.capturing) {
       return Promise.reject(captureInProgress());
     }
@@ -294,11 +294,14 @@ export class ScreenshotService {
         }
         const imageBytes = source.thumbnail.toPNG();
         const size = source.thumbnail.getSize();
-        const item: ScreenshotItem = {
-          id: this.idFactory(),
-          createdAt: this.now().toISOString(),
+        const id = this.idFactory();
+        const item: ContextScreenshot = {
+          id,
+          capturedAt: this.now().getTime(),
           width: size.width,
           height: size.height,
+          mimeType: "image/png",
+          previewUrl: contextPreviewUrl(id),
         };
 
         await this.persist(item.id, imageBytes);
@@ -467,7 +470,7 @@ export class ScreenshotService {
   }
 
   private async evictOldest(): Promise<void> {
-    while (this.items.length > MAX_ITEMS) {
+        while (this.items.length > MAX_CONTEXT_SCREENSHOTS) {
       const oldest = this.items.shift();
       if (!oldest) {
         return;

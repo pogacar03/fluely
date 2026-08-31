@@ -9,13 +9,19 @@ import type {
   FluelySettings,
   IpcError,
   IpcResult,
-  ScreenshotItem,
   ScreenshotState,
   SettingsPatch,
   ShortcutSettings,
   ShortcutStatus,
+  WorkspaceCommand,
+  WorkspaceCommandResult,
   WindowSettings,
 } from "../../src/shared/ipc";
+import {
+  createRequestIdDeduper,
+  normalizeContextPrompt,
+} from "../../src/shared/context-queue";
+import type { ContextScreenshot } from "../../src/shared/context-queue";
 import { normalizeSettingsPatch, validateSettingsPatch } from "./settings-core";
 
 export interface IpcMainAdapter {
@@ -35,7 +41,7 @@ export interface ShortcutHandlerService {
 
 export interface ScreenshotHandlerService {
   getState(): ScreenshotState;
-  capture(): Promise<ScreenshotItem>;
+  capture(): Promise<ContextScreenshot>;
   delete(id: string): Promise<ScreenshotState>;
   clear(): Promise<ScreenshotState>;
 }
@@ -64,6 +70,10 @@ export interface WindowHandlerService {
   hide?: () => void | Promise<void>;
 }
 
+export interface WorkspaceHandlerService {
+  execute(command: WorkspaceCommand): WorkspaceCommandResult | Promise<WorkspaceCommandResult>;
+}
+
 export interface IpcHandlerDependencies {
   ipcMain: IpcMainAdapter;
   settings: SettingsHandlerService;
@@ -77,6 +87,7 @@ export interface IpcHandlerDependencies {
   window?: WindowHandlerService;
   windowTarget?: WindowHandlerService;
   browserWindow?: WindowHandlerService;
+  workspace?: WorkspaceHandlerService;
   applyPrivacy?: (enabled: boolean) => void;
   applyCodexSettings?: (settings: CodexCliSettings) => void | Promise<void>;
   applyOpacity?: (opacity: number) => void | Promise<void>;
@@ -404,6 +415,128 @@ function screenshotFailure(error: unknown): IpcError {
   };
 }
 
+const MAX_WORKSPACE_REQUEST_ID_LENGTH = 128;
+
+function invalidWorkspaceCommand(message = "Workspace commands must use a supported type and request ID."): IpcError {
+  return {
+    code: "INVALID_ARGUMENT",
+    message,
+    action: "Refresh the workspace and try again.",
+  };
+}
+
+function isWorkspaceRequestId(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= MAX_WORKSPACE_REQUEST_ID_LENGTH;
+}
+
+/** Validates and normalizes the renderer-facing command before any service is called. */
+export function normalizeWorkspaceCommand(
+  input: unknown,
+): { command?: WorkspaceCommand; error?: IpcError } {
+  if (!isRecord(input) || !isWorkspaceRequestId(input.requestId) || input.requestId !== input.requestId.trim()) {
+    return { error: invalidWorkspaceCommand("Workspace commands must include a non-empty request ID.") };
+  }
+
+  const requestId = input.requestId;
+  switch (input.type) {
+    case "capture":
+    case "clear-queue":
+    case "clear-conversation":
+    case "cancel":
+      return { command: { type: input.type, requestId } };
+    case "remove":
+      if (!isScreenshotId(input.screenshotId)) {
+        return { error: invalidWorkspaceCommand("Remove commands must identify a managed screenshot.") };
+      }
+      return { command: { type: "remove", requestId, screenshotId: input.screenshotId } };
+    case "send":
+    case "capture-and-send":
+      if (typeof input.prompt !== "string" || input.prompt.length > MAX_ANALYSIS_PROMPT_LENGTH) {
+        return {
+          error: invalidWorkspaceCommand(
+            `Workspace prompts must be a string no longer than ${MAX_ANALYSIS_PROMPT_LENGTH} characters.`,
+          ),
+        };
+      }
+      return { command: { type: input.type, requestId, prompt: input.prompt } };
+    default:
+      return { error: invalidWorkspaceCommand("Workspace command type is not supported.") };
+  }
+}
+
+function noAnalysisHandler(): IpcError {
+  return {
+    code: "INTERNAL_ERROR",
+    message: "Fluely cannot run workspace analysis until its analysis service is ready.",
+    action: "Restart Fluely and try again.",
+  };
+}
+
+function emptyWorkspaceQueue(): IpcError {
+  return {
+    code: "SCREENSHOT_NOT_FOUND",
+    message: "There are no screenshots in the context queue to send.",
+    action: "Capture a screen before selecting Send images.",
+  };
+}
+
+function createDefaultWorkspaceHandler(
+  screenshots: ScreenshotHandlerService,
+  analysis: AnalysisHandlerService | undefined,
+): WorkspaceHandlerService {
+  return {
+    async execute(command): Promise<WorkspaceCommandResult> {
+      switch (command.type) {
+        case "capture":
+          await screenshots.capture();
+          return { queue: screenshots.getState() };
+        case "remove":
+          return { queue: await screenshots.delete(command.screenshotId) };
+        case "clear-queue":
+          return { queue: await screenshots.clear() };
+        case "clear-conversation":
+          throw {
+            code: "INTERNAL_ERROR",
+            message: "Fluely cannot clear conversation history before the session store is ready.",
+            action: "Restart Fluely and try again.",
+          } satisfies IpcError;
+        case "cancel":
+          if (!analysis) {
+            throw noAnalysisHandler();
+          }
+          return {
+            queue: screenshots.getState(),
+            analysis: serializeAnalysisState(await analysis.cancel()),
+          };
+        case "send":
+        case "capture-and-send": {
+          if (!analysis) {
+            throw noAnalysisHandler();
+          }
+          if (command.type === "capture-and-send") {
+            await screenshots.capture();
+          }
+          const queue = screenshots.getState();
+          const screenshotIds = queue.items.map((item) => item.id);
+          if (screenshotIds.length === 0) {
+            throw emptyWorkspaceQueue();
+          }
+          const analysisState = await analysis.start({
+            prompt: normalizeContextPrompt(command.prompt),
+            screenshotIds,
+            intent: "answer",
+            fast: false,
+          });
+          return {
+            queue: screenshots.getState(),
+            analysis: serializeAnalysisState(analysisState),
+          };
+        }
+      }
+    },
+  };
+}
+
 function emitScreenshotState(
   notifyScreenshotState: ((state: ScreenshotState) => void) | undefined,
   screenshots: ScreenshotHandlerService,
@@ -435,12 +568,15 @@ export function registerIpcHandlers({
   applyShortcuts,
   notifyScreenshotState,
   notifyAnalysisState,
+  workspace,
   getAppStatus,
 }: IpcHandlerDependencies): void {
   const analysisHandler = analysis ?? analysisService;
   const codexHandler = codex ?? codexService ?? codexCli;
   const windowHandler = window ?? windowTarget ?? browserWindow;
   const applyWindowOpacityHandler = applyOpacity ?? applyWindowOpacity;
+  const workspaceHandler = workspace ?? createDefaultWorkspaceHandler(screenshots, analysisHandler);
+  const workspaceRequestDeduper = createRequestIdDeduper<IpcResult<WorkspaceCommandResult>>();
   ipcMain.handle("settings:get", () => success(settings.get()));
 
   ipcMain.handle("settings:update", async (_event, payload) => {
@@ -525,7 +661,7 @@ export function registerIpcHandlers({
     try {
       return success(await screenshots.capture());
     } catch (error) {
-      return failure<ScreenshotItem>(screenshotFailure(error));
+      return failure<ContextScreenshot>(screenshotFailure(error));
     } finally {
       emitScreenshotState(notifyScreenshotState, screenshots);
     }
@@ -552,6 +688,36 @@ export function registerIpcHandlers({
       return failure<ScreenshotState>(screenshotFailure(error));
     } finally {
       emitScreenshotState(notifyScreenshotState, screenshots);
+    }
+  });
+
+  ipcMain.handle("workspace:execute", async (_event, payload) => {
+    const normalized = normalizeWorkspaceCommand(payload);
+    if (normalized.error || !normalized.command) {
+      return failure<WorkspaceCommandResult>(normalized.error ?? invalidWorkspaceCommand());
+    }
+
+    const command = normalized.command;
+    try {
+      return await workspaceRequestDeduper.run(
+        command.requestId,
+        JSON.stringify(command),
+        async () => {
+          try {
+            return success(await workspaceHandler.execute(command));
+          } catch (error) {
+            return failure<WorkspaceCommandResult>(errorFromUnknown(error, {
+              code: "INTERNAL_ERROR",
+              message: "Fluely could not complete that workspace command.",
+              action: "Try the command again.",
+            }));
+          }
+        },
+      );
+    } catch (error) {
+      return failure<WorkspaceCommandResult>(errorFromUnknown(error, invalidWorkspaceCommand(
+        "This request ID was already used for a different workspace command.",
+      )));
     }
   });
 

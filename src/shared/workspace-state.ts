@@ -75,7 +75,43 @@ export function getAnalysisActionState(
     canAskQueue: !isRunning && queueCount > 0,
     canCancel: isRunning,
     captureLabel: "Capture & ask",
-    queueLabel: "Ask queue",
+    queueLabel: "Send images",
+    cancelLabel: "Cancel",
+  };
+}
+
+export interface WorkspaceActionState {
+  isRunning: boolean;
+  isBusy: boolean;
+  canCapture: boolean;
+  canSendImages: boolean;
+  canCaptureAndSend: boolean;
+  canCancel: boolean;
+  captureLabel: string;
+  sendImagesLabel: string;
+  captureAndSendLabel: string;
+  cancelLabel: string;
+}
+
+/** Derives explicit screenshot action availability from canonical queue/analysis state. */
+export function getWorkspaceActionState(
+  status: AnalysisStatus | null | undefined,
+  queueCount: number,
+  commandBusy = false,
+  capturing = false,
+): WorkspaceActionState {
+  const isRunning = status === "running";
+  const isBusy = commandBusy || isRunning || capturing;
+  return {
+    isRunning,
+    isBusy,
+    canCapture: !isBusy,
+    canSendImages: !isBusy && queueCount > 0,
+    canCaptureAndSend: !isBusy,
+    canCancel: isRunning && !commandBusy,
+    captureLabel: "Capture",
+    sendImagesLabel: "Send images",
+    captureAndSendLabel: "Capture & ask",
     cancelLabel: "Cancel",
   };
 }

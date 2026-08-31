@@ -1135,17 +1135,25 @@ p {
 }
 
 .queue-item {
-  min-width: 137px;
+  position: relative;
+  min-width: 132px;
+  margin: 0;
+  align-items: stretch;
+  flex-direction: column;
   gap: 7px;
-  padding: 7px 8px;
+  padding: 6px;
   border: 1px solid rgba(205, 197, 241, 0.1);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.035);
 }
 
-.queue-item-glyph {
-  color: #a48dff;
-  font-size: 11px;
+.queue-thumbnail {
+  display: block;
+  width: 118px;
+  height: 66px;
+  border-radius: 5px;
+  object-fit: cover;
+  background: rgba(7, 7, 14, 0.8);
 }
 
 .queue-item-copy {
@@ -1170,6 +1178,9 @@ p {
 
 .queue-remove {
   display: grid;
+  position: absolute;
+  top: 5px;
+  right: 5px;
   width: 19px;
   height: 19px;
   flex: 0 0 auto;
@@ -1349,6 +1360,7 @@ p {
 
 .composer-actions {
   justify-content: space-between;
+  align-items: flex-start;
   gap: 10px;
   margin-top: 10px;
 }
@@ -1359,7 +1371,23 @@ p {
 }
 
 .action-button-group {
+  justify-content: flex-end;
   gap: 6px;
+  flex-wrap: wrap;
+}
+
+.button-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: button-spin 700ms linear infinite;
+}
+
+@keyframes button-spin {
+  to { transform: rotate(360deg); }
 }
 
 .cancel-button {

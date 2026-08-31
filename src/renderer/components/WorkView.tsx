@@ -1,25 +1,21 @@
 import { useEffect, useState } from "react";
 import type {
-  AnalysisIntent,
   AnalysisState,
   CodexStatus,
   FluelySettings,
   ScreenshotState,
 } from "../../shared/ipc";
 import {
-  buildIntentPrompt,
   formatOpacityLabel,
-  getAnalysisActionState,
   getQueueCount,
+  getWorkspaceActionState,
 } from "../../shared/workspace-state";
 import { AnswerSurface } from "./AnswerSurface";
-import { QueueStrip } from "./QueueStrip";
+import { ContextQueue } from "./ContextQueue";
 import type { SetupNotice } from "./SetupView";
 
 export interface WorkAnalysisRequest {
   prompt: string;
-  intent: AnalysisIntent;
-  fast: boolean;
 }
 
 export interface WorkViewProps {
@@ -29,8 +25,9 @@ export interface WorkViewProps {
   codexStatus: CodexStatus | null;
   notice?: SetupNotice | null;
   busy?: boolean;
+  onCapture: () => Promise<void> | void;
+  onSendImages: (request: WorkAnalysisRequest) => Promise<void> | void;
   onCaptureAsk: (request: WorkAnalysisRequest) => Promise<void> | void;
-  onAskQueue: (request: WorkAnalysisRequest) => Promise<void> | void;
   onCancel: () => Promise<void> | void;
   onOpacityChange: (opacity: number) => Promise<void> | void;
   onOpenSettings: () => Promise<void> | void;
@@ -38,13 +35,6 @@ export interface WorkViewProps {
   onRemoveScreenshot: (id: string) => Promise<void> | void;
   onClearQueue: () => Promise<void> | void;
 }
-
-const intents: Array<{ value: AnalysisIntent; label: string; hint: string }> = [
-  { value: "answer", label: "Answer", hint: "Get to the point" },
-  { value: "explain", label: "Explain", hint: "Make it clear" },
-  { value: "follow-up", label: "Follow-up", hint: "Continue the thread" },
-  { value: "recap", label: "Recap", hint: "Summarize context" },
-];
 
 function connectionLabel(status: CodexStatus | null, analysis: AnalysisState | null): string {
   if (analysis?.status === "running") {
@@ -63,8 +53,9 @@ export function WorkView({
   codexStatus,
   notice,
   busy = false,
+  onCapture,
+  onSendImages,
   onCaptureAsk,
-  onAskQueue,
   onCancel,
   onOpacityChange,
   onOpenSettings,
@@ -73,33 +64,22 @@ export function WorkView({
   onClearQueue,
 }: WorkViewProps) {
   const [prompt, setPrompt] = useState("");
-  const [intent, setIntent] = useState<AnalysisIntent>("answer");
-  const [fast, setFast] = useState(false);
   const [opacity, setOpacity] = useState(settings.window.opacity);
   const queueCount = getQueueCount(screenshotState);
-  const actionState = getAnalysisActionState(analysisState?.status, queueCount);
-  const disabled = busy || actionState.isRunning;
+  const actionState = getWorkspaceActionState(
+    analysisState?.status,
+    queueCount,
+    busy,
+    screenshotState?.capturing ?? false,
+  );
+  const disabled = actionState.isBusy;
+  const actionLabel = (label: string) => actionState.isBusy ? (
+    <><span className="button-spinner" aria-hidden="true" />{label}…</>
+  ) : label;
 
   useEffect(() => {
     setOpacity(settings.window.opacity);
   }, [settings.window.opacity]);
-
-  function buildRequest(): WorkAnalysisRequest {
-    return {
-      prompt: buildIntentPrompt(intent, prompt),
-      intent,
-      fast,
-    };
-  }
-
-  function submit(kind: "capture" | "queue") {
-    const request = buildRequest();
-    if (kind === "capture") {
-      void onCaptureAsk(request);
-    } else {
-      void onAskQueue(request);
-    }
-  }
 
   return (
     <main className="work-shell">
@@ -148,7 +128,7 @@ export function WorkView({
 
       <div className="work-content">
         <AnswerSurface analysis={analysisState} codexStatus={codexStatus} />
-        <QueueStrip
+        <ContextQueue
           screenshotState={screenshotState}
           disabled={disabled}
           onRemove={onRemoveScreenshot}
@@ -161,32 +141,6 @@ export function WorkView({
               <span className="eyebrow accent">ASK ABOUT YOUR SCREEN</span>
               <h2 id="composer-title">What do you want to know?</h2>
             </div>
-            <label className="fast-toggle">
-              <input
-                type="checkbox"
-                checked={fast}
-                onChange={(event) => setFast(event.target.checked)}
-                disabled={disabled}
-              />
-              <span className="fast-toggle-track"><span /></span>
-              <span>Fast model</span>
-            </label>
-          </div>
-
-          <div className="intent-row" aria-label="Question intent">
-            {intents.map((item) => (
-              <button
-                type="button"
-                key={item.value}
-                className={`intent-chip ${intent === item.value ? "selected" : ""}`}
-                onClick={() => setIntent(item.value)}
-                disabled={disabled}
-                title={item.hint}
-              >
-                <span className="intent-chip-dot" aria-hidden="true" />
-                {item.label}
-              </button>
-            ))}
           </div>
 
           <textarea
@@ -200,21 +154,42 @@ export function WorkView({
             maxLength={3000}
           />
 
-          <div className="composer-actions">
-            <span className="composer-tip">⌘↵ asks the queue · ⇧⌘↵ captures first</span>
+          <div className="composer-actions" aria-busy={actionState.isBusy}>
+            <span className="composer-tip">Capture adds context only · Send images uses every queued screenshot</span>
             <div className="action-button-group">
               {actionState.canCancel && (
-                <button type="button" className="secondary-button cancel-button" onClick={() => void onCancel()} disabled={busy}>
+                <button type="button" className="secondary-button cancel-button" onClick={() => void onCancel()} disabled={busy} aria-label="Cancel analysis">
                   <span className="cancel-glyph" aria-hidden="true">■</span>
                   {actionState.cancelLabel}
                 </button>
               )}
-              <button type="button" className="secondary-button" onClick={() => submit("queue")} disabled={disabled || !actionState.canAskQueue}>
-                {actionState.queueLabel}
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => void onSendImages({ prompt })}
+                disabled={!actionState.canSendImages}
+                aria-label="Send all queued screenshots"
+              >
+                {actionLabel(actionState.sendImagesLabel)}
               </button>
-              <button type="button" className="primary-button capture-button" onClick={() => submit("capture")} disabled={disabled || !actionState.canCaptureAsk}>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => void onCapture()}
+                disabled={!actionState.canCapture}
+                aria-label="Capture screenshot without sending"
+              >
+                {actionLabel(actionState.captureLabel)}
+              </button>
+              <button
+                type="button"
+                className="primary-button capture-button"
+                onClick={() => void onCaptureAsk({ prompt })}
+                disabled={!actionState.canCaptureAndSend}
+                aria-label="Capture screenshot and ask"
+              >
                 <span className="capture-glyph" aria-hidden="true">＋</span>
-                {actionState.captureLabel}
+                {actionLabel(actionState.captureAndSendLabel)}
               </button>
             </div>
           </div>

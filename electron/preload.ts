@@ -15,6 +15,8 @@ import type {
   ScreenshotState,
   ShortcutSettings,
   ShortcutStatus,
+  WorkspaceCommand,
+  WorkspaceCommandResult,
   WindowSettings,
 } from "../src/shared/ipc";
 
@@ -65,6 +67,9 @@ const api: FluelyApi = {
   window: {
     setOpacity: (opacity: number) => invoke<WindowSettings>("window:set-opacity", opacity),
     hide: () => invoke<void>("window:hide"),
+  },
+  workspace: {
+    execute: (command: WorkspaceCommand) => invoke<WorkspaceCommandResult>("workspace:execute", command),
   },
 };
 

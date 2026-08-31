@@ -4,17 +4,19 @@ import {
   desktopCapturer,
   globalShortcut,
   ipcMain,
+  protocol,
   screen,
   systemPreferences,
 } from "electron";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   AnalysisStateChangedEvent,
   AppStatus,
   CodexStatus,
+  ContextScreenshot,
   FluelySettings,
   IpcError,
-  ScreenshotItem,
   ScreenshotState,
 } from "../src/shared/ipc";
 import { DEFAULT_SETTINGS } from "./services/settings-core";
@@ -51,6 +53,9 @@ let ipcHandlersRegistered = false;
 
 const MIN_WINDOW_OPACITY = 0.35;
 const MAX_WINDOW_OPACITY = 1;
+const CONTEXT_MEDIA_SCHEME = "fluely-media";
+const CONTEXT_MEDIA_HOST = "context";
+const SCREENSHOT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const mainWindowFocusController = createApplicationWindowFocusController({
   getWindow: () => mainWindow,
   isReady: () => mainWindowReady,
@@ -196,6 +201,69 @@ function getScreenshotService(): ScreenshotService {
   return screenshotService;
 }
 
+function notFoundContextMedia(): Response {
+  return new Response(null, {
+    status: 404,
+    headers: {
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
+async function serveContextMedia(request: Request): Promise<Response> {
+  if (request.method !== "GET") {
+    return notFoundContextMedia();
+  }
+
+  let url: URL;
+  try {
+    url = new URL(request.url);
+  } catch {
+    return notFoundContextMedia();
+  }
+
+  if (
+    url.protocol !== `${CONTEXT_MEDIA_SCHEME}:` ||
+    url.hostname !== CONTEXT_MEDIA_HOST ||
+    url.port ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
+    return notFoundContextMedia();
+  }
+
+  const screenshotId = url.pathname.slice(1);
+  if (!SCREENSHOT_ID_PATTERN.test(screenshotId)) {
+    return notFoundContextMedia();
+  }
+
+  const managedPath = getScreenshotService().getManagedPaths([screenshotId])[0];
+  if (!managedPath) {
+    return notFoundContextMedia();
+  }
+
+  try {
+    const image = await readFile(managedPath);
+    return new Response(image, {
+      status: 200,
+      headers: {
+        "Cache-Control": "no-store",
+        "Content-Type": "image/png",
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
+  } catch {
+    return notFoundContextMedia();
+  }
+}
+
+function registerContextMediaProtocol(): void {
+  protocol.handle(CONTEXT_MEDIA_SCHEME, serveContextMedia);
+}
+
 function getCodexCliService(): CodexCliService {
   if (!codexCliService) {
     codexCliService = createMainProcessCodexCliService();
@@ -267,7 +335,7 @@ function captureFailure(): IpcError {
   };
 }
 
-function captureCurrentWindow(): Promise<ScreenshotItem> {
+function captureCurrentWindow(): Promise<ContextScreenshot> {
   const window = mainWindow;
   if (!window || window.isDestroyed()) {
     return Promise.reject(captureFailure());
@@ -416,6 +484,16 @@ async function initializeServices(window: BrowserWindow): Promise<void> {
   }
 }
 
+protocol.registerSchemesAsPrivileged([{
+  scheme: CONTEXT_MEDIA_SCHEME,
+  privileges: {
+    standard: true,
+    secure: true,
+    supportFetchAPI: true,
+    corsEnabled: false,
+  },
+}]);
+
 app.setName("Fluely");
 
 const applicationInstance = createApplicationInstancePort(app);
@@ -426,6 +504,7 @@ if (acquireSingleInstance(applicationInstance, () => app.quit())) {
 
   app.whenReady().then(async () => {
     const loadedSettings = await ensureSettingsService();
+    registerContextMediaProtocol();
     const window = createMainWindow(loadedSettings.get());
     await initializeServices(window);
 

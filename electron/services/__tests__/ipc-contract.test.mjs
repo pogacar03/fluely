@@ -44,6 +44,7 @@ test("preload exposes only the documented Fluely API groups", async () => {
     "settings",
     "shortcuts",
     "window",
+    "workspace",
   ]);
   assert.deepEqual(Object.keys(exposedApi.analysis).sort(), [
     "cancel",
@@ -60,6 +61,7 @@ test("preload exposes only the documented Fluely API groups", async () => {
     "onStateChanged",
   ]);
   assert.deepEqual(Object.keys(exposedApi.window).sort(), ["hide", "setOpacity"]);
+  assert.deepEqual(Object.keys(exposedApi.workspace).sort(), ["execute"]);
   assert.equal(exposedApi.ipcRenderer, undefined);
   assert.equal(exposedApi.invoke, undefined);
   await exposedApi.settings.get();
@@ -82,6 +84,7 @@ test("preload exposes only the documented Fluely API groups", async () => {
   await exposedApi.screenshots.capture();
   await exposedApi.screenshots.delete("11111111-1111-4111-8111-111111111111");
   await exposedApi.screenshots.clear();
+  await exposedApi.workspace.execute({ type: "capture", requestId: "workspace-1" });
   let receivedState;
   const unsubscribe = exposedApi.screenshots.onStateChanged((state) => {
     receivedState = state;
@@ -129,6 +132,7 @@ test("preload exposes only the documented Fluely API groups", async () => {
     "screenshots:capture",
     "screenshots:delete",
     "screenshots:clear",
+    "workspace:execute",
   ]);
 });
 
@@ -203,6 +207,7 @@ test("main IPC handlers register only the documented channels", () => {
     "shortcuts:update",
     "window:hide",
     "window:set-opacity",
+    "workspace:execute",
   ]);
 });
 

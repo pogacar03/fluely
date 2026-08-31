@@ -14,6 +14,8 @@ import type {
   ScreenshotState,
   ShortcutSettings,
   ShortcutStatus,
+  WorkspaceCommand,
+  WorkspaceCommandResult,
   WindowSettings,
 } from "../src/shared/ipc";
 
@@ -94,6 +96,9 @@ export function exposeFluelyApi(
     window: {
       setOpacity: (opacity: number) => invoke<WindowSettings>(ipcRenderer, "window:set-opacity", opacity),
       hide: () => invoke<void>(ipcRenderer, "window:hide"),
+    },
+    workspace: {
+      execute: (command: WorkspaceCommand) => invoke<WorkspaceCommandResult>(ipcRenderer, "workspace:execute", command),
     },
   });
 }

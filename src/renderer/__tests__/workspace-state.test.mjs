@@ -81,11 +81,38 @@ test("getAnalysisActionState disables asks while running and enables cancel", ()
     canAskQueue: false,
     canCancel: true,
     captureLabel: "Capture & ask",
-    queueLabel: "Ask queue",
+    queueLabel: "Send images",
     cancelLabel: "Cancel",
   });
   assert.equal(workspaceState.getAnalysisActionState("idle", 0).canAskQueue, false);
   assert.equal(workspaceState.getAnalysisActionState("completed", 1).canAskQueue, true);
+});
+
+test("workspace action state exposes separate capture/send actions and suppresses duplicates", () => {
+  assert.deepEqual(workspaceState.getWorkspaceActionState("idle", 2, false, false), {
+    isRunning: false,
+    isBusy: false,
+    canCapture: true,
+    canSendImages: true,
+    canCaptureAndSend: true,
+    canCancel: false,
+    captureLabel: "Capture",
+    sendImagesLabel: "Send images",
+    captureAndSendLabel: "Capture & ask",
+    cancelLabel: "Cancel",
+  });
+
+  const running = workspaceState.getWorkspaceActionState("running", 2, false, false);
+  assert.equal(running.canCapture, false);
+  assert.equal(running.canSendImages, false);
+  assert.equal(running.canCaptureAndSend, false);
+  assert.equal(running.canCancel, true);
+
+  const duplicate = workspaceState.getWorkspaceActionState("idle", 2, true, false);
+  assert.equal(duplicate.isBusy, true);
+  assert.equal(duplicate.canCapture, false);
+  assert.equal(duplicate.canSendImages, false);
+  assert.equal(duplicate.canCancel, false);
 });
 
 test("analysis state subscription ignores stale events and unsubscribes once", () => {

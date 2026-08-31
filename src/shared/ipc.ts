@@ -1,3 +1,5 @@
+import type { ContextScreenshot } from "./context-queue";
+
 export type ShortcutAction =
   | "toggleVisibility"
   | "captureScreenshot"
@@ -68,18 +70,16 @@ export type ScreenshotPermission =
   | "not-determined"
   | "unavailable";
 
-export interface ScreenshotItem {
-  id: string;
-  createdAt: string;
-  width: number;
-  height: number;
-}
+/** @deprecated Use ContextScreenshot for the renderer-facing queue metadata. */
+export type ScreenshotItem = ContextScreenshot;
 
 export interface ScreenshotState {
-  items: ScreenshotItem[];
+  items: ContextScreenshot[];
   capturing: boolean;
   permission: ScreenshotPermission;
 }
+
+export type { ContextScreenshot } from "./context-queue";
 
 export type ScreenshotStateListener = (state: ScreenshotState) => void;
 
@@ -203,6 +203,20 @@ export interface IpcFailure {
 
 export type IpcResult<T> = IpcSuccess<T> | IpcFailure;
 
+export type WorkspaceCommand =
+  | { type: "capture"; requestId: string }
+  | { type: "remove"; requestId: string; screenshotId: string }
+  | { type: "clear-queue"; requestId: string }
+  | { type: "clear-conversation"; requestId: string }
+  | { type: "send"; requestId: string; prompt: string }
+  | { type: "capture-and-send"; requestId: string; prompt: string }
+  | { type: "cancel"; requestId: string };
+
+export interface WorkspaceCommandResult {
+  queue: ScreenshotState;
+  analysis?: AnalysisState;
+}
+
 export interface ShortcutStatusEntry {
   action: ShortcutAction;
   accelerator: string;
@@ -257,6 +271,9 @@ export interface FluelyApi {
   window: {
     setOpacity: (opacity: number) => Promise<IpcResult<WindowSettings>>;
     hide: () => Promise<IpcResult<void>>;
+  };
+  workspace: {
+    execute: (command: WorkspaceCommand) => Promise<IpcResult<WorkspaceCommandResult>>;
   };
 }
 

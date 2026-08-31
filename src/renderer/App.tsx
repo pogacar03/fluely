@@ -8,13 +8,13 @@ import type {
   IpcResult,
   SettingsPatch,
   ScreenshotState,
+  WorkspaceCommand,
 } from "../shared/ipc";
 import {
   initialWorkspaceView,
   navigateWorkspaceView,
   type WorkspaceView,
 } from "../shared/workspace-view";
-import { getAnalysisScreenshotIds, getQueueIds } from "../shared/workspace-state";
 import { SetupView, type SetupNotice } from "./components/SetupView";
 import { WorkView, type WorkAnalysisRequest } from "./components/WorkView";
 import {
@@ -72,6 +72,8 @@ export function App() {
   const [notice, setNotice] = useState<SetupNotice | null>(null);
   const mountedRef = useRef(true);
   const opacityRequestRef = useRef(0);
+  const workspaceRequestRef = useRef(0);
+  const workspaceCommandBusyRef = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -265,192 +267,109 @@ export function App() {
     }
   }
 
-  async function startAnalysis(request: WorkAnalysisRequest, screenshotIds: string[]) {
+  function nextWorkspaceRequestId(action: WorkspaceCommand["type"]): string {
+    workspaceRequestRef.current += 1;
+    return `desktop-${action}-${workspaceRequestRef.current}`;
+  }
+
+  async function executeWorkspaceCommand(command: WorkspaceCommand): Promise<boolean> {
+    if (workspaceCommandBusyRef.current) {
+      return false;
+    }
+
+    workspaceCommandBusyRef.current = true;
     setActionBusy(true);
     try {
-      const result = await window.fluely.analysis.start({
-        prompt: request.prompt,
-        screenshotIds,
-        intent: request.intent,
-        fast: request.fast,
-      });
+      const result = await window.fluely.workspace.execute(command);
       if (!mountedRef.current) {
-        return;
+        return result.ok;
       }
       if (!result.ok) {
         showError(result.error);
-        return;
+        return false;
       }
-      setAnalysisState(result.value);
+
+      setScreenshotState(result.value.queue);
+      if (result.value.analysis) {
+        setAnalysisState(result.value.analysis);
+      }
+      return true;
     } catch {
       if (mountedRef.current) {
         setNotice({
           tone: "error",
-          text: "Fluely could not start analysis. Check the Codex connection and try again.",
+          text: "Fluely could not reach its workspace command service. Try again.",
         });
       }
+      return false;
     } finally {
+      workspaceCommandBusyRef.current = false;
       if (mountedRef.current) {
         setActionBusy(false);
       }
+    }
+  }
+
+  async function captureScreenshot() {
+    const succeeded = await executeWorkspaceCommand({
+      type: "capture",
+      requestId: nextWorkspaceRequestId("capture"),
+    });
+    if (succeeded && mountedRef.current) {
+      setNotice({ tone: "success", text: "Screenshot captured. It was added to your context queue." });
+    }
+  }
+
+  async function sendImages(request: WorkAnalysisRequest) {
+    const succeeded = await executeWorkspaceCommand({
+      type: "send",
+      requestId: nextWorkspaceRequestId("send"),
+      prompt: request.prompt,
+    });
+    if (succeeded && mountedRef.current) {
+      setNotice({ tone: "success", text: "Screenshots sent. Your context queue remains available." });
     }
   }
 
   async function captureAndAsk(request: WorkAnalysisRequest) {
-    setActionBusy(true);
-    let queueRefreshAttempted = false;
-    let queueRefreshWarning: string | null = null;
-    try {
-      const capture = await window.fluely.screenshots.capture();
-      if (!mountedRef.current) {
-        return;
-      }
-      if (!capture.ok) {
-        showError(capture.error);
-        return;
-      }
-
-      let screenshotIds = [capture.value.id];
-      try {
-        const refreshed = await window.fluely.screenshots.get();
-        queueRefreshAttempted = true;
-        if (refreshed.ok) {
-          setScreenshotState(refreshed.value);
-          screenshotIds = getAnalysisScreenshotIds(refreshed.value, capture.value.id);
-        } else {
-          queueRefreshWarning = `Fluely could not refresh the context queue. ${describeError(refreshed.error)} Only this screen is being analyzed.`;
-        }
-      } catch {
-        queueRefreshAttempted = true;
-        queueRefreshWarning = "Fluely could not refresh the context queue. Only this screen is being analyzed.";
-      }
-
-      const result = await window.fluely.analysis.start({
-        prompt: request.prompt,
-        screenshotIds,
-        intent: request.intent,
-        fast: request.fast,
-      });
-      if (!mountedRef.current) {
-        return;
-      }
-      if (!result.ok) {
-        showError(result.error);
-        return;
-      }
-      setAnalysisState(result.value);
-      setNotice({
-        tone: queueRefreshWarning ? "error" : "success",
-        text: queueRefreshWarning
-          ? `Captured the current screen. ${queueRefreshWarning}`
-          : queueRefreshAttempted && screenshotIds.length > 1
-            ? `Captured the current screen. Fluely is preparing an answer from all ${screenshotIds.length} queued contexts.`
-            : "Captured the current screen. Fluely is preparing your answer.",
-      });
-    } catch {
-      if (mountedRef.current) {
-        setNotice({
-          tone: "error",
-          text: "Fluely could not capture the display. Check Screen Recording permission and try again.",
-        });
-      }
-    } finally {
-      if (!queueRefreshAttempted) {
-        try {
-          const refreshed = await window.fluely.screenshots.get();
-          if (mountedRef.current && refreshed.ok) {
-            setScreenshotState(refreshed.value);
-          }
-        } catch {
-          // The capture result and analysis state remain useful if the refresh races teardown.
-        }
-      }
-      if (mountedRef.current) {
-        setActionBusy(false);
-      }
+    const succeeded = await executeWorkspaceCommand({
+      type: "capture-and-send",
+      requestId: nextWorkspaceRequestId("capture-and-send"),
+      prompt: request.prompt,
+    });
+    if (succeeded && mountedRef.current) {
+      setNotice({ tone: "success", text: "Screenshot captured and sent. Your context queue remains available." });
     }
-  }
-
-  async function askQueue(request: WorkAnalysisRequest) {
-    const ids = getQueueIds(screenshotState);
-    if (ids.length === 0) {
-      setNotice({ tone: "error", text: "Capture a screen before asking the queue." });
-      return;
-    }
-    await startAnalysis(request, ids);
   }
 
   async function cancelAnalysis() {
-    setActionBusy(true);
-    try {
-      const result = await window.fluely.analysis.cancel();
-      if (!mountedRef.current) {
-        return;
-      }
-      if (!result.ok) {
-        showError(result.error);
-        return;
-      }
-      setAnalysisState(result.value);
+    const succeeded = await executeWorkspaceCommand({
+      type: "cancel",
+      requestId: nextWorkspaceRequestId("cancel"),
+    });
+    if (succeeded && mountedRef.current) {
       setNotice({ tone: "success", text: "Analysis cancelled. Your context queue is unchanged." });
-    } catch {
-      if (mountedRef.current) {
-        setNotice({
-          tone: "error",
-          text: "Fluely could not cancel the active request. Try again.",
-        });
-      }
-    } finally {
-      if (mountedRef.current) {
-        setActionBusy(false);
-      }
     }
   }
 
   async function removeScreenshot(id: string) {
-    setActionBusy(true);
-    try {
-      const result = await window.fluely.screenshots.delete(id);
-      if (!mountedRef.current) {
-        return;
-      }
-      if (!result.ok) {
-        showError(result.error);
-        return;
-      }
-      setScreenshotState(result.value);
-    } catch {
-      if (mountedRef.current) {
-        setNotice({ tone: "error", text: "Fluely could not remove that screenshot. Refresh the queue and try again." });
-      }
-    } finally {
-      if (mountedRef.current) {
-        setActionBusy(false);
-      }
+    const succeeded = await executeWorkspaceCommand({
+      type: "remove",
+      requestId: nextWorkspaceRequestId("remove"),
+      screenshotId: id,
+    });
+    if (succeeded && mountedRef.current) {
+      setNotice({ tone: "success", text: "Screenshot removed from the context queue." });
     }
   }
 
   async function clearQueue() {
-    setActionBusy(true);
-    try {
-      const result = await window.fluely.screenshots.clear();
-      if (!mountedRef.current) {
-        return;
-      }
-      if (!result.ok) {
-        showError(result.error);
-        return;
-      }
-      setScreenshotState(result.value);
+    const succeeded = await executeWorkspaceCommand({
+      type: "clear-queue",
+      requestId: nextWorkspaceRequestId("clear-queue"),
+    });
+    if (succeeded && mountedRef.current) {
       setNotice({ tone: "success", text: "Context queue cleared." });
-    } catch {
-      if (mountedRef.current) {
-        setNotice({ tone: "error", text: "Fluely could not clear the screenshot queue. Try again." });
-      }
-    } finally {
-      if (mountedRef.current) {
-        setActionBusy(false);
-      }
     }
   }
 
@@ -528,8 +447,9 @@ export function App() {
       codexStatus={codexStatus}
       notice={notice}
       busy={actionBusy}
+      onCapture={captureScreenshot}
+      onSendImages={sendImages}
       onCaptureAsk={captureAndAsk}
-      onAskQueue={askQueue}
       onCancel={cancelAnalysis}
       onOpacityChange={changeOpacity}
       onOpenSettings={navigation.openSettings}
