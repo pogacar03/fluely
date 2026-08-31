@@ -340,7 +340,7 @@ type PhoneCommand =
 
 ### 13.5 User gates
 
-After every accepted commit, `gpt-5.6-luna` launches the exact application state and keeps it running. The workflow pauses for explicit user pass/fail before the next slice.
+After every accepted commit, `gpt-5.6-luna` (`reasoning_effort=max`) launches the exact application state and keeps it running. The workflow pauses for explicit user pass/fail before the next slice.
 
 The phone slice is not accepted until the user scans the QR code on a real phone on the same LAN and confirms:
 
