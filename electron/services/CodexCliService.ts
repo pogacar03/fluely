@@ -270,6 +270,7 @@ const CODEX_LIVENESS_EVENT_TYPES = new Set([
   "turn_completed",
   "item_started",
   "item_progress",
+  "item_updated",
   "item_delta",
   "item_completed",
   "message_delta",

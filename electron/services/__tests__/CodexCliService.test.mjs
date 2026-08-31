@@ -512,6 +512,41 @@ test("valid lifecycle events refresh the idle deadline", async () => {
   assert.equal(run.result.error.diagnostics.milestones["last-event"], 80);
 });
 
+test("item.updated refreshes idle while error and unknown item events do not", async () => {
+  const timers = makeFakeTimers();
+  const child = makeClosingFakeProcess();
+  const service = makeDeadlineService(timers, child, { startupMs: 100, idleMs: 100, hardMs: 500 });
+  const run = runFakeStream(service);
+  await flush();
+
+  child.stdout.write(`${JSON.stringify({ type: "turn.started" })}\n`);
+  await flush();
+  timers.advance(60);
+  child.stdout.write(`${JSON.stringify({
+    type: "item.updated",
+    item: { id: "item-1", type: "reasoning", status: "in_progress" },
+  })}\n`);
+  await flush();
+
+  timers.advance(40);
+  await flush();
+  assert.equal(run.result.error, null);
+
+  timers.advance(20);
+  child.stdout.write(`${JSON.stringify({ type: "response.error", message: "provider unavailable" })}\n`);
+  child.stdout.write(`${JSON.stringify({ type: "item.telemetry", item_id: "item-1" })}\n`);
+  await flush();
+  timers.advance(39);
+  await flush();
+  assert.equal(run.result.error, null);
+
+  timers.advance(1);
+  await flush();
+  assert.equal(run.result.error?.code, "CLI_IDLE_TIMEOUT");
+  await run.promise;
+  assert.equal(run.result.error.diagnostics.milestones["last-event"], 60);
+});
+
 test("provider error events do not satisfy the startup deadline", async () => {
   const timers = makeFakeTimers();
   const child = makeClosingFakeProcess();
