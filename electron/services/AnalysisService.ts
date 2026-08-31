@@ -9,6 +9,7 @@ import type {
   IpcError,
   ScreenshotState,
 } from "../../src/shared/ipc";
+import type { CodexRunDiagnosticsSnapshot } from "./codex-run-diagnostics";
 import { CodexCliService, type CodexCliStreamOptions } from "./CodexCliService";
 
 const DEFAULT_CODEX_SETTINGS: CodexCliSettings = {
@@ -64,9 +65,15 @@ export interface AnalysisServiceOptions {
   settings?: Partial<CodexCliSettings>;
   now?: () => Date;
   clock?: () => Date;
+  onDiagnostics?: (snapshot: CodexRunDiagnosticsSnapshot) => void;
 }
 
-export type AnalysisServiceErrorCode = "ANALYSIS_IN_PROGRESS" | "ANALYSIS_FAILED";
+export type AnalysisServiceErrorCode =
+  | "ANALYSIS_IN_PROGRESS"
+  | "ANALYSIS_FAILED"
+  | "CLI_START_TIMEOUT"
+  | "CLI_IDLE_TIMEOUT"
+  | "CLI_HARD_TIMEOUT";
 
 export interface AnalysisServiceError extends Error {
   code: AnalysisServiceErrorCode;
@@ -184,6 +191,10 @@ function cloneEvent(state: AnalysisState, event: AnalysisStateEventType): Analys
 }
 
 function errorMessage(value: unknown): string {
+  const code = errorCode(value);
+  if (isCliTimeoutCode(code)) {
+    return cliTimeoutMessage(code);
+  }
   if (value instanceof Error && value.message.trim()) {
     return value.message.trim();
   }
@@ -191,6 +202,28 @@ function errorMessage(value: unknown): string {
     return value.message.trim();
   }
   return String(value || "Codex CLI analysis failed.");
+}
+
+function isCliTimeoutCode(value: unknown): value is "CLI_START_TIMEOUT" | "CLI_IDLE_TIMEOUT" | "CLI_HARD_TIMEOUT" {
+  return value === "CLI_START_TIMEOUT" || value === "CLI_IDLE_TIMEOUT" || value === "CLI_HARD_TIMEOUT";
+}
+
+function errorCode(value: unknown): AnalysisServiceErrorCode {
+  if (isRecord(value) && isCliTimeoutCode(value.code)) {
+    return value.code;
+  }
+  return "ANALYSIS_FAILED";
+}
+
+function cliTimeoutMessage(code: "CLI_START_TIMEOUT" | "CLI_IDLE_TIMEOUT" | "CLI_HARD_TIMEOUT"): string {
+  switch (code) {
+    case "CLI_START_TIMEOUT":
+      return "Codex CLI startup timed out before producing a protocol event.";
+    case "CLI_IDLE_TIMEOUT":
+      return "Codex CLI became idle before completing the request.";
+    case "CLI_HARD_TIMEOUT":
+      return "Codex CLI reached its maximum run time.";
+  }
 }
 
 function errorAction(value: unknown): string {
@@ -240,6 +273,7 @@ export class AnalysisService {
   private codex: CodexCliSettings;
   private pendingCodexSettings: CodexCliSettings | null = null;
   private readonly now: () => Date;
+  private readonly onDiagnostics?: (snapshot: CodexRunDiagnosticsSnapshot) => void;
   private readonly listeners = new Set<AnalysisStateListener>();
   private state: AnalysisState;
   private active: ActiveRequest | null = null;
@@ -260,6 +294,7 @@ export class AnalysisService {
     };
     this.codex = normalizeCodexSettings(providedCodex);
     this.now = options.now ?? options.clock ?? (() => new Date());
+    this.onDiagnostics = options.onDiagnostics;
     const timestamp = this.timestamp();
     this.state = {
       status: "idle",
@@ -472,8 +507,19 @@ export class AnalysisService {
       return;
     }
     const timestamp = this.timestamp();
+    const code = errorCode(value);
+    const diagnostics = isRecord(value) && isRecord(value.diagnostics)
+      ? value.diagnostics as CodexRunDiagnosticsSnapshot
+      : undefined;
+    if (diagnostics) {
+      try {
+        this.onDiagnostics?.(diagnostics);
+      } catch {
+        // Diagnostics observers must not change the public analysis state.
+      }
+    }
     const error: IpcError = {
-      code: "ANALYSIS_FAILED",
+      code,
       message: errorMessage(value),
       action: errorAction(value),
     };

@@ -7,8 +7,15 @@ import type {
   CodexModelReasoningEffort,
   CodexSandboxMode,
 } from "../../src/shared/ipc";
+import {
+  CodexRunDiagnostics,
+  type CodexRunDiagnosticsSnapshot,
+} from "./codex-run-diagnostics";
 
 const DEFAULT_TIMEOUT_MS = 120000;
+export const CODEX_STARTUP_TIMEOUT_MS = 120000;
+export const CODEX_IDLE_TIMEOUT_MS = 120000;
+export const CODEX_HARD_TIMEOUT_MS = 600000;
 const DEFAULT_SANDBOX_MODE: CodexSandboxMode = "read-only";
 const CODEX_SANDBOX_MODES: readonly CodexSandboxMode[] = [
   "read-only",
@@ -28,14 +35,32 @@ export type CodexCliErrorCode =
   | "NOT_FOUND"
   | "VERSION_FAILED"
   | "TIMEOUT"
+  | "CLI_START_TIMEOUT"
+  | "CLI_IDLE_TIMEOUT"
+  | "CLI_HARD_TIMEOUT"
   | "ABORTED"
   | "PROCESS_FAILED"
   | "INVALID_OUTPUT";
+
+export type CodexTimeoutStage = "startup_timeout" | "idle_timeout" | "hard_timeout";
+
+export interface CodexDeadlinePolicy {
+  startupMs: number;
+  idleMs: number;
+  hardMs: number;
+}
+
+const DEFAULT_DEADLINE_POLICY: CodexDeadlinePolicy = {
+  startupMs: CODEX_STARTUP_TIMEOUT_MS,
+  idleMs: CODEX_IDLE_TIMEOUT_MS,
+  hardMs: CODEX_HARD_TIMEOUT_MS,
+};
 
 export interface CodexCliError {
   code: CodexCliErrorCode;
   message: string;
   action: string;
+  diagnostics?: CodexRunDiagnosticsSnapshot;
 }
 
 export interface CodexExecutableValidation {
@@ -62,8 +87,13 @@ interface SpawnedProcess extends ChildProcess {
   stderr: NonNullable<ChildProcess["stderr"]>;
 }
 
-interface CodexCliDependencies {
+export interface CodexCliDependencies {
   spawn?: typeof nodeSpawn;
+  now?: () => number;
+  setTimeout?: typeof setTimeout;
+  clearTimeout?: typeof clearTimeout;
+  onDiagnostics?: (snapshot: CodexRunDiagnosticsSnapshot) => void;
+  deadlinePolicy?: Partial<CodexDeadlinePolicy>;
 }
 
 interface ParsedEvent {
@@ -91,6 +121,18 @@ function isSandboxMode(value: unknown): value is CodexSandboxMode {
 
 function isReasoningEffort(value: unknown): value is CodexModelReasoningEffort {
   return typeof value === "string" && CODEX_REASONING_EFFORTS.includes(value as CodexModelReasoningEffort);
+}
+
+function normalizeDeadlinePolicy(policy: Partial<CodexDeadlinePolicy> | undefined): CodexDeadlinePolicy {
+  const normalize = (value: unknown, fallback: number): number =>
+    typeof value === "number" && Number.isFinite(value) && value > 0
+      ? Math.round(value)
+      : fallback;
+  return {
+    startupMs: normalize(policy?.startupMs, DEFAULT_DEADLINE_POLICY.startupMs),
+    idleMs: normalize(policy?.idleMs, DEFAULT_DEADLINE_POLICY.idleMs),
+    hardMs: normalize(policy?.hardMs, DEFAULT_DEADLINE_POLICY.hardMs),
+  };
 }
 
 function isAgentDeltaType(value: unknown): boolean {
@@ -218,6 +260,32 @@ function getErrorMessage(value: unknown, depth = 0): string | null {
   return null;
 }
 
+function isValidProtocolEvent(value: unknown, depth = 0): boolean {
+  if (depth > 5) {
+    return false;
+  }
+
+  const record = asRecord(value);
+  if (!record || typeof record.type !== "string") {
+    return false;
+  }
+
+  const type = record.type.toLowerCase().replace(/[.:]/g, "_");
+  if (type === "event_msg") {
+    return isValidProtocolEvent(record.payload, depth + 1);
+  }
+
+  return type === "error" ||
+    type === "stream_error" ||
+    type.endsWith("_error") ||
+    /^(thread|turn|item)_/.test(type) ||
+    type === "message_delta" ||
+    type === "output_text_delta" ||
+    type === "response_output_text_delta" ||
+    type.startsWith("response_") ||
+    (type.includes("agent_message") && type.includes("delta"));
+}
+
 function normalizeExecutableInput(value: unknown): string {
   if (typeof value !== "string") {
     return "codex";
@@ -285,23 +353,77 @@ function toError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
 }
 
-function abortError(): Error {
-  const error = new Error("Codex CLI request was aborted.");
+function abortError(): Error & { code: "ABORTED" } {
+  const error = new Error("Codex CLI request was aborted.") as Error & { code: "ABORTED" };
   error.name = "AbortError";
+  error.code = "ABORTED";
   return error;
 }
 
-function timeoutError(timeoutMs: number): Error {
-  const error = new Error(`Codex CLI request timed out after ${timeoutMs}ms.`);
+function timeoutError(stage: CodexTimeoutStage, diagnostics: CodexRunDiagnosticsSnapshot): Error & {
+  code: Exclude<CodexCliErrorCode, "NOT_FOUND" | "VERSION_FAILED" | "TIMEOUT" | "ABORTED" | "PROCESS_FAILED" | "INVALID_OUTPUT">;
+  action: string;
+  diagnostics: CodexRunDiagnosticsSnapshot;
+} {
+  const details: Record<CodexTimeoutStage, {
+    code: "CLI_START_TIMEOUT" | "CLI_IDLE_TIMEOUT" | "CLI_HARD_TIMEOUT";
+    message: string;
+    action: string;
+  }> = {
+    startup_timeout: {
+      code: "CLI_START_TIMEOUT",
+      message: "Codex CLI startup timed out before producing a protocol event.",
+      action: "Check the Codex CLI configuration, then retry the request.",
+    },
+    idle_timeout: {
+      code: "CLI_IDLE_TIMEOUT",
+      message: "Codex CLI became idle before completing the request.",
+      action: "Retry the request or check the Codex CLI connection.",
+    },
+    hard_timeout: {
+      code: "CLI_HARD_TIMEOUT",
+      message: "Codex CLI reached its maximum run time.",
+      action: "Retry with a smaller request or check the Codex CLI configuration.",
+    },
+  };
+  const detail = details[stage];
+  const error = new Error(detail.message) as Error & {
+    code: "CLI_START_TIMEOUT" | "CLI_IDLE_TIMEOUT" | "CLI_HARD_TIMEOUT";
+    action: string;
+    diagnostics: CodexRunDiagnosticsSnapshot;
+  };
   error.name = "TimeoutError";
+  error.code = detail.code;
+  error.action = detail.action;
+  Object.defineProperty(error, "diagnostics", {
+    configurable: true,
+    enumerable: false,
+    value: diagnostics,
+    writable: false,
+  });
   return error;
 }
 
-function errorAsException(error: CodexCliError): Error & { code: CodexCliErrorCode; action: string } {
-  const exception = new Error(error.message) as Error & { code: CodexCliErrorCode; action: string };
+function errorAsException(
+  error: CodexCliError,
+  diagnostics?: CodexRunDiagnosticsSnapshot,
+): Error & { code: CodexCliErrorCode; action: string; diagnostics?: CodexRunDiagnosticsSnapshot } {
+  const exception = new Error(error.message) as Error & {
+    code: CodexCliErrorCode;
+    action: string;
+    diagnostics?: CodexRunDiagnosticsSnapshot;
+  };
   exception.name = "CodexCliError";
   exception.code = error.code;
   exception.action = error.action;
+  if (diagnostics) {
+    Object.defineProperty(exception, "diagnostics", {
+      configurable: true,
+      enumerable: false,
+      value: diagnostics,
+      writable: false,
+    });
+  }
   return exception;
 }
 
@@ -312,9 +434,19 @@ function errorAsException(error: CodexCliError): Error & { code: CodexCliErrorCo
  */
 export class CodexCliService {
   private readonly spawn: typeof nodeSpawn;
+  private readonly now: () => number;
+  private readonly setTimeout: typeof setTimeout;
+  private readonly clearTimeout: typeof clearTimeout;
+  private readonly onDiagnostics?: (snapshot: CodexRunDiagnosticsSnapshot) => void;
+  private readonly deadlinePolicy: CodexDeadlinePolicy;
 
   public constructor(dependencies: CodexCliDependencies = {}) {
     this.spawn = dependencies.spawn ?? nodeSpawn;
+    this.now = dependencies.now ?? Date.now;
+    this.setTimeout = dependencies.setTimeout ?? setTimeout;
+    this.clearTimeout = dependencies.clearTimeout ?? clearTimeout;
+    this.onDiagnostics = dependencies.onDiagnostics;
+    this.deadlinePolicy = normalizeDeadlinePolicy(dependencies.deadlinePolicy);
   }
 
   public static buildArgs(
@@ -384,7 +516,7 @@ export class CodexCliService {
           continue;
         }
         const delta = getAgentDelta(parsed);
-        if (delta !== null) {
+        if (delta !== null && delta.length > 0) {
           deltas.push(delta);
         }
       } catch {
@@ -652,15 +784,27 @@ export class CodexCliService {
     } catch (error) {
       throw errorAsException(createError(
         "NOT_FOUND",
-        `Codex executable could not be started: ${toError(error).message}`,
+        "Codex executable could not be started.",
         "Install Codex CLI or choose its executable path in Fluely settings.",
       ));
     }
 
-    const timeoutMs = typeof options.timeoutMs === "number" &&
-      Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
-      ? Math.round(options.timeoutMs)
-      : DEFAULT_TIMEOUT_MS;
+    const startedAtMs = this.now();
+    const diagnostics = new CodexRunDiagnostics(startedAtMs);
+    diagnostics.mark("spawn", startedAtMs);
+    let diagnosticsPublished = false;
+    const publishDiagnostics = (): void => {
+      if (diagnosticsPublished) {
+        return;
+      }
+      diagnosticsPublished = true;
+      try {
+        this.onDiagnostics?.(diagnostics.snapshot(this.now()));
+      } catch {
+        // Diagnostics observers must not change provider result handling.
+      }
+    };
+
     const pending: string[] = [];
     const waiters: Array<(value: IteratorResult<string>) => void> = [];
     let stderr = "";
@@ -668,11 +812,14 @@ export class CodexCliService {
     let processError: Error | null = null;
     let closeCode: number | null = null;
     let closed = false;
-    let termination: "abort" | "timeout" | null = null;
+    let termination: "abort" | CodexTimeoutStage | null = null;
     let providerError: string | undefined;
     let sawAgentDelta = false;
+    let sawValidProtocolEvent = false;
     const completedMessages: string[] = [];
-    let timer: NodeJS.Timeout | undefined;
+    let startupTimer: NodeJS.Timeout | undefined;
+    let idleTimer: NodeJS.Timeout | undefined;
+    let hardTimer: NodeJS.Timeout | undefined;
     let forceKillTimer: NodeJS.Timeout | undefined;
     let stdoutBuffer = "";
 
@@ -695,40 +842,72 @@ export class CodexCliService {
       }
     };
 
+    const clearDeadlineTimers = (): void => {
+      if (startupTimer) {
+        this.clearTimeout(startupTimer);
+        startupTimer = undefined;
+      }
+      if (idleTimer) {
+        this.clearTimeout(idleTimer);
+        idleTimer = undefined;
+      }
+      if (hardTimer) {
+        this.clearTimeout(hardTimer);
+        hardTimer = undefined;
+      }
+    };
+
     const close = (): void => {
       if (closed) {
         return;
       }
       closed = true;
-      if (timer) {
-        clearTimeout(timer);
-      }
+      clearDeadlineTimers();
       if (forceKillTimer) {
-        clearTimeout(forceKillTimer);
+        this.clearTimeout(forceKillTimer);
+        forceKillTimer = undefined;
       }
       while (waiters.length > 0) {
         finishWaiter({ value: undefined, done: true });
       }
     };
 
-    const terminate = (reason: "abort" | "timeout"): void => {
+    const terminate = (reason: "abort" | CodexTimeoutStage): void => {
       if (termination || closed) {
         return;
       }
       termination = reason;
+      clearDeadlineTimers();
       if (!child.killed) {
         child.kill("SIGTERM");
       }
-      forceKillTimer = setTimeout(() => {
+      forceKillTimer = this.setTimeout(() => {
         if (!closed) {
           child.kill("SIGKILL");
         }
       }, 250);
     };
 
+    const recordProtocolEvent = (atMs: number): void => {
+      diagnostics.mark("first-jsonl", atMs);
+      diagnostics.mark("last-event", atMs);
+      if (!sawValidProtocolEvent) {
+        sawValidProtocolEvent = true;
+        if (startupTimer) {
+          this.clearTimeout(startupTimer);
+          startupTimer = undefined;
+        }
+      }
+      if (idleTimer) {
+        this.clearTimeout(idleTimer);
+      }
+      idleTimer = this.setTimeout(() => terminate("idle_timeout"), this.deadlinePolicy.idleMs);
+    };
+
     const onAbort = (): void => terminate("abort");
     options.signal?.addEventListener("abort", onAbort, { once: true });
-    timer = setTimeout(() => terminate("timeout"), timeoutMs);
+    startupTimer = this.setTimeout(() => terminate("startup_timeout"), this.deadlinePolicy.startupMs);
+    hardTimer = this.setTimeout(() => terminate("hard_timeout"), this.deadlinePolicy.hardMs);
 
     const onStdinError = (error: Error): void => {
       processError = toError(error);
@@ -749,6 +928,11 @@ export class CodexCliService {
       }
       try {
         const parsed: unknown = JSON.parse(line);
+        if (!isValidProtocolEvent(parsed)) {
+          return;
+        }
+        const eventAtMs = this.now();
+        recordProtocolEvent(eventAtMs);
         providerError ??= getErrorMessage(parsed) ?? undefined;
         const completedMessage = getCompletedAgentText(parsed);
         if (completedMessage !== null) {
@@ -756,7 +940,8 @@ export class CodexCliService {
           return;
         }
         const delta = getAgentDelta(parsed);
-        if (delta !== null) {
+        if (delta !== null && delta.length > 0) {
+          diagnostics.mark("first-delta", this.now());
           sawAgentDelta = true;
           enqueue(delta);
         }
@@ -772,6 +957,7 @@ export class CodexCliService {
     child.stdout.on("data", (chunk: Buffer | string) => {
       const text = chunk.toString();
       rawOutput += text;
+      diagnostics.mark("first-byte", this.now());
       // Buffering is intentionally line-based so a split JSON object cannot
       // be emitted as a partial answer.
       stdoutBuffer += text;
@@ -782,14 +968,16 @@ export class CodexCliService {
       }
     });
     child.stderr.on("data", (chunk: Buffer | string) => {
-      stderr += chunk.toString();
+      const text = chunk.toString();
+      stderr += text;
+      diagnostics.appendStderr(text);
     });
     child.stdin.once("error", onStdinError);
     child.once("error", (error) => {
       processError = toError(error);
       close();
     });
-    child.once("close", (code) => {
+    child.once("close", (code, signal) => {
       if (stdoutBuffer.trim()) {
         handleOutputLine(stdoutBuffer);
         stdoutBuffer = "";
@@ -800,6 +988,9 @@ export class CodexCliService {
         }
       }
       closeCode = code;
+      diagnostics.mark("exit", this.now());
+      diagnostics.setExit(code, signal ?? null);
+      publishDiagnostics();
       close();
     });
 
@@ -824,19 +1015,20 @@ export class CodexCliService {
     } finally {
       options.signal?.removeEventListener("abort", onAbort);
       child.stdin.removeListener("error", onStdinError);
-      if (timer) {
-        clearTimeout(timer);
-      }
+      clearDeadlineTimers();
       if (!closed) {
         terminate("abort");
+      }
+      if (closed) {
+        publishDiagnostics();
       }
     }
 
     if (termination === "abort") {
       throw abortError();
     }
-    if (termination === "timeout") {
-      throw timeoutError(timeoutMs);
+    if (termination === "startup_timeout" || termination === "idle_timeout" || termination === "hard_timeout") {
+      throw timeoutError(termination, diagnostics.snapshot(this.now()));
     }
     const startupError = processError as Error | null;
     if (startupError) {
@@ -845,28 +1037,28 @@ export class CodexCliService {
       throw errorAsException(createError(
         errorCode,
         errno.code === "ENOENT"
-          ? `Codex executable was not found at ${executable}.`
-          : `Codex CLI failed to start: ${startupError.message}`,
+          ? "Codex executable was not found."
+          : "Codex CLI failed to start.",
         "Install Codex CLI or choose the correct executable path in Fluely settings.",
-      ));
+      ), diagnostics.snapshot(this.now()));
     }
     if (closeCode !== 0) {
       const detail = CodexCliService.extractError(rawOutput, stderr);
       throw errorAsException(createError(
         "PROCESS_FAILED",
-        `Codex CLI exited with code ${closeCode ?? "unknown"}${detail ? `: ${detail}` : "."}`,
+        "Codex CLI exited before producing a complete answer.",
         detail?.toLowerCase().includes("login")
           ? "Run codex login in Terminal, then retry the request."
           : "Check the Codex CLI output and retry the request.",
-      ));
+      ), diagnostics.snapshot(this.now()));
     }
     const extractedText = CodexCliService.extractText(rawOutput).trim();
     if (!extractedText && (stderr.trim() || providerError)) {
       throw errorAsException(createError(
         "INVALID_OUTPUT",
-        `Codex CLI returned no answer: ${formatOutput(providerError ?? stderr)}.`,
+        "Codex CLI returned no answer.",
         "Check the Codex CLI account and retry the request.",
-      ));
+      ), diagnostics.snapshot(this.now()));
     }
 
     if (!extractedText) {
@@ -874,7 +1066,7 @@ export class CodexCliService {
         "INVALID_OUTPUT",
         "Codex CLI returned an empty answer.",
         "Check the Codex CLI account and retry the request.",
-      ));
+      ), diagnostics.snapshot(this.now()));
     }
 
     while (pending.length > 0) {

@@ -33,7 +33,7 @@ function makeScreenshots(ids = [FIRST_ID, SECOND_ID]) {
   };
 }
 
-function makeService({ provider, screenshots = makeScreenshots(), now = makeClock() } = {}) {
+function makeService({ provider, screenshots = makeScreenshots(), now = makeClock(), onDiagnostics } = {}) {
   return new AnalysisService({
     provider,
     screenshots,
@@ -47,6 +47,7 @@ function makeService({ provider, screenshots = makeScreenshots(), now = makeCloc
       modelReasoningEffort: "medium",
     },
     now,
+    onDiagnostics,
   });
 }
 
@@ -226,4 +227,39 @@ test("AnalysisService reports provider failures without changing the screenshot 
   assert.equal(service.getState().text, "partial");
   assert.match(service.getState().error.message, /not logged in/i);
   assert.deepEqual(events.map((event) => event.event), ["started", "delta", "error"]);
+});
+
+test("AnalysisService preserves typed timeout categories and keeps diagnostics out of public state", async () => {
+  const diagnostics = Object.freeze({
+    elapsedMs: 120000,
+    milestones: Object.freeze({ spawn: 0, "first-jsonl": 40, "last-event": 40 }),
+    exitCode: null,
+    exitSignal: "SIGTERM",
+    stderrTail: "safe diagnostic tail",
+  });
+  const observedDiagnostics = [];
+  const provider = {
+    stream: async function* () {
+      throw Object.assign(new Error("raw provider detail must stay internal"), {
+        name: "CodexCliError",
+        code: "CLI_IDLE_TIMEOUT",
+        action: "Retry the request or check the Codex CLI connection.",
+        diagnostics,
+      });
+    },
+  };
+  const service = makeService({
+    provider,
+    onDiagnostics: (snapshot) => observedDiagnostics.push(snapshot),
+  });
+
+  service.start({ prompt: "Question", screenshotIds: [FIRST_ID], intent: "answer", fast: false });
+  await service.whenIdle();
+
+  const state = service.getState();
+  assert.equal(state.status, "error");
+  assert.equal(state.error.code, "CLI_IDLE_TIMEOUT");
+  assert.equal(state.error.message, "Codex CLI became idle before completing the request.");
+  assert.equal(state.error.diagnostics, undefined);
+  assert.deepEqual(observedDiagnostics, [diagnostics]);
 });
