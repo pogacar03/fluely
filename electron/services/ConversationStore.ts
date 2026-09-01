@@ -109,8 +109,10 @@ export class ConversationStore implements ConversationPort {
     for (const id of candidateIds) {
       this.pendingCleanupIds.add(id);
     }
-    this.cleanupTail = this.cleanupTail
+    const cleanup = this.cleanupTail
       .then(() => this.flushCleanup(), () => this.flushCleanup());
+    this.cleanupTail = cleanup;
+    void cleanup.catch(() => undefined);
   }
 
   private async flushCleanup(): Promise<void> {
@@ -119,9 +121,11 @@ export class ConversationStore implements ConversationPort {
     }
     const candidateIds = [...this.pendingCleanupIds];
     const referencedIds = new Set(this.model.snapshot().attachments.map((attachment) => attachment.id));
-    const removed = await this.attachmentStore.deleteUnreferenced(candidateIds, referencedIds);
-    for (const id of removed) {
-      this.pendingCleanupIds.delete(id);
+    for (const id of candidateIds) {
+      const removed = await this.attachmentStore.deleteUnreferenced([id], referencedIds);
+      for (const removedId of removed) {
+        this.pendingCleanupIds.delete(removedId);
+      }
     }
   }
 }

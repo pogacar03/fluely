@@ -162,8 +162,8 @@ export class AttachmentStore {
       throw createError("INVALID_ATTACHMENT", "Attachment metadata is invalid.");
     }
 
-    const sourceStats = await stat(sourcePath).catch(() => {
-      throw createError("INVALID_ATTACHMENT", "The source screenshot could not be read.");
+    const sourceStats = await stat(sourcePath).catch((error) => {
+      throw withCause(createError("INVALID_ATTACHMENT", "The source screenshot could not be read."), error);
     });
     if (sourceStats.size > this.maxBytes) {
       throw createError("ATTACHMENT_TOO_LARGE", "A screenshot attachment exceeds the 20 MiB limit.");

@@ -121,3 +121,78 @@ test("ConversationStore retains failed cleanup registrations for a later retry",
   await store.clear();
   assert.equal(attempts, 2);
 });
+
+test("ConversationStore observes eviction cleanup rejection without unhandled rejection and retries it", async () => {
+  let attempts = 0;
+  const unhandledRejections = [];
+  const onUnhandledRejection = (reason) => unhandledRejections.push(reason);
+  process.on("unhandledRejection", onUnhandledRejection);
+
+  try {
+    const store = makeStore({
+      deleteUnreferenced: async (candidateIds) => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw Object.assign(new Error("eviction cleanup failed"), { code: "ATTACHMENT_CLEANUP_FAILED" });
+        }
+        return [...candidateIds];
+      },
+    }, { maxMessages: 2 });
+
+    store.addAttachment(FIRST_ATTACHMENT);
+    const first = store.startTurn("First", [FIRST_ATTACHMENT.id]);
+    store.finishAssistant(first.assistant.id, "completed", "First answer");
+    store.addAttachment(SECOND_ATTACHMENT);
+    const second = store.startTurn("Second", [SECOND_ATTACHMENT.id]);
+    store.finishAssistant(second.assistant.id, "completed", "Second answer");
+
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandledRejections, []);
+    await assert.rejects(store.whenIdle(), /eviction cleanup failed/);
+
+    await store.clear();
+    assert.equal(attempts, 3);
+  } finally {
+    process.off("unhandledRejection", onUnhandledRejection);
+  }
+});
+
+test("ConversationStore removes cleanup IDs from pending as each deletion succeeds", async () => {
+  const cleanupCalls = [];
+  const deletedIds = new Set();
+  let failSecond = true;
+  const store = makeStore({
+    deleteUnreferenced: async (candidateIds) => {
+      cleanupCalls.push([...candidateIds]);
+      const removed = [];
+      for (const id of candidateIds) {
+        if (deletedIds.has(id)) {
+          continue;
+        }
+        if (id === SECOND_ATTACHMENT.id && failSecond) {
+          failSecond = false;
+          throw Object.assign(new Error("second attachment cleanup failed"), { code: "ATTACHMENT_CLEANUP_FAILED" });
+        }
+        deletedIds.add(id);
+        removed.push(id);
+      }
+      return removed;
+    },
+  }, { maxMessages: 2 });
+
+  store.addAttachment(FIRST_ATTACHMENT);
+  store.addAttachment(SECOND_ATTACHMENT);
+  const first = store.startTurn("First", [FIRST_ATTACHMENT.id, SECOND_ATTACHMENT.id]);
+  store.finishAssistant(first.assistant.id, "completed", "First answer");
+  const second = store.startTurn("Second");
+  store.finishAssistant(second.assistant.id, "completed", "Second answer");
+
+  await assert.rejects(store.whenIdle(), /second attachment cleanup failed/);
+  await store.clear();
+
+  assert.deepEqual(cleanupCalls, [
+    [FIRST_ATTACHMENT.id],
+    [SECOND_ATTACHMENT.id],
+    [SECOND_ATTACHMENT.id],
+  ]);
+});

@@ -59,6 +59,7 @@ export function createConversationHydrationCoordinator(
   let pendingEvents: ConversationEvent[] = [];
   let tail: Promise<void> = Promise.resolve();
   let hydrationRetry: Promise<boolean> | null = null;
+  let hydrationGeneration = 0;
 
   const publish = (): void => {
     if (!projection) {
@@ -124,6 +125,7 @@ export function createConversationHydrationCoordinator(
   };
 
   const promote = (snapshot: ConversationSnapshot): void => {
+    hydrationGeneration += 1;
     const next = cloneConversationSnapshot(snapshot);
     if (projection && projection.snapshot().sessionId === next.sessionId) {
       projection.replace(next);
@@ -144,21 +146,35 @@ export function createConversationHydrationCoordinator(
       return hydrationRetry;
     }
 
+    const retryGeneration = hydrationGeneration;
     hydrationRetry = (async () => {
       let lastError: unknown;
       status = "pending";
       attempts = 0;
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        if (retryGeneration !== hydrationGeneration) {
+          return false;
+        }
         attempts = attempt + 1;
         try {
-          promote(await options.readSnapshot());
+          const snapshot = await options.readSnapshot();
+          if (retryGeneration !== hydrationGeneration) {
+            return true;
+          }
+          promote(snapshot);
           return true;
         } catch (error) {
+          if (retryGeneration !== hydrationGeneration) {
+            return false;
+          }
           lastError = error;
         }
         if (attempt + 1 < maxAttempts) {
           await sleep(retryDelays[Math.min(attempt, retryDelays.length - 1)] ?? 0);
         }
+      }
+      if (retryGeneration !== hydrationGeneration) {
+        return false;
       }
       markUnavailable(lastError ?? new Error("Conversation hydration did not converge."));
       return false;

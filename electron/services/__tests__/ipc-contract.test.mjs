@@ -534,6 +534,10 @@ test("renderer-facing IPC errors sanitize filesystem paths, tokens, and commands
   let analysisListener;
   let conversationListener;
   const raw = "ENOENT: open /Users/yu/private/session/token=super-secret codex --image";
+  const attachmentFailure = Object.assign(new Error(raw), {
+    code: "INVALID_ATTACHMENT",
+    cause: new Error(`internal cause: ${raw}`),
+  });
 
   registerIpcHandlers({
     ipcMain: {
@@ -571,7 +575,7 @@ test("renderer-facing IPC errors sanitize filesystem paths, tokens, and commands
       },
     },
     workspace: {
-      execute: async () => { throw new Error(raw); },
+      execute: async () => { throw attachmentFailure; },
     },
     notifyAnalysisState: (event) => analysisNotifications.push(event),
     notifyConversationEvent: (event) => conversationNotifications.push(event),
@@ -585,6 +589,7 @@ test("renderer-facing IPC errors sanitize filesystem paths, tokens, and commands
   });
   assert.equal(workspaceResult.ok, false);
   assert.equal(workspaceResult.error.code, "INTERNAL_ERROR");
+  assert.equal(workspaceResult.error.cause, undefined);
   assert.doesNotMatch(JSON.stringify(workspaceResult), /\/Users\/yu\/private|super-secret|codex --image/);
 
   analysisListener({

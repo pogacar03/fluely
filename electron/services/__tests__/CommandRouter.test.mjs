@@ -475,3 +475,100 @@ test("sync start throws and async start rejects both produce one error terminal 
     await harness.router.whenIdle();
   }
 });
+
+test("an async start rejection releases the router for a successful later send", async () => {
+  const harness = await makeHarness({
+    provider: {
+      stream: async function* () {
+        yield "retry answer";
+      },
+    },
+  });
+  const originalStart = harness.analysis.start.bind(harness.analysis);
+  let starts = 0;
+  harness.analysis.start = async (request) => {
+    starts += 1;
+    if (starts === 1) {
+      throw Object.assign(new Error("first async start failed"), { code: "ANALYSIS_FAILED" });
+    }
+    return originalStart(request);
+  };
+
+  const failed = await harness.router.execute({
+    type: "send",
+    requestId: "async-start-retry-first",
+    prompt: "First question",
+  }, "desktop");
+  assert.equal(failed.conversation.messages.at(-1).status, "error");
+  assert.equal(failed.conversation.activeMessageId, undefined);
+
+  await harness.router.execute({
+    type: "send",
+    requestId: "async-start-retry-second",
+    prompt: "Second question",
+  }, "phone");
+  await harness.router.whenIdle();
+
+  const snapshot = harness.conversation.snapshot();
+  assert.equal(starts, 2);
+  assert.equal(snapshot.messages.at(-1).status, "completed");
+  assert.equal(snapshot.messages.at(-1).text, "retry answer");
+  assert.equal(snapshot.activeMessageId, undefined);
+});
+
+test("terminal analysis callbacks racing start rejection produce one terminal without unhandled rejection", async () => {
+  for (const order of ["terminal-first", "reject-first"]) {
+    const harness = await makeHarness({
+      provider: {
+        stream: async function* () {
+          yield "unreachable";
+        },
+      },
+    });
+    const terminalEvents = [];
+    harness.conversation.subscribe((event) => {
+      if (event.type === "message-updated" && ["completed", "error", "cancelled"].includes(event.message.status)) {
+        terminalEvents.push(event);
+      }
+    });
+    let rejectStart;
+    harness.analysis.start = () => new Promise((_, reject) => {
+      rejectStart = reject;
+    });
+    const unhandledRejections = [];
+    const onUnhandledRejection = (reason) => unhandledRejections.push(reason);
+    process.on("unhandledRejection", onUnhandledRejection);
+
+    try {
+      const sendPromise = harness.router.execute({
+        type: "send",
+        requestId: `terminal-reject-race-${order}`,
+        prompt: "Question",
+      }, "desktop");
+      while (typeof rejectStart !== "function") {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+
+      const startError = Object.assign(new Error(`${order} start failed`), { code: "ANALYSIS_FAILED" });
+      if (order === "terminal-first") {
+        harness.analysis.emit("error");
+        rejectStart(startError);
+      } else {
+        rejectStart(startError);
+        await new Promise((resolve) => setImmediate(resolve));
+        harness.analysis.emit("error");
+      }
+
+      const result = await sendPromise;
+      await harness.router.whenIdle();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      assert.equal(result.conversation.messages.at(-1).status, "error", order);
+      assert.equal(harness.conversation.snapshot().activeMessageId, undefined, order);
+      assert.equal(terminalEvents.length, 1, order);
+      assert.deepEqual(unhandledRejections, [], order);
+    } finally {
+      process.off("unhandledRejection", onUnhandledRejection);
+    }
+  }
+});

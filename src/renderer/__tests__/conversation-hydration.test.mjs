@@ -59,6 +59,35 @@ test("bounded hydration failure reaches unavailable, then command fallback recov
   assert.equal(coordinator.snapshot().messages[0].text, "event applied");
 });
 
+test("an in-flight hydration retry cannot undo a command fallback promotion", async () => {
+  let releaseRead;
+  let readStarted;
+  const readStartedPromise = new Promise((resolve) => { readStarted = resolve; });
+  const readSnapshot = new Promise((_, reject) => {
+    releaseRead = reject;
+  });
+  const coordinator = createConversationHydrationCoordinator({
+    readSnapshot: async () => {
+      readStarted();
+      return readSnapshot;
+    },
+    sleep: async () => undefined,
+    maxAttempts: 1,
+  });
+
+  const retry = coordinator.retryHydration();
+  await readStartedPromise;
+  coordinator.promote(snapshot(0));
+  releaseRead(new Error("stale hydration retry failed"));
+
+  assert.equal(await retry, false);
+  assert.equal(coordinator.getState().status, "hydrated");
+
+  await coordinator.queueEvent(messageAdded(1));
+  assert.equal(coordinator.snapshot().revision, 1);
+  assert.equal(coordinator.snapshot().messages[0].text, "event applied");
+});
+
 test("conversation gaps retry resync a bounded number of times and settle after recovery", async () => {
   let readAttempts = 0;
   const coordinator = createConversationHydrationCoordinator({

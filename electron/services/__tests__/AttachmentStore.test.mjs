@@ -146,6 +146,24 @@ test("AttachmentStore does not expose filesystem read errors from an invalid sou
   await store.dispose();
 });
 
+test("AttachmentStore retains the original stat failure as an internal cause", async () => {
+  const root = await makeRoot();
+  const store = makeStore(root);
+  await store.whenReady();
+  const missingSource = path.join(root, "missing-source.png");
+  let failure;
+
+  await assert.rejects(
+    store.addFromFile(missingSource, { width: 1, height: 1 }),
+    (error) => {
+      failure = error;
+      return error?.code === "INVALID_ATTACHMENT" && error?.cause?.code === "ENOENT";
+    },
+  );
+  assert.doesNotMatch(failure.message, /missing-source|ENOENT/);
+  await store.dispose();
+});
+
 test("AttachmentStore rejects symlink and non-directory roots before touching another target", async () => {
   const target = await makeRoot();
   const parent = await makeRoot();
