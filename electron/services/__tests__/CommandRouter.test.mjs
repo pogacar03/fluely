@@ -364,3 +364,114 @@ test("real service terminal events remain one canonical error/cancelled/complete
     );
   }
 });
+
+test("different request IDs execute workspace commands in fair FIFO order while send materializes", async () => {
+  const harness = await makeHarness({
+    provider: {
+      stream: async function* () {
+        yield "answer";
+      },
+    },
+  });
+  const materializationStarted = new Promise((resolve) => {
+    harness.attachments.addFromScreenshot = async (...args) => {
+      resolve();
+      await new Promise((release) => { harness.releaseMaterialization = release; });
+      return harness.originalAddFromScreenshot(...args);
+    };
+  });
+  harness.originalAddFromScreenshot = AttachmentStore.prototype.addFromScreenshot.bind(harness.attachments);
+  const steps = [];
+  const originalClear = harness.conversation.clear.bind(harness.conversation);
+  harness.conversation.clear = async () => {
+    steps.push("clear-conversation");
+    return originalClear();
+  };
+  const originalCancel = harness.analysis.cancel.bind(harness.analysis);
+  harness.analysis.cancel = () => {
+    steps.push("cancel");
+    return originalCancel();
+  };
+
+  const sendPromise = harness.router.execute({ type: "send", requestId: "fifo-send", prompt: "Question" }, "desktop");
+  await materializationStarted;
+  const clearPromise = harness.router.execute({ type: "clear-conversation", requestId: "fifo-clear" }, "phone");
+  const cancelPromise = harness.router.execute({ type: "cancel", requestId: "fifo-cancel" }, "phone");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(steps, []);
+  harness.releaseMaterialization();
+  await Promise.all([sendPromise, clearPromise, cancelPromise]);
+  await harness.router.whenIdle();
+
+  assert.equal(steps.includes("clear-conversation"), true);
+  assert.equal(steps.indexOf("clear-conversation") > -1, true);
+  assert.deepEqual(harness.conversation.snapshot().messages, []);
+});
+
+test("send rolls back conversation attachment metadata and files when turn setup fails", async () => {
+  const harness = await makeHarness({
+    provider: {
+      stream: async function* () {
+        yield "answer";
+      },
+    },
+  });
+  harness.conversation.startTurn("Existing active turn", []);
+  const queueBefore = harness.screenshots.getState();
+
+  await assert.rejects(
+    harness.router.execute({ type: "send", requestId: "transaction-failure", prompt: "Question" }, "desktop"),
+    /conversation turn is already active/i,
+  );
+
+  assert.equal(harness.conversation.snapshot().attachments.length, 0);
+  assert.equal(harness.attachments.list().length, 0);
+  assert.equal(harness.attachments.getPath(ATTACHMENT_ID), undefined);
+  assert.deepEqual(harness.screenshots.getState(), queueBefore);
+});
+
+test("sync start throws and async start rejects both produce one error terminal and release the active turn", async () => {
+  const scenarios = [
+    {
+      name: "sync throw",
+      start() {
+        throw Object.assign(new Error("sync provider failure"), { code: "ANALYSIS_FAILED" });
+      },
+    },
+    {
+      name: "async reject",
+      async start() {
+        throw Object.assign(new Error("async provider failure"), { code: "ANALYSIS_FAILED" });
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const harness = await makeHarness({
+      provider: {
+        stream: async function* () {
+          yield "unreachable";
+        },
+      },
+    });
+    const terminalEvents = [];
+    harness.conversation.subscribe((event) => {
+      if (event.type === "message-updated" && ["completed", "error", "cancelled"].includes(event.message.status)) {
+        terminalEvents.push(event);
+      }
+    });
+    harness.analysis.start = scenario.start;
+
+    const result = await harness.router.execute({
+      type: "send",
+      requestId: `start-failure-${scenario.name}`,
+      prompt: "Question",
+    }, "desktop");
+
+    assert.equal(result.conversation.messages.at(-1).status, "error", scenario.name);
+    assert.equal(result.conversation.activeMessageId, undefined, scenario.name);
+    assert.equal(terminalEvents.length, 1, scenario.name);
+    await harness.router.whenIdle();
+  }
+});

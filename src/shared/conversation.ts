@@ -326,20 +326,10 @@ export class ConversationModel implements ConversationPort {
   }
 
   public addAttachment(attachment: ConversationAttachment): ConversationAttachment {
-    if (!attachment || typeof attachment.id !== "string" || attachment.id.length === 0) {
-      throw new Error("Conversation attachments require an opaque ID.");
-    }
-    if (attachment.mimeType !== "image/png") {
-      throw new Error("Conversation attachments must be PNG images.");
-    }
-    if (!Number.isSafeInteger(attachment.byteLength) || attachment.byteLength < 0) {
-      throw new Error("Conversation attachments require a valid byte length.");
-    }
-    if (this.state.attachments.some((candidate) => candidate.id === attachment.id)) {
-      throw new Error("Conversation attachment IDs must be unique.");
-    }
-
-    const copy = cloneAttachment(attachment);
+    const copy = this.validateNewAttachment(
+      attachment,
+      new Set(this.state.attachments.map((candidate) => candidate.id)),
+    );
     this.state.attachments.push(copy);
     this.emit({
       type: "attachment-added",
@@ -351,22 +341,82 @@ export class ConversationModel implements ConversationPort {
     return cloneAttachment(copy);
   }
 
+  public addAttachmentsAndStartTurn(
+    prompt: string,
+    attachments: readonly ConversationAttachment[],
+  ): {
+    user: ConversationMessage;
+    assistant: ConversationMessage;
+  } {
+    const knownIds = new Set(this.state.attachments.map((attachment) => attachment.id));
+    const copies = attachments.map((attachment) => {
+      const copy = this.validateNewAttachment(attachment, knownIds);
+      knownIds.add(copy.id);
+      return copy;
+    });
+    return this.commitTurn(prompt, copies, copies.map((attachment) => attachment.id));
+  }
+
   public startTurn(prompt: string, attachmentIds: readonly string[] = []): {
+    user: ConversationMessage;
+    assistant: ConversationMessage;
+  } {
+    const normalizedAttachmentIds = [...new Set(attachmentIds)];
+    if (normalizedAttachmentIds.some((id) => !this.state.attachments.some((attachment) => attachment.id === id))) {
+      throw new Error("Conversation messages may reference registered attachments only.");
+    }
+
+    return this.commitTurn(prompt, [], normalizedAttachmentIds);
+  }
+
+  private validateNewAttachment(
+    attachment: ConversationAttachment,
+    knownIds: ReadonlySet<string>,
+  ): ConversationAttachment {
+    if (!attachment || typeof attachment.id !== "string" || attachment.id.length === 0) {
+      throw new Error("Conversation attachments require an opaque ID.");
+    }
+    if (attachment.mimeType !== "image/png") {
+      throw new Error("Conversation attachments must be PNG images.");
+    }
+    if (!Number.isSafeInteger(attachment.byteLength) || attachment.byteLength < 0) {
+      throw new Error("Conversation attachments require a valid byte length.");
+    }
+    if (knownIds.has(attachment.id)) {
+      throw new Error("Conversation attachment IDs must be unique.");
+    }
+    return cloneAttachment(attachment);
+  }
+
+  private commitTurn(
+    prompt: string,
+    attachments: readonly ConversationAttachment[],
+    attachmentIds: readonly string[],
+  ): {
     user: ConversationMessage;
     assistant: ConversationMessage;
   } {
     if (this.state.activeMessageId) {
       throw new Error("A conversation turn is already active.");
     }
+
     const normalizedAttachmentIds = [...new Set(attachmentIds)];
-    if (normalizedAttachmentIds.some((id) => !this.state.attachments.some((attachment) => attachment.id === id))) {
+    const registeredIds = new Set([
+      ...this.state.attachments.map((attachment) => attachment.id),
+      ...attachments.map((attachment) => attachment.id),
+    ]);
+    if (normalizedAttachmentIds.length !== attachmentIds.length ||
+      normalizedAttachmentIds.some((id) => !registeredIds.has(id))) {
       throw new Error("Conversation messages may reference registered attachments only.");
     }
 
     const createdAt = this.now();
+    const nextSequence = this.nextSequence;
+    const userId = this.idFactory();
+    const assistantId = this.idFactory();
     const user: ConversationMessage = {
-      id: this.idFactory(),
-      sequence: ++this.nextSequence,
+      id: userId,
+      sequence: nextSequence + 1,
       role: "user",
       text: prompt,
       attachmentIds: normalizedAttachmentIds,
@@ -375,8 +425,8 @@ export class ConversationModel implements ConversationPort {
       finishedAt: createdAt,
     };
     const assistant: ConversationMessage = {
-      id: this.idFactory(),
-      sequence: ++this.nextSequence,
+      id: assistantId,
+      sequence: nextSequence + 2,
       role: "assistant",
       text: "",
       attachmentIds: [],
@@ -384,6 +434,8 @@ export class ConversationModel implements ConversationPort {
       createdAt,
     };
 
+    this.nextSequence = nextSequence + 2;
+    this.state.attachments.push(...attachments.map(cloneAttachment));
     this.state.messages.push(user, assistant);
     this.state.activeMessageId = assistant.id;
     this.turns.push({
@@ -391,6 +443,14 @@ export class ConversationModel implements ConversationPort {
       assistantMessageId: assistant.id,
       attachmentIds: [...normalizedAttachmentIds],
     });
+    for (const attachment of attachments) {
+      this.emit({
+        type: "attachment-added",
+        revision: this.nextRevision(),
+        activeMessageId: assistant.id,
+        attachment: cloneAttachment(attachment),
+      });
+    }
     this.emit({
       type: "message-added",
       revision: this.nextRevision(),

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   chmod,
+  lstat,
   mkdir,
   readdir,
   readFile,
@@ -25,10 +26,13 @@ export type AttachmentStoreErrorCode =
   | "ATTACHMENT_TOO_LARGE"
   | "INVALID_ATTACHMENT"
   | "ATTACHMENT_NOT_FOUND"
+  | "ATTACHMENT_CLEANUP_FAILED"
+  | "ATTACHMENT_STORE_INVALID_ROOT"
   | "ATTACHMENT_STORE_DISPOSED";
 
 export interface AttachmentStoreError extends Error {
   code: AttachmentStoreErrorCode;
+  cause?: unknown;
 }
 
 export interface AttachmentStoreOptions {
@@ -40,6 +44,7 @@ export interface AttachmentStoreOptions {
   now?: () => number | Date;
   clock?: () => number | Date;
   maxAttachmentBytes?: number;
+  unlinkFile?: (path: string) => Promise<void>;
 }
 
 export interface AttachmentFileMetadata {
@@ -52,6 +57,11 @@ function createError(code: AttachmentStoreErrorCode, message: string): Attachmen
   const error = new Error(message) as AttachmentStoreError;
   error.name = "AttachmentStoreError";
   error.code = code;
+  return error;
+}
+
+function withCause(error: AttachmentStoreError, cause: unknown): AttachmentStoreError {
+  error.cause = cause;
   return error;
 }
 
@@ -84,6 +94,7 @@ export class AttachmentStore {
   private readonly idFactory: () => string;
   private readonly now: () => number;
   private readonly maxBytes: number;
+  private readonly unlinkFile: (path: string) => Promise<void>;
   private readonly attachments = new Map<string, ConversationAttachment>();
   private readonly initialization: Promise<void>;
   private disposed = false;
@@ -106,6 +117,7 @@ export class AttachmentStore {
     this.idFactory = options.idFactory ?? randomUUID;
     this.now = () => timestamp((options.now ?? options.clock)?.());
     this.maxBytes = Math.max(1, Math.floor(options.maxAttachmentBytes ?? MAX_ATTACHMENT_BYTES));
+    this.unlinkFile = options.unlinkFile ?? unlink;
     this.initialization = this.initialize();
   }
 
@@ -156,7 +168,12 @@ export class AttachmentStore {
     if (sourceStats.size > this.maxBytes) {
       throw createError("ATTACHMENT_TOO_LARGE", "A screenshot attachment exceeds the 20 MiB limit.");
     }
-    const bytes = new Uint8Array(await readFile(sourcePath));
+    let bytes: Uint8Array;
+    try {
+      bytes = new Uint8Array(await readFile(sourcePath));
+    } catch (error) {
+      throw withCause(createError("INVALID_ATTACHMENT", "The source screenshot could not be read."), error);
+    }
     if (bytes.byteLength > this.maxBytes) {
       throw createError("ATTACHMENT_TOO_LARGE", "A screenshot attachment exceeds the 20 MiB limit.");
     }
@@ -183,8 +200,44 @@ export class AttachmentStore {
       await rename(temporaryPath, finalPath);
       await chmod(finalPath, 0o600);
     } catch (error) {
-      await unlink(temporaryPath).catch(() => undefined);
-      throw error;
+      let cleanupError: unknown;
+      for (const path of [temporaryPath, finalPath]) {
+        try {
+          await this.unlinkFile(path);
+        } catch (candidate) {
+          if ((candidate as NodeJS.ErrnoException).code !== "ENOENT" && cleanupError === undefined) {
+            cleanupError = candidate;
+          }
+        }
+      }
+      if (cleanupError !== undefined) {
+        throw withCause(
+          createError("ATTACHMENT_CLEANUP_FAILED", "The failed attachment could not be rolled back."),
+          cleanupError,
+        );
+      }
+      throw withCause(createError("INVALID_ATTACHMENT", "The attachment could not be stored."), error);
+    }
+
+    try {
+      const finalStats = await lstat(finalPath);
+      this.assertPrivateFile(finalStats);
+    } catch (error) {
+      let cleanupError: unknown;
+      try {
+        await this.unlinkFile(finalPath);
+      } catch (candidate) {
+        if ((candidate as NodeJS.ErrnoException).code !== "ENOENT") {
+          cleanupError = candidate;
+        }
+      }
+      if (cleanupError !== undefined) {
+        throw withCause(
+          createError("ATTACHMENT_CLEANUP_FAILED", "The failed attachment could not be rolled back."),
+          cleanupError,
+        );
+      }
+      throw withCause(createError("INVALID_ATTACHMENT", "The attachment could not be stored."), error);
     }
 
     this.attachments.set(id, attachment);
@@ -255,25 +308,108 @@ export class AttachmentStore {
       return;
     }
     await this.whenReady();
+    try {
+      await rm(this.directory, { recursive: true, force: true });
+    } catch (error) {
+      throw withCause(createError("ATTACHMENT_CLEANUP_FAILED", "The session attachments could not be cleaned up."), error);
+    }
     this.disposed = true;
     this.attachments.clear();
-    await rm(this.directory, { recursive: true, force: true });
   }
 
   private async initialize(): Promise<void> {
-    await mkdir(this.rootDirectory, { recursive: true, mode: 0o700 });
-    await chmod(this.rootDirectory, 0o700);
-    let entries: Array<{ isDirectory(): boolean; name: string }> = [];
+    await this.ensurePrivateDirectory(this.rootDirectory, true);
+    await this.ensureExistingPrivateDirectory(this.directory);
+    let entries: Array<{ name: string }>;
     try {
       entries = await readdir(this.rootDirectory, { withFileTypes: true, encoding: "utf8" });
-    } catch {
-      entries = [];
+    } catch (error) {
+      throw withCause(createError("ATTACHMENT_STORE_INVALID_ROOT", "The attachment storage root could not be read."), error);
     }
-    await Promise.all(entries
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => rm(join(this.rootDirectory, entry.name), { recursive: true, force: true })));
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
-    await chmod(this.directory, 0o700);
+    for (const entry of entries) {
+      const entryPath = join(this.rootDirectory, entry.name);
+      let entryStats;
+      try {
+        entryStats = await lstat(entryPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          continue;
+        }
+        throw withCause(createError("ATTACHMENT_CLEANUP_FAILED", "A stale attachment session could not be inspected."), error);
+      }
+      try {
+        if (entryStats.isSymbolicLink()) {
+          await unlink(entryPath);
+        } else if (entryStats.isDirectory()) {
+          await rm(entryPath, { recursive: entryStats.isDirectory(), force: true });
+        }
+      } catch (error) {
+        throw withCause(createError("ATTACHMENT_CLEANUP_FAILED", "A stale attachment session could not be cleaned up."), error);
+      }
+    }
+    await this.ensurePrivateDirectory(this.directory, false);
+  }
+
+  private async ensureExistingPrivateDirectory(directory: string): Promise<void> {
+    let stats;
+    try {
+      stats = await lstat(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return;
+      }
+      throw withCause(createError("ATTACHMENT_STORE_INVALID_ROOT", "The session attachment directory could not be inspected."), error);
+    }
+    this.assertPrivateDirectory(stats);
+  }
+
+  private async ensurePrivateDirectory(directory: string, recursive: boolean): Promise<void> {
+    let stats;
+    try {
+      stats = await lstat(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw withCause(createError("ATTACHMENT_STORE_INVALID_ROOT", "The attachment storage root could not be inspected."), error);
+      }
+      try {
+        await mkdir(directory, { recursive, mode: 0o700 });
+        stats = await lstat(directory);
+      } catch (creationError) {
+        throw withCause(createError("ATTACHMENT_STORE_INVALID_ROOT", "The attachment storage root could not be created."), creationError);
+      }
+    }
+
+    this.assertPrivateDirectory(stats);
+    try {
+      await chmod(directory, 0o700);
+      const verified = await lstat(directory);
+      this.assertPrivateDirectory(verified);
+    } catch (error) {
+      if ((error as AttachmentStoreError).code === "ATTACHMENT_STORE_INVALID_ROOT") {
+        throw error;
+      }
+      throw withCause(createError("ATTACHMENT_STORE_INVALID_ROOT", "The attachment storage root could not be secured."), error);
+    }
+  }
+
+  private assertPrivateDirectory(stats: { isDirectory(): boolean; isSymbolicLink(): boolean; uid: number; mode: number }): void {
+    if (stats.isSymbolicLink() || !stats.isDirectory()) {
+      throw createError("ATTACHMENT_STORE_INVALID_ROOT", "The attachment storage root must be a private directory.");
+    }
+    const owner = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (owner !== undefined && stats.uid !== owner) {
+      throw createError("ATTACHMENT_STORE_INVALID_ROOT", "The attachment storage root has an unexpected owner.");
+    }
+  }
+
+  private assertPrivateFile(stats: { isFile(): boolean; isSymbolicLink(): boolean; uid: number; mode: number }): void {
+    if (stats.isSymbolicLink() || !stats.isFile() || (stats.mode & 0o777) !== 0o600) {
+      throw createError("INVALID_ATTACHMENT", "The stored attachment is not a private file.");
+    }
+    const owner = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (owner !== undefined && stats.uid !== owner) {
+      throw createError("INVALID_ATTACHMENT", "The stored attachment has an unexpected owner.");
+    }
   }
 
   private ensureUsable(): void {
@@ -284,11 +420,23 @@ export class AttachmentStore {
 
   private async removeRegistered(id: string): Promise<void> {
     const managedPath = this.getPath(id);
-    this.attachments.delete(id);
-    if (managedPath) {
-      await unlink(managedPath).catch(() => undefined);
-      await unlink(`${managedPath}.tmp`).catch(() => undefined);
+    if (!managedPath) {
+      return;
     }
+    try {
+      for (const path of [managedPath, `${managedPath}.tmp`]) {
+        try {
+          await this.unlinkFile(path);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            throw error;
+          }
+        }
+      }
+    } catch (error) {
+      throw withCause(createError("ATTACHMENT_CLEANUP_FAILED", "The session attachment could not be removed."), error);
+    }
+    this.attachments.delete(id);
   }
 }
 

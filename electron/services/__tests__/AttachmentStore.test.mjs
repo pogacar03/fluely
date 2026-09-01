@@ -1,6 +1,6 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -59,6 +59,10 @@ test("AttachmentStore cleans stale sessions and creates owner-only directories",
   await assert.rejects(stat(stale), { code: "ENOENT" });
   assert.equal((await stat(root)).mode & 0o777, 0o700);
   assert.equal((await stat(store.directory)).mode & 0o777, 0o700);
+  if (typeof process.getuid === "function") {
+    assert.equal((await stat(root)).uid, process.getuid());
+    assert.equal((await stat(store.directory)).uid, process.getuid());
+  }
   await store.dispose();
 });
 
@@ -124,5 +128,63 @@ test("AttachmentStore deletes only unreferenced registered attachments", async (
   assert.deepEqual(removed, [second.id]);
   assert.notEqual(store.getPath(first.id), undefined);
   assert.equal(store.getPath(second.id), undefined);
+  await store.dispose();
+});
+
+test("AttachmentStore does not expose filesystem read errors from an invalid source", async () => {
+  const root = await makeRoot();
+  const store = makeStore(root);
+  await store.whenReady();
+
+  await assert.rejects(
+    store.addFromFile(root, { width: 1, height: 1 }),
+    (error) => error?.code === "INVALID_ATTACHMENT" &&
+      !String(error?.message).includes(root) &&
+      !String(error?.message).includes("EISDIR"),
+  );
+  assert.equal(store.list().length, 0);
+  await store.dispose();
+});
+
+test("AttachmentStore rejects symlink and non-directory roots before touching another target", async () => {
+  const target = await makeRoot();
+  const parent = await makeRoot();
+  const linkedRoot = path.join(parent, "linked-root");
+  await symlink(target, linkedRoot, "dir");
+
+  const linkedStore = makeStore(linkedRoot);
+  await assert.rejects(linkedStore.whenReady(), (error) => error?.code === "ATTACHMENT_STORE_INVALID_ROOT");
+  await assert.rejects(stat(path.join(target, "session-current")), { code: "ENOENT" });
+
+  const fileRoot = path.join(parent, "file-root");
+  await writeFile(fileRoot, PNG_BYTES);
+  const fileStore = makeStore(fileRoot);
+  await assert.rejects(fileStore.whenReady(), (error) => error?.code === "ATTACHMENT_STORE_INVALID_ROOT");
+});
+
+test("AttachmentStore keeps a registration when delete fails and removes it on a later retry", async () => {
+  const root = await makeRoot();
+  const source = await makeSource(root);
+  let failCleanup = true;
+  const store = makeStore(root, {
+    unlinkFile: async (filePath) => {
+      if (failCleanup) {
+        throw Object.assign(new Error("disk cleanup failed"), { code: "EIO" });
+      }
+      await unlink(filePath);
+    },
+  });
+  await store.whenReady();
+  const attachment = await store.addFromFile(source, { width: 1, height: 1 });
+  const managedPath = store.getPath(attachment.id);
+
+  await assert.rejects(store.delete(attachment.id), (error) => error?.code === "ATTACHMENT_CLEANUP_FAILED");
+  assert.equal(store.getPath(attachment.id), managedPath);
+  assert.deepEqual(store.list().map((item) => item.id), [attachment.id]);
+
+  failCleanup = false;
+  assert.equal(await store.delete(attachment.id), true);
+  assert.equal(store.getPath(attachment.id), undefined);
+  await assert.rejects(stat(managedPath), { code: "ENOENT" });
   await store.dispose();
 });

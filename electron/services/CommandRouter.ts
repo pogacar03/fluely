@@ -38,6 +38,13 @@ export interface CommandRouterAttachmentPort {
 
 export interface CommandRouterConversationPort extends ConversationPort {
   addAttachment(attachment: ConversationAttachment): ConversationAttachment;
+  addAttachmentsAndStartTurn(
+    prompt: string,
+    attachments: readonly ConversationAttachment[],
+  ): {
+    user: ConversationMessage;
+    assistant: ConversationMessage;
+  };
   startTurn(prompt: string, attachmentIds: readonly string[]): {
     user: ConversationMessage;
     assistant: ConversationMessage;
@@ -54,7 +61,7 @@ export interface CommandRouterConversationPort extends ConversationPort {
 }
 
 export interface CommandRouterAnalysisPort {
-  start(request: AnalysisRequest): AnalysisState | Promise<AnalysisState>;
+  start(request: AnalysisRequest): Promise<void>;
   cancel(): AnalysisState | Promise<AnalysisState>;
   getState(): AnalysisState;
   onStateChanged(listener: (event: AnalysisStateChangedEvent) => void): () => void;
@@ -113,6 +120,7 @@ export class CommandRouter {
   private readonly conversation: CommandRouterConversationPort;
   private readonly analysis: CommandRouterAnalysisPort;
   private readonly requestDeduper = createRequestIdDeduper<CommandResult>();
+  private commandTail: Promise<void> = Promise.resolve();
   private activeRun: ActiveRun | null = null;
 
   public constructor(options: CommandRouterOptions) {
@@ -127,11 +135,12 @@ export class CommandRouter {
     return this.requestDeduper.run(
       command.requestId,
       JSON.stringify(command),
-      () => this.executeOnce(command),
+      () => this.enqueue(() => this.executeOnce(command)),
     );
   }
 
   public async whenIdle(): Promise<void> {
+    await this.commandTail;
     await this.analysis.whenIdle?.();
     await this.activeRun?.providerSettled;
     await this.conversation.whenIdle?.();
@@ -192,13 +201,12 @@ export class CommandRouter {
       throw error;
     }
 
-    const attachmentIds = materialized.map((attachment) => attachment.id);
     try {
-      for (const attachment of materialized) {
-        this.conversation.addAttachment(attachment);
-      }
-      const turn = this.conversation.startTurn(normalizeContextPrompt(prompt), attachmentIds);
-      this.startAnalysis(turn.assistant.id, {
+      const turn = this.conversation.addAttachmentsAndStartTurn(
+        normalizeContextPrompt(prompt),
+        materialized,
+      );
+      await this.startAnalysis(turn.assistant.id, {
         prompt: normalizeContextPrompt(prompt),
         screenshotIds: queue.items.map((item) => item.id),
         intent: "answer",
@@ -211,21 +219,24 @@ export class CommandRouter {
     }
   }
 
-  private startAnalysis(messageId: string, request: AnalysisRequest): void {
+  private async startAnalysis(messageId: string, request: AnalysisRequest): Promise<void> {
     let settle!: () => void;
     const providerSettled = new Promise<void>((resolve) => { settle = resolve; });
-    this.activeRun = { messageId, providerSettled, terminal: false };
+    const activeRun: ActiveRun = { messageId, providerSettled, terminal: false };
+    this.activeRun = activeRun;
     try {
-      this.analysis.start(request);
+      await this.analysis.start(request);
     } catch (error) {
       const message = error instanceof Error && error.message ? error.message : "Codex CLI analysis failed.";
-      try {
-        this.conversation.finishAssistant(messageId, "error", "", {
-          code: (error as { code?: string })?.code ?? "ANALYSIS_FAILED",
-          message,
-        });
-      } catch {
-        // A terminal provider event may have won the race.
+      if (!activeRun.terminal) {
+        try {
+          this.conversation.finishAssistant(messageId, "error", "", {
+            code: (error as { code?: string })?.code ?? "ANALYSIS_FAILED",
+            message,
+          });
+        } catch {
+          // A terminal provider event may have won the race.
+        }
       }
       this.markRunTerminal(messageId);
       settle();
@@ -337,5 +348,11 @@ export class CommandRouter {
       conversation: this.conversation.snapshot(),
       analysis: this.analysis.getState(),
     };
+  }
+
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const next = this.commandTail.then(operation, operation);
+    this.commandTail = next.then(() => undefined, () => undefined);
+    return next;
   }
 }

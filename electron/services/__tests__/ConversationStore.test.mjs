@@ -100,3 +100,24 @@ test("ConversationStore clear emits a revisioned empty snapshot and removes ever
     referencedIds: [],
   });
 });
+
+test("ConversationStore retains failed cleanup registrations for a later retry", async () => {
+  let attempts = 0;
+  const store = makeStore({
+    deleteUnreferenced: async (candidateIds) => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw Object.assign(new Error("disk cleanup failed"), { code: "ATTACHMENT_CLEANUP_FAILED" });
+      }
+      return [...candidateIds];
+    },
+  });
+  store.addAttachment(FIRST_ATTACHMENT);
+
+  await assert.rejects(store.clear(), /cleanup failed/);
+  assert.equal(attempts, 1);
+  assert.deepEqual(store.snapshot().attachments, []);
+
+  await store.clear();
+  assert.equal(attempts, 2);
+});

@@ -23,6 +23,7 @@ export interface ConversationStoreOptions extends ConversationModelOptions {
 export class ConversationStore implements ConversationPort {
   private readonly model: ConversationModel;
   private readonly attachmentStore?: ConversationAttachmentCleanupPort;
+  private readonly pendingCleanupIds = new Set<string>();
   private cleanupTail: Promise<void> = Promise.resolve();
 
   public constructor(options: ConversationStoreOptions) {
@@ -41,6 +42,16 @@ export class ConversationStore implements ConversationPort {
 
   public addAttachment(attachment: ConversationAttachment): ConversationAttachment {
     return this.model.addAttachment(attachment);
+  }
+
+  public addAttachmentsAndStartTurn(
+    prompt: string,
+    attachments: readonly ConversationAttachment[],
+  ): {
+    user: ConversationMessage;
+    assistant: ConversationMessage;
+  } {
+    return this.model.addAttachmentsAndStartTurn(prompt, attachments);
   }
 
   public startTurn(prompt: string, attachmentIds: readonly string[] = []): {
@@ -70,7 +81,7 @@ export class ConversationStore implements ConversationPort {
   public async clear(): Promise<void> {
     const attachmentIds = this.model.snapshot().attachments.map((attachment) => attachment.id);
     this.model.clear();
-    this.enqueueCleanup(attachmentIds, new Set());
+    this.enqueueCleanup(attachmentIds);
     await this.whenIdle();
   }
 
@@ -88,16 +99,29 @@ export class ConversationStore implements ConversationPort {
     if (event.type !== "turn-evicted") {
       return;
     }
-    const referencedIds = new Set(this.model.snapshot().attachments.map((attachment) => attachment.id));
-    this.enqueueCleanup(event.attachmentIds, referencedIds);
+    this.enqueueCleanup(event.attachmentIds);
   }
 
-  private enqueueCleanup(candidateIds: readonly string[], referencedIds: ReadonlySet<string>): void {
+  private enqueueCleanup(candidateIds: readonly string[]): void {
     if (!this.attachmentStore) {
       return;
     }
+    for (const id of candidateIds) {
+      this.pendingCleanupIds.add(id);
+    }
     this.cleanupTail = this.cleanupTail
-      .then(() => this.attachmentStore!.deleteUnreferenced(candidateIds, referencedIds))
-      .then(() => undefined, () => undefined);
+      .then(() => this.flushCleanup(), () => this.flushCleanup());
+  }
+
+  private async flushCleanup(): Promise<void> {
+    if (!this.attachmentStore || this.pendingCleanupIds.size === 0) {
+      return;
+    }
+    const candidateIds = [...this.pendingCleanupIds];
+    const referencedIds = new Set(this.model.snapshot().attachments.map((attachment) => attachment.id));
+    const removed = await this.attachmentStore.deleteUnreferenced(candidateIds, referencedIds);
+    for (const id of removed) {
+      this.pendingCleanupIds.delete(id);
+    }
   }
 }

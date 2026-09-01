@@ -261,9 +261,6 @@ export interface FluelyApi {
   };
   screenshots: {
     get: () => Promise<IpcResult<ScreenshotState>>;
-    capture: () => Promise<IpcResult<ScreenshotItem>>;
-    delete: (id: string) => Promise<IpcResult<ScreenshotState>>;
-    clear: () => Promise<IpcResult<ScreenshotState>>;
     onStateChanged: (listener: ScreenshotStateListener) => () => void;
   };
   app: {

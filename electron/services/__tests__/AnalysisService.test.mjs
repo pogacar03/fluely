@@ -61,16 +61,16 @@ test("AnalysisService rejects a second request while the first stream is running
   };
   const service = makeService({ provider });
 
-  const started = service.start({
+  await service.start({
     prompt: "What is shown?",
     screenshotIds: [FIRST_ID],
     intent: "answer",
     fast: false,
   });
 
-  assert.equal(started.status, "running");
-  assert.throws(
-    () => service.start({
+  assert.equal(service.getState().status, "running");
+  await assert.rejects(
+    service.start({
       prompt: "Another question",
       screenshotIds: [SECOND_ID],
       intent: "explain",
@@ -103,13 +103,13 @@ test("AnalysisService accumulates provider deltas in order and emits typed snaps
   const events = [];
   const unsubscribe = service.onStateChanged((event) => events.push(event));
 
-  const initial = service.start({
+  await service.start({
     prompt: "  Summarize this screen  ",
     screenshotIds: [FIRST_ID, "unknown", SECOND_ID],
     intent: "explain",
     fast: true,
   });
-  assert.equal(initial.status, "running");
+  assert.equal(service.getState().status, "running");
 
   await service.whenIdle();
   unsubscribe();
@@ -148,7 +148,7 @@ test("AnalysisService cancellation aborts the provider and never completes the p
   const events = [];
   service.onStateChanged((event) => events.push(event));
 
-  service.start({ prompt: "Question", screenshotIds: [FIRST_ID], intent: "answer", fast: false });
+  await service.start({ prompt: "Question", screenshotIds: [FIRST_ID], intent: "answer", fast: false });
   await new Promise((resolve) => setImmediate(resolve));
   const cancelled = service.cancel();
 
@@ -179,22 +179,22 @@ test("AnalysisService holds its start lock until a cancelled provider stream set
   };
   const service = makeService({ provider });
 
-  service.start({ prompt: "First", screenshotIds: [FIRST_ID], intent: "answer", fast: false });
+  await service.start({ prompt: "First", screenshotIds: [FIRST_ID], intent: "answer", fast: false });
   for (let attempt = 0; attempt < 20 && releases.length === 0; attempt += 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
   assert.equal(releases.length, 1);
 
   service.cancel();
-  assert.throws(
-    () => service.start({ prompt: "Overlapping", screenshotIds: [FIRST_ID], intent: "answer", fast: false }),
+  await assert.rejects(
+    service.start({ prompt: "Overlapping", screenshotIds: [FIRST_ID], intent: "answer", fast: false }),
     (error) => error?.code === "ANALYSIS_IN_PROGRESS",
   );
 
   releases.shift()();
   await service.whenIdle();
 
-  service.start({ prompt: "After cleanup", screenshotIds: [FIRST_ID], intent: "answer", fast: false });
+  await service.start({ prompt: "After cleanup", screenshotIds: [FIRST_ID], intent: "answer", fast: false });
   assert.equal(service.getState().status, "running");
   for (let attempt = 0; attempt < 20 && releases.length === 0; attempt += 1) {
     await new Promise((resolve) => setImmediate(resolve));
@@ -218,7 +218,7 @@ test("AnalysisService reports provider failures without changing the screenshot 
   const events = [];
   service.onStateChanged((event) => events.push(event));
 
-  service.start({ prompt: "Question", screenshotIds: undefined, intent: "recap", fast: false });
+  await service.start({ prompt: "Question", screenshotIds: undefined, intent: "recap", fast: false });
   await service.whenIdle();
 
   const after = screenshots.getState();
@@ -239,7 +239,7 @@ test("AnalysisService turns a clean empty provider completion into a terminal er
   const events = [];
   service.onStateChanged((event) => events.push(event));
 
-  service.start({ prompt: "Question", screenshotIds: [FIRST_ID], intent: "answer", fast: false });
+  await service.start({ prompt: "Question", screenshotIds: [FIRST_ID], intent: "answer", fast: false });
   await service.whenIdle();
 
   const state = service.getState();
@@ -273,7 +273,7 @@ test("AnalysisService preserves typed timeout categories and keeps diagnostics o
     onDiagnostics: (snapshot) => observedDiagnostics.push(snapshot),
   });
 
-  service.start({ prompt: "Question", screenshotIds: [FIRST_ID], intent: "answer", fast: false });
+  await service.start({ prompt: "Question", screenshotIds: [FIRST_ID], intent: "answer", fast: false });
   await service.whenIdle();
 
   const state = service.getState();

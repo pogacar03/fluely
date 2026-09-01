@@ -66,7 +66,13 @@ function analysisState(status = "idle", screenshotIds = []) {
   };
 }
 
-function createBackend({ initialAnalysisStatus = "idle", failedSends = 0, holdCapture = false, conversationSnapshot } = {}) {
+function createBackend({
+  initialAnalysisStatus = "idle",
+  failedSends = 0,
+  holdCapture = false,
+  conversationSnapshot,
+  conversationUnavailableUntilCommand = false,
+} = {}) {
   const registrations = new Map();
   const calls = [];
   const analysisRequests = [];
@@ -75,6 +81,8 @@ function createBackend({ initialAnalysisStatus = "idle", failedSends = 0, holdCa
   let currentAnalysis = analysisState(initialAnalysisStatus, initialAnalysisStatus === "running" ? [FIRST_ID] : []);
   let captureCount = 0;
   let remainingFailedSends = failedSends;
+  let conversationAvailable = !conversationUnavailableUntilCommand;
+  let conversationEventListener;
   let releaseCapture = () => undefined;
   const captureGate = holdCapture
     ? new Promise((resolve) => { releaseCapture = resolve; })
@@ -143,6 +151,7 @@ function createBackend({ initialAnalysisStatus = "idle", failedSends = 0, holdCa
 
   const workspace = {
     execute: async (command) => {
+      conversationAvailable = true;
       switch (command.type) {
         case "capture":
           await screenshots.capture();
@@ -237,9 +246,28 @@ function createBackend({ initialAnalysisStatus = "idle", failedSends = 0, holdCa
       }
       return handler({}, args[0]);
     },
-    on: () => undefined,
-    removeListener: () => undefined,
+    on: (channel, listener) => {
+      if (channel === "conversation:event") {
+        conversationEventListener = listener;
+      }
+    },
+    removeListener: (channel, listener) => {
+      if (channel === "conversation:event" && conversationEventListener === listener) {
+        conversationEventListener = undefined;
+      }
+    },
   });
+
+  registrations.set("conversation:get-snapshot", async () => conversationAvailable
+    ? { ok: true, value: structuredClone(canonicalConversation) }
+    : {
+      ok: false,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Conversation is temporarily unavailable.",
+        action: "Retry the workspace action.",
+      },
+    });
 
   return {
     calls,
@@ -247,6 +275,7 @@ function createBackend({ initialAnalysisStatus = "idle", failedSends = 0, holdCa
     workspaceCommands,
     getQueue: () => screenshots.getState().items,
     releaseCapture,
+    emitConversationEvent: (event) => conversationEventListener?.({}, event),
   };
 }
 
@@ -367,7 +396,7 @@ test("a failed Send images click retains the queue and a second click retries wi
 
   await clickAndSettle("Send all queued screenshots");
   assert.equal(queueCountText(), "2/5");
-  assert.match(document.querySelector("[role=status]")?.textContent ?? "", /Deterministic provider failure/);
+  assert.match(document.querySelector("[role=status]")?.textContent ?? "", /could not complete the analysis request/i);
   assert.equal(findButton("Send all queued screenshots").disabled, false);
 
   await clickAndSettle("Send all queued screenshots");
@@ -423,4 +452,28 @@ test("the actual Work view renders the canonical conversation snapshot and opaqu
   const thumbnail = document.querySelector('img[src="fluely-media://attachment/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]');
   assert.ok(thumbnail);
   assert.equal(document.body.textContent?.includes("/Users/"), false);
+});
+
+test("a workspace fallback promotes failed conversation hydration before applying later events", async () => {
+  const backend = await renderApp(createBackend({ conversationUnavailableUntilCommand: true }));
+
+  await clickAndSettle("Capture screenshot without sending");
+  backend.emitConversationEvent({
+    type: "message-added",
+    revision: 1,
+    activeMessageId: null,
+    message: {
+      id: "recovered-message",
+      sequence: 1,
+      role: "user",
+      text: "Recovered conversation event",
+      attachmentIds: [],
+      status: "completed",
+      createdAt: 1,
+      finishedAt: 1,
+    },
+  });
+  await flushRenderer();
+
+  assert.match(document.body.textContent ?? "", /Recovered conversation event/);
 });

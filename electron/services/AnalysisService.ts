@@ -307,7 +307,7 @@ export class AnalysisService {
     };
   }
 
-  public start(request: AnalysisRequest): AnalysisState {
+  public async start(request: AnalysisRequest): Promise<void> {
     if (this.active) {
       throw createServiceError(
         "ANALYSIS_IN_PROGRESS",
@@ -341,7 +341,6 @@ export class AnalysisService {
     this.runToken = token;
     this.runPromise = Promise.resolve().then(() => this.consume(token, controller, safeRequest, selection, codex));
     this.emit("started");
-    return this.getState();
   }
 
   public cancel(): AnalysisState {

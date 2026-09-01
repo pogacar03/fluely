@@ -12,7 +12,6 @@ import type {
   FluelySettings,
   IpcResult,
   SettingsPatch,
-  ScreenshotItem,
   ScreenshotStateListener,
   ScreenshotState,
   ShortcutSettings,
@@ -36,12 +35,9 @@ const api: FluelyApi = {
     get: () => invoke<ShortcutStatus>("shortcuts:get"),
     update: (shortcuts: ShortcutSettings) => invoke<ShortcutStatus>("shortcuts:update", shortcuts),
   },
-  screenshots: {
-    get: () => invoke<ScreenshotState>("screenshots:get"),
-    capture: () => invoke<ScreenshotItem>("screenshots:capture"),
-    delete: (id: string) => invoke<ScreenshotState>("screenshots:delete", id),
-    clear: () => invoke<ScreenshotState>("screenshots:clear"),
-    onStateChanged: (listener: ScreenshotStateListener) => {
+    screenshots: {
+      get: () => invoke<ScreenshotState>("screenshots:get"),
+      onStateChanged: (listener: ScreenshotStateListener) => {
       const eventListener = (_event: Electron.IpcRendererEvent, state: ScreenshotState) => listener(state);
       ipcRenderer.on("screenshots:state-changed", eventListener);
       return () => ipcRenderer.removeListener("screenshots:state-changed", eventListener);

@@ -1,11 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { subscribeToAnalysisState, subscribeToScreenshotState } from "../shared/ipc";
-import {
-  createConversationProjection,
-  type ConversationEvent,
-  type ConversationProjection,
-  type ConversationSnapshot,
-} from "../shared/conversation";
+import type { ConversationEvent, ConversationSnapshot } from "../shared/conversation";
 import type {
   AnalysisState,
   CodexStatus,
@@ -25,6 +20,10 @@ import {
   createWorkspaceRequestIdFactory,
   type WorkspaceRequestIdFactory,
 } from "../shared/context-queue";
+import {
+  createConversationHydrationCoordinator,
+  type ConversationHydrationCoordinator,
+} from "./conversation-hydration";
 import { SetupView, type SetupNotice } from "./components/SetupView";
 import { WorkView, type WorkAnalysisRequest } from "./components/WorkView";
 import {
@@ -94,7 +93,7 @@ export function App() {
   const opacityRequestRef = useRef(0);
   const workspaceRequestIdFactoryRef = useRef<WorkspaceRequestIdFactory | null>(null);
   const workspaceCommandBusyRef = useRef(false);
-  const conversationProjectionRef = useRef<ConversationProjection | null>(null);
+  const conversationHydrationRef = useRef<ConversationHydrationCoordinator | null>(null);
 
   if (!workspaceRequestIdFactoryRef.current) {
     workspaceRequestIdFactoryRef.current = createWorkspaceRequestIdFactory();
@@ -102,8 +101,6 @@ export function App() {
 
   useEffect(() => {
     let active = true;
-    let conversationHydrated = false;
-    const pendingConversationEvents: ConversationEvent[] = [];
     mountedRef.current = true;
 
     const readConversationSnapshot = async (): Promise<ConversationSnapshot> => {
@@ -114,43 +111,26 @@ export function App() {
       return result.value;
     };
 
-    const applyConversationEvent = (event: ConversationEvent): void => {
-      if (!conversationHydrated || !conversationProjectionRef.current) {
-        pendingConversationEvents.push(event);
-        return;
-      }
-
-      void conversationProjectionRef.current.apply(event).then((result) => {
+    const conversationHydration = createConversationHydrationCoordinator({
+      readSnapshot: readConversationSnapshot,
+      onSnapshot: (snapshot) => {
         if (active) {
-          setConversationSnapshot(result.snapshot);
+          setConversationSnapshot(snapshot);
         }
-      }).catch(() => {
+      },
+      onUnavailable: () => {
         if (active) {
           setNotice({
             tone: "error",
-            text: "Fluely could not resynchronize the conversation. Restart the app and try again.",
+            text: "Fluely could not resynchronize the conversation. Restart the app or retry the workspace action.",
           });
         }
-      });
-    };
+      },
+    });
+    conversationHydrationRef.current = conversationHydration;
 
-    const hydrateConversation = (snapshot: ConversationSnapshot): void => {
-      const projection = conversationProjectionRef.current;
-      if (projection && projection.snapshot().sessionId === snapshot.sessionId) {
-        projection.replace(snapshot);
-      } else {
-        conversationProjectionRef.current = createConversationProjection(snapshot, readConversationSnapshot);
-      }
-      conversationHydrated = true;
-      const hydratedProjection = conversationProjectionRef.current;
-      if (!hydratedProjection) {
-        return;
-      }
-      setConversationSnapshot(hydratedProjection.snapshot());
-      const events = pendingConversationEvents.splice(0);
-      for (const event of events) {
-        applyConversationEvent(event);
-      }
+    const applyConversationEvent = (event: ConversationEvent): void => {
+      void conversationHydration.queueEvent(event).catch(() => undefined);
     };
 
     async function refreshScreenshotState() {
@@ -176,6 +156,15 @@ export function App() {
 
     async function loadWorkspace() {
       try {
+        const conversationSnapshotPromise: Promise<IpcResult<ConversationSnapshot>> = window.fluely.conversation.getSnapshot()
+          .catch(() => ({
+            ok: false,
+            error: {
+              code: "INTERNAL_ERROR",
+              message: "Fluely could not read the current conversation.",
+              action: "Retry the workspace action.",
+            },
+          }));
         const [settingsResult, shortcutsResult, appResult, screenshotsResult, codexResult, analysisResult, conversationResult] = await Promise.all([
           window.fluely.settings.get(),
           window.fluely.shortcuts.get(),
@@ -183,7 +172,7 @@ export function App() {
           window.fluely.screenshots.get(),
           window.fluely.codex.getStatus(),
           window.fluely.analysis.getStatus(),
-          window.fluely.conversation.getSnapshot(),
+          conversationSnapshotPromise,
         ]);
 
         if (!active) {
@@ -213,7 +202,9 @@ export function App() {
           setAnalysisState(toAnalysisState(analysisResult.value));
         }
         if (conversationResult.ok) {
-          hydrateConversation(conversationResult.value);
+          conversationHydration.promote(conversationResult.value);
+        } else {
+          void conversationHydration.retryHydration();
         }
       } catch {
         if (active) {
@@ -222,6 +213,7 @@ export function App() {
             text: "Fluely could not connect to its main process. Restart the app and try again.",
           });
         }
+        void conversationHydration.retryHydration();
       } finally {
         if (active) {
           setBusy(false);
@@ -253,8 +245,7 @@ export function App() {
       unsubscribeScreenshotState();
       unsubscribeAnalysisState();
       unsubscribeConversation();
-      conversationProjectionRef.current = null;
-      pendingConversationEvents.length = 0;
+      conversationHydrationRef.current = null;
     };
   }, []);
 
@@ -371,19 +362,11 @@ export function App() {
       }
 
       setScreenshotState(result.value.queue);
-      const projection = conversationProjectionRef.current;
-      if (projection) {
-        projection.replace(result.value.conversation);
-        setConversationSnapshot(projection.snapshot());
+      const hydration = conversationHydrationRef.current;
+      if (hydration) {
+        hydration.promote(result.value.conversation);
       } else {
-        conversationProjectionRef.current = createConversationProjection(result.value.conversation, async () => {
-          const snapshotResult = await window.fluely.conversation.getSnapshot();
-          if (!snapshotResult.ok) {
-            throw new Error(snapshotResult.error.message);
-          }
-          return snapshotResult.value;
-        });
-        setConversationSnapshot(conversationProjectionRef.current.snapshot());
+        setConversationSnapshot(result.value.conversation);
       }
       if (result.value.analysis) {
         setAnalysisState(result.value.analysis);

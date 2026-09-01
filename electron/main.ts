@@ -427,15 +427,6 @@ async function initializeServices(window: BrowserWindow): Promise<void> {
       },
       screenshots: {
         getState: () => screenshots.getState(),
-        capture: () => captureCurrentWindow(),
-        delete: (id) => screenshots.delete(id).catch((error) => {
-          notifyScreenshotState();
-          throw error;
-        }),
-        clear: () => screenshots.clear().catch((error) => {
-          notifyScreenshotState();
-          throw error;
-        }),
       },
       analysis,
       codex: {
@@ -478,7 +469,6 @@ async function initializeServices(window: BrowserWindow): Promise<void> {
           action: "Restart Fluely and try again.",
         },
       },
-      notifyScreenshotState,
       notifyAnalysisState,
       notifyConversationEvent,
       getAppStatus,

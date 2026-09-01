@@ -272,8 +272,8 @@ test("settings updates refresh the next analysis provider call without changing 
     intent: "answer",
     fast: false,
   };
-  const first = analysis.start(request);
-  assert.equal(first.status, "running");
+  await analysis.start(request);
+  assert.equal(analysis.getState().status, "running");
   await firstProviderStarted;
 
   const updated = await registrations.get("settings:update")({}, {
@@ -290,8 +290,8 @@ test("settings updates refresh the next analysis provider call without changing 
 
   releaseFirst();
   await analysis.whenIdle();
-  const second = analysis.start(request);
-  assert.equal(second.status, "running");
+  await analysis.start(request);
+  assert.equal(analysis.getState().status, "running");
   await analysis.whenIdle();
 
   assert.equal(calls.length, 2);

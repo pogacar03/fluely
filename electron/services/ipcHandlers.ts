@@ -15,16 +15,15 @@ import type {
   WorkspaceCommandResult,
   WindowSettings,
 } from "../../src/shared/ipc";
-import { createConversationSnapshot } from "../../src/shared/conversation";
 import type {
   ConversationEvent,
+  ConversationMessage,
   ConversationPort,
   ConversationSnapshot,
 } from "../../src/shared/conversation";
 import {
   createRequestIdDeduper,
 } from "../../src/shared/context-queue";
-import type { ContextScreenshot } from "../../src/shared/context-queue";
 import { normalizeSettingsPatch, validateSettingsPatch } from "./settings-core";
 
 export interface IpcMainAdapter {
@@ -44,9 +43,6 @@ export interface ShortcutHandlerService {
 
 export interface ScreenshotHandlerService {
   getState(): ScreenshotState;
-  capture(): Promise<ContextScreenshot>;
-  delete(id: string): Promise<ScreenshotState>;
-  clear(): Promise<ScreenshotState>;
 }
 
 export interface AnalysisHandlerService {
@@ -99,7 +95,6 @@ export interface IpcHandlerDependencies {
   applyOpacity?: (opacity: number) => void | Promise<void>;
   applyWindowOpacity?: (opacity: number) => void | Promise<void>;
   applyShortcuts?: (shortcuts: ShortcutSettings) => IpcResult<ShortcutStatus> | void;
-  notifyScreenshotState?: (state: ScreenshotState) => void;
   notifyAnalysisState?: (event: AnalysisStateChangedEvent) => void;
   notifyConversationEvent?: (event: ConversationEvent) => void;
   getAppStatus(): AppStatus;
@@ -111,6 +106,10 @@ function success<T>(value: T): IpcResult<T> {
 
 function failure<T>(error: IpcError): IpcResult<T> {
   return { ok: false, error };
+}
+
+function serializeIpcResult<T>(result: IpcResult<T>): IpcResult<T> {
+  return result.ok ? result : failure(safeIpcError(result.error.code, result.error));
 }
 
 function shortcutApplicationFailure(): IpcError {
@@ -131,7 +130,16 @@ function applyShortcutSettings(
 
   try {
     const result = applyShortcuts(shortcuts);
-    return result && !result.ok ? result.error : null;
+    return isRecord(result) && result.ok === false && isRecord(result.error)
+      ? safeIpcError(
+        typeof result.error.code === "string" ? result.error.code as IpcError["code"] : "INTERNAL_ERROR",
+        {
+          code: "INTERNAL_ERROR",
+          message: "Fluely could not register the shortcuts.",
+          action: "Restart Fluely and try again.",
+        },
+      )
+      : null;
   } catch {
     return shortcutApplicationFailure();
   }
@@ -168,23 +176,6 @@ const SCREENSHOT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-
 const MAX_ANALYSIS_PROMPT_LENGTH = 3000;
 const MIN_WINDOW_OPACITY = 0.35;
 const MAX_WINDOW_OPACITY = 1;
-const SCREENSHOT_ERROR_CODES = new Set<IpcError["code"]>([
-  "SCREEN_CAPTURE_DENIED",
-  "SCREEN_CAPTURE_RESTRICTED",
-  "SCREEN_CAPTURE_PERMISSION_REQUIRED",
-  "SCREEN_CAPTURE_FAILED",
-  "CAPTURE_IN_PROGRESS",
-  "SCREENSHOT_NOT_FOUND",
-]);
-
-function invalidScreenshotId(): IpcError {
-  return {
-    code: "INVALID_ARGUMENT",
-    message: "Screenshot ID must be a valid managed screenshot identifier.",
-    action: "Refresh the screenshot queue and try again.",
-  };
-}
-
 function isScreenshotId(input: unknown): input is string {
   return typeof input === "string" && SCREENSHOT_ID_PATTERN.test(input);
 }
@@ -208,30 +199,92 @@ const IPC_ERROR_CODES = new Set<IpcError["code"]>([
   "INTERNAL_ERROR",
 ]);
 
+/**
+ * IPC is a trust boundary. Main-process errors may contain paths, command
+ * lines, tokens, or provider diagnostics, so only this fixed copy is allowed
+ * to cross into renderer/phone code. The original error remains available to
+ * the main-process caller for diagnostics before it is serialized here.
+ */
+const SAFE_IPC_ERROR_COPY: Record<IpcError["code"], Pick<IpcError, "message" | "action">> = {
+  INVALID_ARGUMENT: {
+    message: "Fluely received an invalid request.",
+    action: "Check the request and try again.",
+  },
+  SETTINGS_READ_FAILED: {
+    message: "Fluely could not read its settings.",
+    action: "Restart Fluely and try again.",
+  },
+  SETTINGS_WRITE_FAILED: {
+    message: "Fluely could not save that setting.",
+    action: "Check the Fluely data directory permissions and try again.",
+  },
+  SHORTCUT_CONFLICT: {
+    message: "Fluely could not register that shortcut.",
+    action: "Choose another shortcut and try again.",
+  },
+  SCREEN_CAPTURE_DENIED: {
+    message: "Screen capture permission was denied.",
+    action: "Allow screen capture for Fluely and try again.",
+  },
+  SCREEN_CAPTURE_RESTRICTED: {
+    message: "Screen capture is restricted on this device.",
+    action: "Check the device privacy settings and try again.",
+  },
+  SCREEN_CAPTURE_PERMISSION_REQUIRED: {
+    message: "Fluely needs screen capture permission.",
+    action: "Allow screen capture for Fluely and try again.",
+  },
+  SCREEN_CAPTURE_FAILED: {
+    message: "Fluely could not capture the selected display.",
+    action: "Check that a display is available and try again.",
+  },
+  CAPTURE_IN_PROGRESS: {
+    message: "A screen capture is already in progress.",
+    action: "Wait for the current capture to finish and try again.",
+  },
+  SCREENSHOT_NOT_FOUND: {
+    message: "That screenshot is no longer available.",
+    action: "Refresh the screenshot queue and try again.",
+  },
+  ANALYSIS_IN_PROGRESS: {
+    message: "An analysis request is already in progress.",
+    action: "Wait for it to finish or cancel it before starting another.",
+  },
+  CLI_START_TIMEOUT: {
+    message: "Fluely could not start the Codex analysis in time.",
+    action: "Check the Codex CLI path and try again.",
+  },
+  CLI_IDLE_TIMEOUT: {
+    message: "The Codex analysis stopped responding.",
+    action: "Try the analysis again.",
+  },
+  CLI_HARD_TIMEOUT: {
+    message: "The Codex analysis exceeded its time limit.",
+    action: "Try a shorter request or run the analysis again.",
+  },
+  ANALYSIS_FAILED: {
+    message: "Fluely could not complete the analysis request.",
+    action: "Retry the analysis request.",
+  },
+  INTERNAL_ERROR: {
+    message: "Fluely could not complete that request in its main process.",
+    action: "Restart Fluely and try again.",
+  },
+};
+
+function safeIpcError(code: IpcError["code"], fallback: IpcError): IpcError {
+  const safeCode = IPC_ERROR_CODES.has(code) ? code : fallback.code;
+  return {
+    code: safeCode,
+    ...SAFE_IPC_ERROR_COPY[safeCode],
+  };
+}
+
 function errorFromUnknown(value: unknown, fallback: IpcError): IpcError {
-  if (isRecord(value) && typeof value.code === "string" && IPC_ERROR_CODES.has(value.code as IpcError["code"]) &&
-    typeof value.message === "string" && typeof value.action === "string") {
-    return {
-      code: value.code as IpcError["code"],
-      message: value.message,
-      action: value.action,
-    };
-  }
-
-  if (value instanceof Error && value.message.trim()) {
-    return { ...fallback, message: value.message.trim() };
-  }
-
-  if (isRecord(value) && typeof value.message === "string" && value.message.trim() &&
-    typeof value.action === "string" && value.action.trim()) {
-    return {
-      ...fallback,
-      message: value.message.trim(),
-      action: value.action.trim(),
-    };
-  }
-
-  return fallback;
+  const candidateCode = isRecord(value) && typeof value.code === "string"
+    ? value.code as IpcError["code"]
+    : fallback.code;
+  return safeIpcError(candidateCode, fallback);
 }
 
 function internalFailure(action: string): IpcError {
@@ -292,6 +345,72 @@ function serializeAnalysisEvent(value: unknown): AnalysisStateChangedEvent {
   return { ...serializeAnalysisState(value), event };
 }
 
+function serializeConversationMessage(message: ConversationMessage): ConversationMessage {
+  const serialized: ConversationMessage = {
+    ...message,
+    attachmentIds: [...message.attachmentIds],
+  };
+  if (message.error) {
+    const error = errorFromUnknown(message.error, {
+      code: "ANALYSIS_FAILED",
+      message: "Analysis failed.",
+      action: "Retry the analysis request.",
+    });
+    serialized.error = { code: error.code, message: error.message };
+  }
+  return serialized;
+}
+
+function serializeConversationSnapshot(value: unknown): ConversationSnapshot {
+  const candidate = isRecord(value) ? value : {};
+  const sessionId = typeof candidate.sessionId === "string" ? candidate.sessionId : "unknown";
+  const revision = typeof candidate.revision === "number" && Number.isSafeInteger(candidate.revision) && candidate.revision >= 0
+    ? candidate.revision
+    : 0;
+  const messages = Array.isArray(candidate.messages)
+    ? candidate.messages.filter(isRecord).map((message) => serializeConversationMessage(message as unknown as ConversationMessage))
+    : [];
+  const attachments = Array.isArray(candidate.attachments)
+    ? candidate.attachments.filter(isRecord).map((attachment) => ({ ...attachment } as unknown as ConversationSnapshot["attachments"][number]))
+    : [];
+  return {
+    sessionId,
+    revision,
+    messages,
+    attachments,
+    ...(typeof candidate.activeMessageId === "string" ? { activeMessageId: candidate.activeMessageId } : {}),
+  };
+}
+
+function serializeConversationEvent(event: ConversationEvent): ConversationEvent {
+  if (event.type === "attachment-added") {
+    return { ...event, attachment: { ...event.attachment } };
+  }
+  if (event.type === "message-added" || event.type === "message-updated") {
+    return { ...event, message: serializeConversationMessage(event.message) };
+  }
+  if (event.type === "cleared") {
+    return { ...event, snapshot: serializeConversationSnapshot(event.snapshot) };
+  }
+  return {
+    ...event,
+    messageIds: [...event.messageIds],
+    attachmentIds: [...event.attachmentIds],
+    snapshot: serializeConversationSnapshot(event.snapshot),
+  };
+}
+
+function serializeWorkspaceResult(value: WorkspaceCommandResult): WorkspaceCommandResult {
+  return {
+    queue: {
+      ...value.queue,
+      items: value.queue.items.map((item) => ({ ...item })),
+    },
+    conversation: serializeConversationSnapshot(value.conversation),
+    ...(value.analysis ? { analysis: serializeAnalysisState(value.analysis) } : {}),
+  };
+}
+
 function serializeCodexStatus(value: unknown, configuredPath: string): CodexStatus {
   const candidate = isRecord(value) ? value : {};
   const available = typeof candidate.available === "boolean"
@@ -334,24 +453,6 @@ function configuredCodex(settings: SettingsHandlerService): { path: string; time
   } catch {
     return { path: "codex", timeoutMs: 120000 };
   }
-}
-
-function screenshotFailure(error: unknown): IpcError {
-  if (typeof error === "object" && error !== null) {
-    const candidate = error as Record<string, unknown>;
-    if (typeof candidate.code === "string" &&
-      SCREENSHOT_ERROR_CODES.has(candidate.code as IpcError["code"]) &&
-      typeof candidate.message === "string" &&
-      typeof candidate.action === "string") {
-      return candidate as unknown as IpcError;
-    }
-  }
-
-  return {
-    code: "SCREEN_CAPTURE_FAILED",
-    message: "Fluely could not capture the selected display.",
-    action: "Check that a display is available and try again.",
-  };
 }
 
 const MAX_WORKSPACE_REQUEST_ID_LENGTH = 128;
@@ -411,51 +512,6 @@ function noCanonicalWorkspaceRouter(): IpcError {
   };
 }
 
-function createDefaultWorkspaceHandler(
-  screenshots: ScreenshotHandlerService,
-  conversation: ConversationHandlerService | undefined,
-): WorkspaceHandlerService {
-  const fallbackConversation = () => conversation?.snapshot() ?? createConversationSnapshot("legacy");
-  const result = (queue: ScreenshotState, analysisState?: AnalysisState): WorkspaceCommandResult => ({
-    queue,
-    conversation: fallbackConversation(),
-    ...(analysisState ? { analysis: serializeAnalysisState(analysisState) } : {}),
-  });
-
-  return {
-    async execute(command): Promise<WorkspaceCommandResult> {
-      switch (command.type) {
-        case "capture":
-          await screenshots.capture();
-          return result(screenshots.getState());
-        case "remove":
-          return result(await screenshots.delete(command.screenshotId));
-        case "clear-queue":
-          return result(await screenshots.clear());
-        case "clear-conversation":
-          throw noCanonicalWorkspaceRouter();
-        case "cancel":
-          throw noCanonicalWorkspaceRouter();
-        case "send":
-        case "capture-and-send": {
-          throw noCanonicalWorkspaceRouter();
-        }
-      }
-    },
-  };
-}
-
-function emitScreenshotState(
-  notifyScreenshotState: ((state: ScreenshotState) => void) | undefined,
-  screenshots: ScreenshotHandlerService,
-): void {
-  try {
-    notifyScreenshotState?.(screenshots.getState());
-  } catch {
-    // Renderer notification failures must not change the IPC mutation result.
-  }
-}
-
 export function registerIpcHandlers({
   ipcMain,
   settings,
@@ -474,7 +530,6 @@ export function registerIpcHandlers({
   applyOpacity,
   applyWindowOpacity,
   applyShortcuts,
-  notifyScreenshotState,
   notifyAnalysisState,
   notifyConversationEvent,
   workspace,
@@ -485,7 +540,11 @@ export function registerIpcHandlers({
   const codexHandler = codex ?? codexService ?? codexCli;
   const windowHandler = window ?? windowTarget ?? browserWindow;
   const applyWindowOpacityHandler = applyOpacity ?? applyWindowOpacity;
-  const workspaceHandler = workspace ?? createDefaultWorkspaceHandler(screenshots, conversation);
+  const workspaceHandler = workspace ?? {
+    execute: async (): Promise<WorkspaceCommandResult> => {
+      throw noCanonicalWorkspaceRouter();
+    },
+  };
   const workspaceRequestDeduper = createRequestIdDeduper<IpcResult<WorkspaceCommandResult>>();
   ipcMain.handle("settings:get", () => success(settings.get()));
 
@@ -517,7 +576,7 @@ export function registerIpcHandlers({
         return failure<FluelySettings>(shortcutError);
       }
     }
-    return result;
+    return serializeIpcResult(result);
   });
 
   ipcMain.handle("settings:reset", async () => {
@@ -553,7 +612,7 @@ export function registerIpcHandlers({
         return failure<FluelySettings>(shortcutError);
       }
     }
-    return result;
+    return serializeIpcResult(result);
   });
   ipcMain.handle("shortcuts:get", () => success(shortcuts.getStatus()));
 
@@ -562,44 +621,10 @@ export function registerIpcHandlers({
       return failure<ShortcutStatus>(invalidShortcutPayload());
     }
 
-    return shortcuts.update(payload);
+    return serializeIpcResult(shortcuts.update(payload));
   });
 
   ipcMain.handle("screenshots:get", () => success(screenshots.getState()));
-
-  ipcMain.handle("screenshots:capture", async () => {
-    try {
-      return success(await screenshots.capture());
-    } catch (error) {
-      return failure<ContextScreenshot>(screenshotFailure(error));
-    } finally {
-      emitScreenshotState(notifyScreenshotState, screenshots);
-    }
-  });
-
-  ipcMain.handle("screenshots:delete", async (_event, payload) => {
-    if (!isScreenshotId(payload)) {
-      return failure<ScreenshotState>(invalidScreenshotId());
-    }
-
-    try {
-      return success(await screenshots.delete(payload));
-    } catch (error) {
-      return failure<ScreenshotState>(screenshotFailure(error));
-    } finally {
-      emitScreenshotState(notifyScreenshotState, screenshots);
-    }
-  });
-
-  ipcMain.handle("screenshots:clear", async () => {
-    try {
-      return success(await screenshots.clear());
-    } catch (error) {
-      return failure<ScreenshotState>(screenshotFailure(error));
-    } finally {
-      emitScreenshotState(notifyScreenshotState, screenshots);
-    }
-  });
 
   ipcMain.handle("workspace:execute", async (_event, payload) => {
     const normalized = normalizeWorkspaceCommand(payload);
@@ -614,7 +639,7 @@ export function registerIpcHandlers({
         JSON.stringify(command),
         async () => {
           try {
-            return success(await workspaceHandler.execute(command, "desktop"));
+            return success(serializeWorkspaceResult(await workspaceHandler.execute(command, "desktop")));
           } catch (error) {
             return failure<WorkspaceCommandResult>(errorFromUnknown(error, {
               code: "INTERNAL_ERROR",
@@ -634,7 +659,7 @@ export function registerIpcHandlers({
   if (conversation) {
     ipcMain.handle("conversation:get-snapshot", () => {
       try {
-        return success(conversation.snapshot());
+        return success(serializeConversationSnapshot(conversation.snapshot()));
       } catch (error) {
         return failure<ConversationSnapshot>(errorFromUnknown(error, {
           code: "INTERNAL_ERROR",
@@ -648,7 +673,7 @@ export function registerIpcHandlers({
       try {
         conversation.subscribe((event) => {
           try {
-            notifyConversationEvent(event);
+            notifyConversationEvent(serializeConversationEvent(event));
           } catch {
             // Renderer teardown must not break canonical conversation writes.
           }
@@ -747,7 +772,7 @@ export function registerIpcHandlers({
       try {
         const result = await settings.update({ window: { opacity } });
         if (!result.ok) {
-          return failure<WindowSettings>(result.error);
+          return failure<WindowSettings>(safeIpcError(result.error.code, result.error));
         }
         const apply = applyWindowOpacityHandler ?? windowHandler?.setOpacity;
         if (apply) {

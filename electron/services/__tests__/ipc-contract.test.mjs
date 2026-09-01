@@ -52,13 +52,7 @@ test("preload exposes only the documented Fluely API groups", async () => {
     "onStateChanged",
   ]);
   assert.deepEqual(Object.keys(exposedApi.codex).sort(), ["getStatus", "validate"]);
-  assert.deepEqual(Object.keys(exposedApi.screenshots).sort(), [
-    "capture",
-    "clear",
-    "delete",
-    "get",
-    "onStateChanged",
-  ]);
+  assert.deepEqual(Object.keys(exposedApi.screenshots).sort(), ["get", "onStateChanged"]);
   assert.deepEqual(Object.keys(exposedApi.window).sort(), ["hide", "setOpacity"]);
   assert.deepEqual(Object.keys(exposedApi.workspace).sort(), ["execute"]);
   assert.deepEqual(Object.keys(exposedApi.conversation).sort(), ["getSnapshot", "onEvent"]);
@@ -74,9 +68,9 @@ test("preload exposes only the documented Fluely API groups", async () => {
   await exposedApi.window.setOpacity(0.8);
   await exposedApi.window.hide();
   await exposedApi.screenshots.get();
-  await exposedApi.screenshots.capture();
-  await exposedApi.screenshots.delete("11111111-1111-4111-8111-111111111111");
-  await exposedApi.screenshots.clear();
+  assert.equal(exposedApi.screenshots.capture, undefined);
+  assert.equal(exposedApi.screenshots.delete, undefined);
+  assert.equal(exposedApi.screenshots.clear, undefined);
   await exposedApi.workspace.execute({ type: "capture", requestId: "workspace-1" });
   await exposedApi.conversation.getSnapshot();
   let receivedState;
@@ -135,9 +129,6 @@ test("preload exposes only the documented Fluely API groups", async () => {
     "window:set-opacity",
     "window:hide",
     "screenshots:get",
-    "screenshots:capture",
-    "screenshots:delete",
-    "screenshots:clear",
     "workspace:execute",
     "conversation:get-snapshot",
   ]);
@@ -214,9 +205,6 @@ test("main IPC handlers register only the documented channels", () => {
     "codex:get-status",
     "codex:validate",
     "conversation:get-snapshot",
-    "screenshots:capture",
-    "screenshots:clear",
-    "screenshots:delete",
     "screenshots:get",
     "settings:get",
     "settings:reset",
@@ -264,31 +252,19 @@ test("window hide IPC invokes only the injected narrow hide adapter", async () =
   assert.equal(hideCalls, 1);
 });
 
-test("main IPC rejects unsafe screenshot IDs before calling the service", async () => {
+test("main IPC does not register renderer-facing screenshot mutation handlers", () => {
   const registrations = new Map();
   const ipcMain = {
     handle(channel, handler) {
       registrations.set(channel, handler);
     },
   };
-  const deletedIds = [];
+  let mutationCalls = 0;
   const screenshots = {
     getState: () => ({ items: [], capturing: false, permission: "unavailable" }),
-    capture: async () => ({
-      id: "22222222-2222-4222-8222-222222222222",
-      createdAt: "2026-08-30T00:00:00.000Z",
-      width: 1920,
-      height: 1080,
-    }),
-    delete: async (id) => {
-      deletedIds.push(id);
-      throw {
-        code: "SCREENSHOT_NOT_FOUND",
-        message: "That screenshot is no longer in the queue.",
-        action: "Refresh the screenshot queue and try again.",
-      };
-    },
-    clear: async () => ({ items: [], capturing: false, permission: "unavailable" }),
+    capture: async () => { mutationCalls += 1; throw new Error("direct capture"); },
+    delete: async () => { mutationCalls += 1; throw new Error("direct delete"); },
+    clear: async () => { mutationCalls += 1; throw new Error("direct clear"); },
   };
 
   registerIpcHandlers({
@@ -306,15 +282,11 @@ test("main IPC rejects unsafe screenshot IDs before calling the service", async 
     getAppStatus: () => ({ name: "Fluely", version: "0.1.0", platform: "darwin", visible: true }),
   });
 
-  const unsafe = await registrations.get("screenshots:delete")({}, "../settings.json");
-  assert.equal(unsafe.ok, false);
-  assert.equal(unsafe.error.code, "INVALID_ARGUMENT");
-  assert.deepEqual(deletedIds, []);
-
-  const unknown = await registrations.get("screenshots:delete")({}, "33333333-3333-4333-8333-333333333333");
-  assert.equal(unknown.ok, false);
-  assert.equal(unknown.error.code, "SCREENSHOT_NOT_FOUND");
-  assert.deepEqual(deletedIds, ["33333333-3333-4333-8333-333333333333"]);
+  assert.equal(registrations.has("screenshots:capture"), false);
+  assert.equal(registrations.has("screenshots:delete"), false);
+  assert.equal(registrations.has("screenshots:clear"), false);
+  assert.equal(registrations.has("screenshots:get"), true);
+  assert.equal(mutationCalls, 0);
 });
 
 test("settings reset reapplies the default capture protection state", async () => {
@@ -511,16 +483,9 @@ test("settings reset returns shortcut registration failure instead of saved succ
   assert.equal(result.error.code, "INTERNAL_ERROR");
 });
 
-test("screenshot mutation handlers notify complete state snapshots on success and failure", async () => {
+test("workspace screenshot mutations fail closed when the canonical router is absent", async () => {
   const registrations = new Map();
-  const notifications = [];
-  let state = { items: [], capturing: false, permission: "granted" };
-  const item = {
-    id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-    createdAt: "2026-08-30T00:00:00.000Z",
-    width: 1920,
-    height: 1080,
-  };
+  let mutationCalls = 0;
 
   registerIpcHandlers({
     ipcMain: {
@@ -538,31 +503,117 @@ test("screenshot mutation handlers notify complete state snapshots on success an
       update: () => ({ ok: true, value: {} }),
     },
     screenshots: {
-      getState: () => state,
-      capture: async () => {
-        state = { items: [item], capturing: false, permission: "granted" };
-        return item;
-      },
-      delete: async () => {
-        state = { items: [], capturing: false, permission: "granted" };
-        return state;
-      },
-      clear: async () => {
-        throw { code: "SCREEN_CAPTURE_FAILED", message: "clear failed", action: "retry" };
-      },
+      getState: () => ({ items: [], capturing: false, permission: "granted" }),
+      capture: async () => { mutationCalls += 1; throw new Error("direct capture"); },
+      delete: async () => { mutationCalls += 1; throw new Error("direct delete"); },
+      clear: async () => { mutationCalls += 1; throw new Error("direct clear"); },
     },
-    notifyScreenshotState: (nextState) => notifications.push(nextState),
     getAppStatus: () => ({ name: "Fluely", version: "0.1.0", platform: "linux", visible: true }),
   });
 
-  await registrations.get("screenshots:capture")();
-  await registrations.get("screenshots:delete")({}, item.id);
-  const clearResult = await registrations.get("screenshots:clear")();
-
-  assert.equal(clearResult.ok, false);
-  assert.equal(notifications.length, 3);
-  for (const notification of notifications) {
-    assert.deepEqual(Object.keys(notification).sort(), ["capturing", "items", "permission"]);
+  for (const [type, extra] of [
+    ["capture", {}],
+    ["remove", { screenshotId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }],
+    ["clear-queue", {}],
+  ]) {
+    const result = await registrations.get("workspace:execute")({}, {
+      type,
+      requestId: `without-router-${type}`,
+      ...extra,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "INTERNAL_ERROR");
   }
-  assert.equal(notifications.at(-1).capturing, false);
+  assert.equal(mutationCalls, 0);
+});
+
+test("renderer-facing IPC errors sanitize filesystem paths, tokens, and commands", async () => {
+  const registrations = new Map();
+  const analysisNotifications = [];
+  const conversationNotifications = [];
+  let analysisListener;
+  let conversationListener;
+  const raw = "ENOENT: open /Users/yu/private/session/token=super-secret codex --image";
+
+  registerIpcHandlers({
+    ipcMain: {
+      handle(channel, handler) {
+        registrations.set(channel, handler);
+      },
+    },
+    settings: {
+      get: () => ({ shortcuts: {}, window: {}, privacy: {} }),
+      update: async () => ({ ok: true, value: {} }),
+      reset: async () => ({ ok: true, value: {} }),
+    },
+    shortcuts: {
+      getStatus: () => ({ entries: [], updatedAt: new Date(0).toISOString() }),
+      update: () => ({ ok: true, value: {} }),
+    },
+    screenshots: {
+      getState: () => ({ items: [], capturing: false, permission: "unavailable" }),
+      capture: async () => { throw new Error(raw); },
+      delete: async () => ({ items: [], capturing: false, permission: "unavailable" }),
+      clear: async () => ({ items: [], capturing: false, permission: "unavailable" }),
+    },
+    analysis: {
+      getState: () => ({ status: "idle" }),
+      onStateChanged: (listener) => {
+        analysisListener = listener;
+        return () => undefined;
+      },
+    },
+    conversation: {
+      snapshot: () => ({ sessionId: "session", revision: 0, messages: [], attachments: [] }),
+      subscribe: (listener) => {
+        conversationListener = listener;
+        return () => undefined;
+      },
+    },
+    workspace: {
+      execute: async () => { throw new Error(raw); },
+    },
+    notifyAnalysisState: (event) => analysisNotifications.push(event),
+    notifyConversationEvent: (event) => conversationNotifications.push(event),
+    getAppStatus: () => ({ name: "Fluely", version: "0.1.0", platform: "darwin", visible: true }),
+  });
+
+  const workspaceResult = await registrations.get("workspace:execute")({}, {
+    type: "send",
+    requestId: "sanitize-error",
+    prompt: "Question",
+  });
+  assert.equal(workspaceResult.ok, false);
+  assert.equal(workspaceResult.error.code, "INTERNAL_ERROR");
+  assert.doesNotMatch(JSON.stringify(workspaceResult), /\/Users\/yu\/private|super-secret|codex --image/);
+
+  analysisListener({
+    event: "error",
+    status: "error",
+    text: "",
+    model: "model",
+    screenshotIds: [],
+    startedAt: null,
+    updatedAt: "2026-08-31T00:00:00.000Z",
+    completedAt: "2026-08-31T00:00:00.000Z",
+    error: { code: "ANALYSIS_FAILED", message: raw, action: raw },
+  });
+  conversationListener({
+    type: "message-updated",
+    revision: 1,
+    activeMessageId: null,
+    message: {
+      id: "message-1",
+      sequence: 1,
+      role: "assistant",
+      text: "",
+      attachmentIds: [],
+      status: "error",
+      createdAt: 1,
+      error: { code: "ANALYSIS_FAILED", message: raw },
+    },
+  });
+
+  assert.doesNotMatch(JSON.stringify(analysisNotifications), /\/Users\/yu\/private|super-secret|codex --image/);
+  assert.doesNotMatch(JSON.stringify(conversationNotifications), /\/Users\/yu\/private|super-secret|codex --image/);
 });

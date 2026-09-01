@@ -11,7 +11,6 @@ import type {
   FluelySettings,
   IpcResult,
   SettingsPatch,
-  ScreenshotItem,
   ScreenshotStateListener,
   ScreenshotState,
   ShortcutSettings,
@@ -51,9 +50,6 @@ export function exposeFluelyApi(
     },
     screenshots: {
       get: () => invoke<ScreenshotState>(ipcRenderer, "screenshots:get"),
-      capture: () => invoke<ScreenshotItem>(ipcRenderer, "screenshots:capture"),
-      delete: (id: string) => invoke<ScreenshotState>(ipcRenderer, "screenshots:delete", id),
-      clear: () => invoke<ScreenshotState>(ipcRenderer, "screenshots:clear"),
       onStateChanged: (listener: ScreenshotStateListener) => {
         if (!ipcRenderer.on || !ipcRenderer.removeListener) {
           return () => undefined;

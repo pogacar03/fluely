@@ -8,9 +8,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const handlersPath = path.resolve(__dirname, "../../../dist-electron/electron/services/ipcHandlers.js");
 const screenshotServicePath = path.resolve(__dirname, "../../../dist-electron/electron/services/ScreenshotService.js");
+const commandRouterPath = path.resolve(__dirname, "../../../dist-electron/electron/services/CommandRouter.js");
 const contextMediaPath = path.resolve(__dirname, "../../../dist-electron/electron/services/context-media.js");
 const { registerIpcHandlers } = await import(pathToFileURL(handlersPath).href);
 const { ScreenshotService } = await import(pathToFileURL(screenshotServicePath).href);
+const { CommandRouter } = await import(pathToFileURL(commandRouterPath).href);
 let createContextMediaHandler;
 try {
   ({ createContextMediaHandler } = await import(pathToFileURL(contextMediaPath).href));
@@ -31,6 +33,10 @@ function idleAnalysisState() {
     updatedAt: "2026-08-31T00:00:00.000Z",
     completedAt: null,
   };
+}
+
+function emptyConversationSnapshot() {
+  return { sessionId: "session", revision: 0, messages: [], attachments: [] };
 }
 
 test("real workspace capture serves an opaque private preview and clear-queue makes it 404", async () => {
@@ -76,6 +82,45 @@ test("real workspace capture serves an opaque private preview and clear-queue ma
         getState: idleAnalysisState,
         onStateChanged: () => () => undefined,
       },
+      workspace: new CommandRouter({
+        screenshots: {
+          getState: () => service.getState(),
+          getManagedPaths: (ids) => service.getManagedPaths(ids),
+          capture: () => service.capture(),
+          delete: (id) => service.delete(id),
+          clear: () => service.clear(),
+        },
+        attachments: {
+          addFromScreenshot: async () => {
+            throw new Error("send is not part of this integration test");
+          },
+          deleteUnreferenced: async () => [],
+        },
+        conversation: {
+          snapshot: emptyConversationSnapshot,
+          subscribe: () => () => undefined,
+          addAttachment: (attachment) => attachment,
+          addAttachmentsAndStartTurn: () => {
+            throw new Error("send is not part of this integration test");
+          },
+          startTurn: () => {
+            throw new Error("send is not part of this integration test");
+          },
+          updateAssistant: () => {
+            throw new Error("send is not part of this integration test");
+          },
+          finishAssistant: () => {
+            throw new Error("send is not part of this integration test");
+          },
+          clear: async () => undefined,
+        },
+        analysis: {
+          start: async () => undefined,
+          cancel: async () => idleAnalysisState(),
+          getState: idleAnalysisState,
+          onStateChanged: () => () => undefined,
+        },
+      }),
       getAppStatus: () => ({ name: "Fluely", version: "0.1.0", platform: "linux", visible: true }),
     });
     const execute = registrations.get("workspace:execute");
