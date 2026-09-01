@@ -1,4 +1,4 @@
-import type { ContextScreenshot } from "./context-queue";
+import { contextPreviewUrl, type ContextScreenshot } from "./context-queue";
 import type {
   AnalysisState,
   ScreenshotState,
@@ -46,6 +46,8 @@ export interface ConversationSnapshot {
 export type ConversationEventListener = (event: ConversationEvent) => void;
 
 export interface SessionProjectionSnapshot {
+  /** Monotonic across both conversation and working-queue projection events. */
+  revision: number;
   conversation: ConversationSnapshot;
   queue: ContextScreenshot[];
 }
@@ -53,6 +55,26 @@ export interface SessionProjectionSnapshot {
 export interface ConversationPort {
   snapshot(): ConversationSnapshot;
   subscribe(listener: ConversationEventListener): () => void;
+}
+
+export type SessionProjectionEvent =
+  | {
+    type: "conversation";
+    revision: number;
+    event: ConversationEvent;
+  }
+  | {
+    type: "queue-changed";
+    revision: number;
+    queue: ContextScreenshot[];
+  };
+
+export type SessionProjectionEventListener = (event: SessionProjectionEvent) => void;
+
+/** Stable Plan B read/event boundary; it does not expose Electron services or paths. */
+export interface SessionProjectionPort {
+  getSnapshot(): SessionProjectionSnapshot;
+  subscribe(listener: SessionProjectionEventListener): () => void;
 }
 
 export interface ConversationProjection {
@@ -105,6 +127,104 @@ export type ConversationEvent =
     activeMessageId: null;
     snapshot: ConversationSnapshot;
   };
+
+const PROJECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+function cloneProjectionScreenshot(item: ContextScreenshot): ContextScreenshot | null {
+  if (!item || typeof item.id !== "string" || !PROJECTION_ID_PATTERN.test(item.id)) {
+    return null;
+  }
+
+  return {
+    id: item.id,
+    capturedAt: item.capturedAt,
+    width: item.width,
+    height: item.height,
+    mimeType: "image/png",
+    previewUrl: contextPreviewUrl(item.id),
+  };
+}
+
+function cloneProjectionQueue(items: readonly ContextScreenshot[]): ContextScreenshot[] {
+  return items
+    .map(cloneProjectionScreenshot)
+    .filter((item): item is ContextScreenshot => item !== null);
+}
+
+export function cloneSessionProjectionSnapshot(snapshot: SessionProjectionSnapshot): SessionProjectionSnapshot {
+  return {
+    revision: snapshot.revision,
+    conversation: cloneConversationSnapshot(snapshot.conversation),
+    queue: cloneProjectionQueue(snapshot.queue),
+  };
+}
+
+export function cloneSessionProjectionEvent(event: SessionProjectionEvent): SessionProjectionEvent {
+  if (event.type === "conversation") {
+    return {
+      type: "conversation",
+      revision: event.revision,
+      event: cloneConversationEvent(event.event),
+    };
+  }
+
+  return {
+    type: "queue-changed",
+    revision: event.revision,
+    queue: cloneProjectionQueue(event.queue),
+  };
+}
+
+function cloneConversationEvent(event: ConversationEvent): ConversationEvent {
+  if (event.type === "attachment-added") {
+    return { ...event, attachment: cloneAttachment(event.attachment) };
+  }
+  if (event.type === "message-added" || event.type === "message-updated") {
+    return { ...event, message: cloneMessage(event.message) };
+  }
+  if (event.type === "cleared") {
+    return { ...event, snapshot: cloneConversationSnapshot(event.snapshot) };
+  }
+  return {
+    ...event,
+    messageIds: [...event.messageIds],
+    attachmentIds: [...event.attachmentIds],
+    snapshot: cloneConversationSnapshot(event.snapshot),
+  };
+}
+
+export type SessionProjectionEventApplicationStatus = "applied" | "duplicate" | "gap";
+
+export interface SessionProjectionEventApplication {
+  status: SessionProjectionEventApplicationStatus;
+  snapshot: SessionProjectionSnapshot;
+}
+
+/** Applies one ordered projection event; a gap tells reconnecting clients to fetch a snapshot. */
+export function applySessionProjectionEvent(
+  current: SessionProjectionSnapshot,
+  event: SessionProjectionEvent,
+): SessionProjectionEventApplication {
+  const snapshot = cloneSessionProjectionSnapshot(current);
+  if (event.revision <= snapshot.revision) {
+    return { status: "duplicate", snapshot };
+  }
+  if (event.revision !== snapshot.revision + 1) {
+    return { status: "gap", snapshot };
+  }
+
+  if (event.type === "conversation") {
+    const conversation = applyConversationEvent(snapshot.conversation, event.event);
+    if (conversation.status === "gap") {
+      return { status: "gap", snapshot };
+    }
+    snapshot.conversation = conversation.snapshot;
+  } else {
+    snapshot.queue = cloneProjectionQueue(event.queue);
+  }
+  snapshot.revision = event.revision;
+  return { status: "applied", snapshot };
+}
 
 export type ConversationEventApplicationStatus = "applied" | "duplicate" | "gap";
 
