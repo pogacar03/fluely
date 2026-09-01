@@ -5,12 +5,13 @@ import type {
   FluelySettings,
   ScreenshotState,
 } from "../../shared/ipc";
+import type { ConversationSnapshot } from "../../shared/conversation";
 import {
   formatOpacityLabel,
   getQueueCount,
   getWorkspaceActionState,
 } from "../../shared/workspace-state";
-import { AnswerSurface } from "./AnswerSurface";
+import { Conversation } from "./Conversation";
 import { ContextQueue } from "./ContextQueue";
 import type { SetupNotice } from "./SetupView";
 
@@ -22,6 +23,7 @@ export interface WorkViewProps {
   settings: FluelySettings;
   screenshotState: ScreenshotState | null;
   analysisState: AnalysisState | null;
+  conversation: ConversationSnapshot | null;
   codexStatus: CodexStatus | null;
   notice?: SetupNotice | null;
   busy?: boolean;
@@ -50,6 +52,7 @@ export function WorkView({
   settings,
   screenshotState,
   analysisState,
+  conversation,
   codexStatus,
   notice,
   busy = false,
@@ -127,7 +130,7 @@ export function WorkView({
       )}
 
       <div className="work-content">
-        <AnswerSurface analysis={analysisState} codexStatus={codexStatus} />
+        <Conversation snapshot={conversation} />
         <ContextQueue
           screenshotState={screenshotState}
           disabled={disabled}

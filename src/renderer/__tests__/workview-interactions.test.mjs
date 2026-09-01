@@ -66,7 +66,7 @@ function analysisState(status = "idle", screenshotIds = []) {
   };
 }
 
-function createBackend({ initialAnalysisStatus = "idle", failedSends = 0, holdCapture = false } = {}) {
+function createBackend({ initialAnalysisStatus = "idle", failedSends = 0, holdCapture = false, conversationSnapshot } = {}) {
   const registrations = new Map();
   const calls = [];
   const analysisRequests = [];
@@ -86,6 +86,12 @@ function createBackend({ initialAnalysisStatus = "idle", failedSends = 0, holdCa
     shortcuts: { ...DEFAULT_SETTINGS.shortcuts },
     window: { ...DEFAULT_SETTINGS.window },
     privacy: { ...DEFAULT_SETTINGS.privacy },
+  };
+  const canonicalConversation = conversationSnapshot ?? {
+    sessionId: "session-renderer",
+    revision: 0,
+    messages: [],
+    attachments: [],
   };
 
   const screenshots = {
@@ -135,6 +141,58 @@ function createBackend({ initialAnalysisStatus = "idle", failedSends = 0, holdCa
     onStateChanged: () => () => undefined,
   };
 
+  const workspace = {
+    execute: async (command) => {
+      switch (command.type) {
+        case "capture":
+          await screenshots.capture();
+          return {
+            queue: screenshots.getState(),
+            conversation: structuredClone(canonicalConversation),
+          };
+        case "remove":
+          return {
+            queue: await screenshots.delete(command.screenshotId),
+            conversation: structuredClone(canonicalConversation),
+          };
+        case "clear-queue":
+          return {
+            queue: await screenshots.clear(),
+            conversation: structuredClone(canonicalConversation),
+          };
+        case "clear-conversation":
+          return {
+            queue: screenshots.getState(),
+            conversation: structuredClone(canonicalConversation),
+          };
+        case "cancel":
+          return {
+            queue: screenshots.getState(),
+            conversation: structuredClone(canonicalConversation),
+            analysis: await analysis.cancel(),
+          };
+        case "send":
+        case "capture-and-send": {
+          if (command.type === "capture-and-send") {
+            await screenshots.capture();
+          }
+          const queueSnapshot = screenshots.getState();
+          const state = await analysis.start({
+            prompt: command.prompt.trim() || "Analyze the attached screenshots.",
+            screenshotIds: queueSnapshot.items.map((item) => item.id),
+            intent: "answer",
+            fast: false,
+          });
+          return {
+            queue: queueSnapshot,
+            conversation: structuredClone(canonicalConversation),
+            analysis: state,
+          };
+        }
+      }
+    },
+  };
+
   registerIpcHandlers({
     ipcMain: { handle: (channel, handler) => registrations.set(channel, handler) },
     settings: {
@@ -148,6 +206,11 @@ function createBackend({ initialAnalysisStatus = "idle", failedSends = 0, holdCa
     },
     screenshots,
     analysis,
+    workspace,
+    conversation: {
+      snapshot: () => structuredClone(canonicalConversation),
+      subscribe: () => () => undefined,
+    },
     codex: {
       getStatus: () => ({ available: true, configuredPath: "codex" }),
       validate: () => ({ available: true, configuredPath: "codex" }),
@@ -314,4 +377,50 @@ test("a failed Send images click retains the queue and a second click retries wi
   assert.notEqual(backend.workspaceCommands[0].requestId, backend.workspaceCommands[1].requestId);
   assert.deepEqual(backend.getQueue().map((item) => item.id), [FIRST_ID, SECOND_ID]);
   assert.equal(queueCountText(), "2/5");
+});
+
+test("the actual Work view renders the canonical conversation snapshot and opaque attachment thumbnail", async () => {
+  const attachmentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  await renderApp(createBackend({
+    conversationSnapshot: {
+      sessionId: "session-renderer",
+      revision: 4,
+      messages: [
+        {
+          id: "message-user",
+          sequence: 1,
+          role: "user",
+          text: "What is shown?",
+          attachmentIds: [attachmentId],
+          status: "completed",
+          createdAt: 100,
+          finishedAt: 100,
+        },
+        {
+          id: "message-assistant",
+          sequence: 2,
+          role: "assistant",
+          text: "The answer is streaming.",
+          attachmentIds: [],
+          status: "streaming",
+          createdAt: 100,
+        },
+      ],
+      attachments: [{
+        id: attachmentId,
+        mimeType: "image/png",
+        width: 1920,
+        height: 1080,
+        byteLength: 16,
+        createdAt: 100,
+      }],
+      activeMessageId: "message-assistant",
+    },
+  }));
+
+  assert.match(document.body.textContent ?? "", /What is shown\?/);
+  assert.match(document.body.textContent ?? "", /The answer is streaming\./);
+  const thumbnail = document.querySelector('img[src="fluely-media://attachment/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]');
+  assert.ok(thumbnail);
+  assert.equal(document.body.textContent?.includes("/Users/"), false);
 });

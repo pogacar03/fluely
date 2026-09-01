@@ -89,8 +89,8 @@ test("successful registration exposes each configured shortcut", () => {
   assert.equal(result.value.entries.find((entry) => entry.action === "toggleVisibility").available, true);
   assert.equal(result.value.entries.find((entry) => entry.action === "captureScreenshot").available, true);
   assert.equal(result.value.entries.find((entry) => entry.action === "cancelAndClear").available, true);
-  assert.equal(result.value.entries.find((entry) => entry.action === "analyzeQueue").available, false);
-  assert.equal(result.value.entries.find((entry) => entry.action === "captureAndAnalyze").available, false);
+  assert.equal(result.value.entries.find((entry) => entry.action === "analyzeQueue").available, true);
+  assert.equal(result.value.entries.find((entry) => entry.action === "captureAndAnalyze").available, true);
 });
 
 test("OS conflicts are reported without changing the requested accelerator", () => {
@@ -137,19 +137,20 @@ test("toggle shortcut does not show a hidden window during an active capture", (
   assert.equal(window.visible, false);
 });
 
-test("capture and cancel shortcuts invoke supplied handlers while provider shortcuts remain unavailable", () => {
+test("all command shortcuts invoke supplied handlers", () => {
   const { manager, callbacks, actions } = makeManager();
   manager.registerAll(DEFAULT_SETTINGS.shortcuts);
 
   callbacks.get(DEFAULT_SETTINGS.shortcuts.captureScreenshot)();
   callbacks.get(DEFAULT_SETTINGS.shortcuts.cancelAndClear)();
   callbacks.get(DEFAULT_SETTINGS.shortcuts.analyzeQueue)();
+  callbacks.get(DEFAULT_SETTINGS.shortcuts.captureAndAnalyze)();
 
   assert.equal(actions.capture, 1);
   assert.equal(actions.cancel, 1);
   assert.equal(actions.analyze, 1);
-  assert.equal(manager.getStatus().entries.find((entry) => entry.action === "analyzeQueue").available, false);
-  assert.equal(manager.getStatus().entries.find((entry) => entry.action === "captureAndAnalyze").available, false);
+  assert.equal(manager.getStatus().entries.find((entry) => entry.action === "analyzeQueue").available, true);
+  assert.equal(manager.getStatus().entries.find((entry) => entry.action === "captureAndAnalyze").available, true);
 });
 
 test("dispose unregisters every active shortcut", () => {

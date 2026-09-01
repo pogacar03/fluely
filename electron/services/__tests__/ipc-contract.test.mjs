@@ -40,6 +40,7 @@ test("preload exposes only the documented Fluely API groups", async () => {
     "analysis",
     "app",
     "codex",
+    "conversation",
     "screenshots",
     "settings",
     "shortcuts",
@@ -47,10 +48,8 @@ test("preload exposes only the documented Fluely API groups", async () => {
     "workspace",
   ]);
   assert.deepEqual(Object.keys(exposedApi.analysis).sort(), [
-    "cancel",
     "getStatus",
     "onStateChanged",
-    "start",
   ]);
   assert.deepEqual(Object.keys(exposedApi.codex).sort(), ["getStatus", "validate"]);
   assert.deepEqual(Object.keys(exposedApi.screenshots).sort(), [
@@ -62,6 +61,7 @@ test("preload exposes only the documented Fluely API groups", async () => {
   ]);
   assert.deepEqual(Object.keys(exposedApi.window).sort(), ["hide", "setOpacity"]);
   assert.deepEqual(Object.keys(exposedApi.workspace).sort(), ["execute"]);
+  assert.deepEqual(Object.keys(exposedApi.conversation).sort(), ["getSnapshot", "onEvent"]);
   assert.equal(exposedApi.ipcRenderer, undefined);
   assert.equal(exposedApi.invoke, undefined);
   await exposedApi.settings.get();
@@ -70,13 +70,6 @@ test("preload exposes only the documented Fluely API groups", async () => {
   await exposedApi.app.getStatus();
   await exposedApi.codex.getStatus();
   await exposedApi.codex.validate("codex");
-  await exposedApi.analysis.start({
-    prompt: "What is on screen?",
-    screenshotIds: [],
-    intent: "answer",
-    fast: false,
-  });
-  await exposedApi.analysis.cancel();
   await exposedApi.analysis.getStatus();
   await exposedApi.window.setOpacity(0.8);
   await exposedApi.window.hide();
@@ -85,6 +78,7 @@ test("preload exposes only the documented Fluely API groups", async () => {
   await exposedApi.screenshots.delete("11111111-1111-4111-8111-111111111111");
   await exposedApi.screenshots.clear();
   await exposedApi.workspace.execute({ type: "capture", requestId: "workspace-1" });
+  await exposedApi.conversation.getSnapshot();
   let receivedState;
   const unsubscribe = exposedApi.screenshots.onStateChanged((state) => {
     receivedState = state;
@@ -116,6 +110,20 @@ test("preload exposes only the documented Fluely API groups", async () => {
   assert.equal(receivedAnalysisEvent.text, "answer");
   unsubscribeAnalysis();
   assert.equal(subscriptions.size, 0);
+  let receivedConversationEvent;
+  const unsubscribeConversation = exposedApi.conversation.onEvent((event) => {
+    receivedConversationEvent = event;
+  });
+  assert.equal(typeof unsubscribeConversation, "function");
+  subscriptions.get("conversation:event")({}, {
+    type: "cleared",
+    revision: 1,
+    activeMessageId: null,
+    snapshot: { sessionId: "session", revision: 1, messages: [], attachments: [] },
+  });
+  assert.equal(receivedConversationEvent.type, "cleared");
+  unsubscribeConversation();
+  assert.equal(subscriptions.size, 0);
   assert.deepEqual(calls.map((call) => call.channel), [
     "settings:get",
     "settings:update",
@@ -123,8 +131,6 @@ test("preload exposes only the documented Fluely API groups", async () => {
     "app:get-status",
     "codex:get-status",
     "codex:validate",
-    "analysis:start",
-    "analysis:cancel",
     "analysis:get-status",
     "window:set-opacity",
     "window:hide",
@@ -133,6 +139,7 @@ test("preload exposes only the documented Fluely API groups", async () => {
     "screenshots:delete",
     "screenshots:clear",
     "workspace:execute",
+    "conversation:get-snapshot",
   ]);
 });
 
@@ -169,6 +176,16 @@ test("main IPC handlers register only the documented channels", () => {
     getState: () => ({ status: "idle" }),
     onStateChanged: () => () => undefined,
   };
+  const conversation = {
+    snapshot: () => ({ sessionId: "session", revision: 0, messages: [], attachments: [] }),
+    subscribe: () => () => undefined,
+  };
+  const workspace = {
+    execute: async () => ({
+      queue: { items: [] },
+      conversation: { sessionId: "session", revision: 0, messages: [], attachments: [] },
+    }),
+  };
   const codex = {
     getStatus: async () => ({ available: true, configuredPath: "codex" }),
     validate: async () => ({ available: true, configuredPath: "codex" }),
@@ -184,18 +201,19 @@ test("main IPC handlers register only the documented channels", () => {
     shortcuts,
     screenshots,
     analysis,
+    conversation,
+    workspace,
     codex,
     window,
     getAppStatus: () => ({ name: "Fluely", version: "0.1.0", platform: "darwin", visible: true }),
   });
 
   assert.deepEqual([...registrations.keys()].sort(), [
-    "analysis:cancel",
     "analysis:get-status",
-    "analysis:start",
     "app:get-status",
     "codex:get-status",
     "codex:validate",
+    "conversation:get-snapshot",
     "screenshots:capture",
     "screenshots:clear",
     "screenshots:delete",

@@ -1,4 +1,17 @@
 import type { ContextScreenshot } from "./context-queue";
+import type {
+  CommandResult,
+  ConversationEvent,
+  ConversationEventListener,
+  ConversationSnapshot,
+} from "./conversation";
+
+export type {
+  CommandResult,
+  ConversationEvent,
+  ConversationEventListener,
+  ConversationSnapshot,
+} from "./conversation";
 
 export type ShortcutAction =
   | "toggleVisibility"
@@ -212,10 +225,8 @@ export type WorkspaceCommand =
   | { type: "capture-and-send"; requestId: string; prompt: string }
   | { type: "cancel"; requestId: string };
 
-export interface WorkspaceCommandResult {
-  queue: ScreenshotState;
-  analysis?: AnalysisState;
-}
+/** @deprecated Use the shared CommandResult contract. */
+export type WorkspaceCommandResult = CommandResult;
 
 export interface ShortcutStatusEntry {
   action: ShortcutAction;
@@ -263,8 +274,6 @@ export interface FluelyApi {
     validate: (path: string) => Promise<IpcResult<CodexStatus>>;
   };
   analysis: {
-    start: (request: AnalysisRequest) => Promise<IpcResult<AnalysisState>>;
-    cancel: () => Promise<IpcResult<AnalysisState>>;
     getStatus: () => Promise<IpcResult<AnalysisState>>;
     onStateChanged: (listener: AnalysisStateListener) => () => void;
   };
@@ -274,6 +283,10 @@ export interface FluelyApi {
   };
   workspace: {
     execute: (command: WorkspaceCommand) => Promise<IpcResult<WorkspaceCommandResult>>;
+  };
+  conversation: {
+    getSnapshot: () => Promise<IpcResult<ConversationSnapshot>>;
+    onEvent: (listener: ConversationEventListener) => () => void;
   };
 }
 

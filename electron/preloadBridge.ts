@@ -1,10 +1,12 @@
 import type {
-  AnalysisRequest,
   AnalysisState,
   AnalysisStateChangedEvent,
   AnalysisStateListener,
   AppStatus,
   CodexStatus,
+  ConversationEvent,
+  ConversationEventListener,
+  ConversationSnapshot,
   FluelyApi,
   FluelySettings,
   IpcResult,
@@ -75,8 +77,6 @@ export function exposeFluelyApi(
       validate: (path: string) => invoke<CodexStatus>(ipcRenderer, "codex:validate", path),
     },
     analysis: {
-      start: (request: AnalysisRequest) => invoke<AnalysisState>(ipcRenderer, "analysis:start", request),
-      cancel: () => invoke<AnalysisState>(ipcRenderer, "analysis:cancel"),
       getStatus: () => invoke<AnalysisState>(ipcRenderer, "analysis:get-status"),
       onStateChanged: (listener: AnalysisStateListener) => {
         if (!ipcRenderer.on || !ipcRenderer.removeListener) {
@@ -99,6 +99,23 @@ export function exposeFluelyApi(
     },
     workspace: {
       execute: (command: WorkspaceCommand) => invoke<WorkspaceCommandResult>(ipcRenderer, "workspace:execute", command),
+    },
+    conversation: {
+      getSnapshot: () => invoke<ConversationSnapshot>(ipcRenderer, "conversation:get-snapshot"),
+      onEvent: (listener: ConversationEventListener) => {
+        if (!ipcRenderer.on || !ipcRenderer.removeListener) {
+          return () => undefined;
+        }
+
+        const eventListener = (...args: unknown[]) => {
+          const event = args[1] as ConversationEvent | undefined;
+          if (event) {
+            listener(event);
+          }
+        };
+        ipcRenderer.on("conversation:event", eventListener);
+        return () => ipcRenderer.removeListener?.("conversation:event", eventListener);
+      },
     },
   });
 }

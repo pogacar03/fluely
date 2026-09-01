@@ -454,7 +454,18 @@ export class AnalysisService {
       }
 
       if (this.isActive(token)) {
-        this.finish(token, "completed");
+        if (this.state.text.trim().length === 0) {
+          this.fail(
+            token,
+            createServiceError(
+              "ANALYSIS_FAILED",
+              "Codex CLI returned no visible answer.",
+              "Retry the analysis request or check the Codex CLI connection.",
+            ),
+          );
+        } else {
+          this.finish(token, "completed");
+        }
       }
     } catch (error) {
       if (!this.isActive(token)) {

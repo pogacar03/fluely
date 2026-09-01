@@ -14,10 +14,12 @@ import type {
   AppStatus,
   CodexStatus,
   ContextScreenshot,
+  ConversationEvent,
   FluelySettings,
   IpcError,
   ScreenshotState,
 } from "../src/shared/ipc";
+import { AttachmentStore } from "./services/AttachmentStore";
 import { DEFAULT_SETTINGS } from "./services/settings-core";
 import { AnalysisService } from "./services/AnalysisService";
 import { CapturePrivacyController, DockPrivacyCoordinator } from "./services/CapturePrivacyController";
@@ -33,11 +35,14 @@ import {
 import { registerIpcHandlers } from "./services/ipcHandlers";
 import { SettingsService } from "./services/SettingsService";
 import { ScreenshotService } from "./services/ScreenshotService";
+import { CommandRouter } from "./services/CommandRouter";
+import { ConversationStore } from "./services/ConversationStore";
 import { ShortcutManager } from "./services/ShortcutManager";
+import { createShortcutCommandHandlers } from "./services/shortcut-command-routing";
 import { createScreenshotWorkflow } from "./services/capture-workflow";
 import { isScreenshotSessionActive, waitForScreenshotSessionIdle } from "./services/screenshot-session";
 import { attachApplicationLifecycle, attachWindowLifecycle } from "./services/window-lifecycle";
-import { CONTEXT_MEDIA_SCHEME, createContextMediaHandler } from "./services/context-media";
+import { SESSION_MEDIA_SCHEME, createSessionMediaHandler } from "./services/session-media-protocol";
 import { getWindowPreferences } from "./windowConfig";
 
 let mainWindow: BrowserWindow | null = null;
@@ -48,8 +53,12 @@ let capturePrivacyController: CapturePrivacyController | null = null;
 let screenshotService: ScreenshotService | null = null;
 let codexCliService: CodexCliService | null = null;
 let analysisService: AnalysisService | null = null;
+let attachmentStore: AttachmentStore | null = null;
+let conversationStore: ConversationStore | null = null;
+let commandRouter: CommandRouter | null = null;
 let dockPrivacyCoordinator: DockPrivacyCoordinator | null = null;
 let ipcHandlersRegistered = false;
+let sessionShutdownStarted = false;
 
 const MIN_WINDOW_OPACITY = 0.35;
 const MAX_WINDOW_OPACITY = 1;
@@ -174,6 +183,19 @@ function notifyAnalysisState(event: AnalysisStateChangedEvent): void {
   }
 }
 
+function notifyConversationEvent(event: ConversationEvent): void {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) {
+    return;
+  }
+
+  try {
+    window.webContents.send("conversation:event", event);
+  } catch {
+    // The renderer may be tearing down while a conversation mutation completes.
+  }
+}
+
 function getScreenshotService(): ScreenshotService {
   if (!screenshotService) {
     screenshotService = new ScreenshotService({
@@ -198,9 +220,34 @@ function getScreenshotService(): ScreenshotService {
   return screenshotService;
 }
 
+function getAttachmentStore(): AttachmentStore {
+  if (!attachmentStore) {
+    attachmentStore = new AttachmentStore({
+      rootDirectory: join(app.getPath("userData"), "session-attachments"),
+    });
+  }
+  return attachmentStore;
+}
+
+function getConversationStore(): ConversationStore {
+  if (!conversationStore) {
+    const attachments = getAttachmentStore();
+    conversationStore = new ConversationStore({
+      sessionId: attachments.sessionId,
+      attachmentStore: attachments,
+    });
+  }
+  return conversationStore;
+}
+
 function registerContextMediaProtocol(): void {
-  protocol.handle(CONTEXT_MEDIA_SCHEME, createContextMediaHandler({
-    getManagedPaths: (ids) => getScreenshotService().getManagedPaths(ids),
+  protocol.handle(SESSION_MEDIA_SCHEME, createSessionMediaHandler({
+    context: {
+      getManagedPaths: (ids) => getScreenshotService().getManagedPaths(ids),
+    },
+    attachments: {
+      getPath: (id) => getAttachmentStore().getPath(id),
+    },
   }));
 }
 
@@ -220,6 +267,25 @@ function getAnalysisService(settings: SettingsService): AnalysisService {
     });
   }
   return analysisService;
+}
+
+function getCommandRouter(settings: SettingsService): CommandRouter {
+  if (!commandRouter) {
+    const screenshots = getScreenshotService();
+    commandRouter = new CommandRouter({
+      screenshots: {
+        getState: () => screenshots.getState(),
+        getManagedPaths: (ids) => screenshots.getManagedPaths(ids),
+        capture: () => captureCurrentWindow(),
+        delete: (id) => screenshots.delete(id),
+        clear: () => screenshots.clear(),
+      },
+      attachments: getAttachmentStore(),
+      conversation: getConversationStore(),
+      analysis: getAnalysisService(settings),
+    });
+  }
+  return commandRouter;
 }
 
 async function getCodexStatus(settings: SettingsService): Promise<CodexStatus> {
@@ -294,10 +360,6 @@ function captureCurrentWindow(): Promise<ContextScreenshot> {
   });
 }
 
-function logShortcutError(action: string, error: unknown): void {
-  console.error(`Fluely ${action} shortcut failed.`, error);
-}
-
 async function ensureSettingsService(): Promise<SettingsService> {
   if (!settingsService) {
     settingsService = new SettingsService(app.getPath("userData"));
@@ -311,8 +373,13 @@ async function ensureSettingsService(): Promise<SettingsService> {
 
 async function initializeServices(window: BrowserWindow): Promise<void> {
   const loadedSettings = await ensureSettingsService();
-  getScreenshotService();
+  const screenshots = getScreenshotService();
+  const attachments = getAttachmentStore();
+  const conversation = getConversationStore();
   const analysis = getAnalysisService(loadedSettings);
+  const router = getCommandRouter(loadedSettings);
+
+  await Promise.all([attachments.whenReady(), screenshots.whenIdle()]);
 
   shortcutManager?.dispose();
   shortcutManager = new ShortcutManager(
@@ -333,14 +400,7 @@ async function initializeServices(window: BrowserWindow): Promise<void> {
         clear: () => getScreenshotService().clear(),
       }).toggleVisibility(),
     },
-    {
-      captureScreenshot: () => {
-        void captureCurrentWindow().catch((error) => logShortcutError("captureScreenshot", error));
-      },
-      cancelAndClear: () => {
-        void getScreenshotService().clear().catch((error) => logShortcutError("cancelAndClear", error));
-      },
-    },
+    createShortcutCommandHandlers(router),
   );
   const shortcutResult = shortcutManager.registerAll(loadedSettings.get().shortcuts);
   if (!shortcutResult.ok) {
@@ -366,13 +426,13 @@ async function initializeServices(window: BrowserWindow): Promise<void> {
         },
       },
       screenshots: {
-        getState: () => getScreenshotService().getState(),
+        getState: () => screenshots.getState(),
         capture: () => captureCurrentWindow(),
-        delete: (id) => getScreenshotService().delete(id).catch((error) => {
+        delete: (id) => screenshots.delete(id).catch((error) => {
           notifyScreenshotState();
           throw error;
         }),
-        clear: () => getScreenshotService().clear().catch((error) => {
+        clear: () => screenshots.clear().catch((error) => {
           notifyScreenshotState();
           throw error;
         }),
@@ -383,6 +443,8 @@ async function initializeServices(window: BrowserWindow): Promise<void> {
         validate: (path) => validateCodexPath(path, loadedSettings),
       },
       applyCodexSettings: (codexSettings) => analysis.updateCodexSettings(codexSettings),
+      workspace: router,
+      conversation,
       window: {
         setOpacity: (opacity) => {
           const currentWindow = mainWindow;
@@ -418,6 +480,7 @@ async function initializeServices(window: BrowserWindow): Promise<void> {
       },
       notifyScreenshotState,
       notifyAnalysisState,
+      notifyConversationEvent,
       getAppStatus,
     });
     ipcHandlersRegistered = true;
@@ -425,7 +488,7 @@ async function initializeServices(window: BrowserWindow): Promise<void> {
 }
 
 protocol.registerSchemesAsPrivileged([{
-  scheme: CONTEXT_MEDIA_SCHEME,
+  scheme: SESSION_MEDIA_SCHEME,
   privileges: {
     standard: true,
     secure: true,
@@ -444,6 +507,10 @@ if (acquireSingleInstance(applicationInstance, () => app.quit())) {
 
   app.whenReady().then(async () => {
     const loadedSettings = await ensureSettingsService();
+    await Promise.all([
+      getAttachmentStore().whenReady(),
+      getScreenshotService().whenIdle(),
+    ]);
     registerContextMediaProtocol();
     const window = createMainWindow(loadedSettings.get());
     await initializeServices(window);
@@ -462,6 +529,43 @@ if (acquireSingleInstance(applicationInstance, () => app.quit())) {
   }).catch((error) => {
     console.error("Fluely could not initialize its main process.", error);
     app.quit();
+  });
+
+  const clearSessionStores = async (): Promise<void> => {
+    try {
+      analysisService?.cancel();
+      await analysisService?.whenIdle();
+    } catch {
+      // Best-effort cancellation must not prevent the app from quitting.
+    }
+    try {
+      await screenshotService?.clear();
+      await screenshotService?.whenIdle();
+    } catch {
+      // Best-effort queue cleanup is retried by the next startup sweep.
+    }
+    try {
+      await conversationStore?.clear();
+    } catch {
+      // Best-effort conversation cleanup is retried by the next startup sweep.
+    }
+    try {
+      await attachmentStore?.dispose();
+    } catch {
+      // Best-effort attachment cleanup is retried by the next startup sweep.
+    }
+  };
+
+  app.on("before-quit", (event) => {
+    if (sessionShutdownStarted) {
+      return;
+    }
+    sessionShutdownStarted = true;
+    event.preventDefault();
+    void clearSessionStores().then(
+      () => app.quit(),
+      () => app.quit(),
+    );
   });
 
   app.on("will-quit", () => {

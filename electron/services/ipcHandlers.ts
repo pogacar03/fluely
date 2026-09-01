@@ -1,6 +1,4 @@
 import type {
-  AnalysisIntent,
-  AnalysisRequest,
   AnalysisState,
   AnalysisStateChangedEvent,
   AppStatus,
@@ -17,9 +15,14 @@ import type {
   WorkspaceCommandResult,
   WindowSettings,
 } from "../../src/shared/ipc";
+import { createConversationSnapshot } from "../../src/shared/conversation";
+import type {
+  ConversationEvent,
+  ConversationPort,
+  ConversationSnapshot,
+} from "../../src/shared/conversation";
 import {
   createRequestIdDeduper,
-  normalizeContextPrompt,
 } from "../../src/shared/context-queue";
 import type { ContextScreenshot } from "../../src/shared/context-queue";
 import { normalizeSettingsPatch, validateSettingsPatch } from "./settings-core";
@@ -47,8 +50,6 @@ export interface ScreenshotHandlerService {
 }
 
 export interface AnalysisHandlerService {
-  start(request: AnalysisRequest): AnalysisState | Promise<AnalysisState>;
-  cancel(): AnalysisState | Promise<AnalysisState>;
   getState?: () => AnalysisState;
   getStatus?: () => AnalysisState;
   onStateChanged(listener: (event: AnalysisStateChangedEvent) => void): () => void;
@@ -71,7 +72,11 @@ export interface WindowHandlerService {
 }
 
 export interface WorkspaceHandlerService {
-  execute(command: WorkspaceCommand): WorkspaceCommandResult | Promise<WorkspaceCommandResult>;
+  execute(command: WorkspaceCommand, source?: "desktop" | "phone"): WorkspaceCommandResult | Promise<WorkspaceCommandResult>;
+}
+
+export interface ConversationHandlerService extends ConversationPort {
+  clear?: () => Promise<void>;
 }
 
 export interface IpcHandlerDependencies {
@@ -88,6 +93,7 @@ export interface IpcHandlerDependencies {
   windowTarget?: WindowHandlerService;
   browserWindow?: WindowHandlerService;
   workspace?: WorkspaceHandlerService;
+  conversation?: ConversationHandlerService;
   applyPrivacy?: (enabled: boolean) => void;
   applyCodexSettings?: (settings: CodexCliSettings) => void | Promise<void>;
   applyOpacity?: (opacity: number) => void | Promise<void>;
@@ -95,6 +101,7 @@ export interface IpcHandlerDependencies {
   applyShortcuts?: (shortcuts: ShortcutSettings) => IpcResult<ShortcutStatus> | void;
   notifyScreenshotState?: (state: ScreenshotState) => void;
   notifyAnalysisState?: (event: AnalysisStateChangedEvent) => void;
+  notifyConversationEvent?: (event: ConversationEvent) => void;
   getAppStatus(): AppStatus;
 }
 
@@ -159,8 +166,6 @@ function isShortcutSettings(input: unknown): input is ShortcutSettings {
 
 const SCREENSHOT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_ANALYSIS_PROMPT_LENGTH = 3000;
-const MAX_ANALYSIS_SCREENSHOTS = 5;
-const ANALYSIS_INTENTS: readonly AnalysisIntent[] = ["answer", "explain", "follow-up", "recap"];
 const MIN_WINDOW_OPACITY = 0.35;
 const MAX_WINDOW_OPACITY = 1;
 const SCREENSHOT_ERROR_CODES = new Set<IpcError["code"]>([
@@ -234,72 +239,6 @@ function internalFailure(action: string): IpcError {
     code: "INTERNAL_ERROR",
     message: "Fluely could not complete that request in its main process.",
     action,
-  };
-}
-
-function invalidAnalysisRequest(message = "Analysis requests must include a prompt, screenshot IDs, intent, and fast mode."): IpcError {
-  return {
-    code: "INVALID_ARGUMENT",
-    message,
-    action: "Refresh the analysis form and try again.",
-  };
-}
-
-function normalizeAnalysisRequest(input: unknown): { request?: AnalysisRequest; error?: IpcError } {
-  if (!isRecord(input)) {
-    return { error: invalidAnalysisRequest() };
-  }
-
-  if (typeof input.prompt !== "string" || input.prompt.length > MAX_ANALYSIS_PROMPT_LENGTH) {
-    return {
-      error: invalidAnalysisRequest(
-        `Analysis prompt must be a string no longer than ${MAX_ANALYSIS_PROMPT_LENGTH} characters.`,
-      ),
-    };
-  }
-
-  if (!Array.isArray(input.screenshotIds) || input.screenshotIds.length > MAX_ANALYSIS_SCREENSHOTS) {
-    return {
-      error: invalidAnalysisRequest(
-        `Analysis screenshotIds must be an array of at most ${MAX_ANALYSIS_SCREENSHOTS} managed IDs.`,
-      ),
-    };
-  }
-
-  const screenshotIds: string[] = [];
-  for (const id of input.screenshotIds) {
-    if (!isScreenshotId(id)) {
-      return { error: invalidAnalysisRequest("Analysis screenshotIds must contain managed screenshot IDs only.") };
-    }
-    if (screenshotIds.includes(id)) {
-      return { error: invalidAnalysisRequest("Analysis screenshotIds must not contain duplicates.") };
-    }
-    screenshotIds.push(id);
-  }
-
-  if (typeof input.intent !== "string" || !ANALYSIS_INTENTS.includes(input.intent as AnalysisIntent)) {
-    return { error: invalidAnalysisRequest("Analysis intent is not supported.") };
-  }
-
-  if (typeof input.fast !== "boolean") {
-    return { error: invalidAnalysisRequest("Analysis fast mode must be a boolean.") };
-  }
-
-  return {
-    request: {
-      prompt: input.prompt.trim(),
-      screenshotIds,
-      intent: input.intent as AnalysisIntent,
-      fast: input.fast,
-    },
-  };
-}
-
-function unknownScreenshotError(): IpcError {
-  return {
-    code: "SCREENSHOT_NOT_FOUND",
-    message: "One or more selected screenshots are no longer in the queue.",
-    action: "Refresh the screenshot queue and select the available screenshots again.",
   };
 }
 
@@ -464,73 +403,42 @@ export function normalizeWorkspaceCommand(
   }
 }
 
-function noAnalysisHandler(): IpcError {
+function noCanonicalWorkspaceRouter(): IpcError {
   return {
     code: "INTERNAL_ERROR",
-    message: "Fluely cannot run workspace analysis until its analysis service is ready.",
+    message: "Fluely cannot execute workspace commands until its canonical command router is ready.",
     action: "Restart Fluely and try again.",
-  };
-}
-
-function emptyWorkspaceQueue(): IpcError {
-  return {
-    code: "SCREENSHOT_NOT_FOUND",
-    message: "There are no screenshots in the context queue to send.",
-    action: "Capture a screen before selecting Send images.",
   };
 }
 
 function createDefaultWorkspaceHandler(
   screenshots: ScreenshotHandlerService,
-  analysis: AnalysisHandlerService | undefined,
+  conversation: ConversationHandlerService | undefined,
 ): WorkspaceHandlerService {
+  const fallbackConversation = () => conversation?.snapshot() ?? createConversationSnapshot("legacy");
+  const result = (queue: ScreenshotState, analysisState?: AnalysisState): WorkspaceCommandResult => ({
+    queue,
+    conversation: fallbackConversation(),
+    ...(analysisState ? { analysis: serializeAnalysisState(analysisState) } : {}),
+  });
+
   return {
     async execute(command): Promise<WorkspaceCommandResult> {
       switch (command.type) {
         case "capture":
           await screenshots.capture();
-          return { queue: screenshots.getState() };
+          return result(screenshots.getState());
         case "remove":
-          return { queue: await screenshots.delete(command.screenshotId) };
+          return result(await screenshots.delete(command.screenshotId));
         case "clear-queue":
-          return { queue: await screenshots.clear() };
+          return result(await screenshots.clear());
         case "clear-conversation":
-          throw {
-            code: "INTERNAL_ERROR",
-            message: "Fluely cannot clear conversation history before the session store is ready.",
-            action: "Restart Fluely and try again.",
-          } satisfies IpcError;
+          throw noCanonicalWorkspaceRouter();
         case "cancel":
-          if (!analysis) {
-            throw noAnalysisHandler();
-          }
-          return {
-            queue: screenshots.getState(),
-            analysis: serializeAnalysisState(await analysis.cancel()),
-          };
+          throw noCanonicalWorkspaceRouter();
         case "send":
         case "capture-and-send": {
-          if (!analysis) {
-            throw noAnalysisHandler();
-          }
-          if (command.type === "capture-and-send") {
-            await screenshots.capture();
-          }
-          const queue = screenshots.getState();
-          const screenshotIds = queue.items.map((item) => item.id);
-          if (screenshotIds.length === 0) {
-            throw emptyWorkspaceQueue();
-          }
-          const analysisState = await analysis.start({
-            prompt: normalizeContextPrompt(command.prompt),
-            screenshotIds,
-            intent: "answer",
-            fast: false,
-          });
-          return {
-            queue: screenshots.getState(),
-            analysis: serializeAnalysisState(analysisState),
-          };
+          throw noCanonicalWorkspaceRouter();
         }
       }
     },
@@ -568,14 +476,16 @@ export function registerIpcHandlers({
   applyShortcuts,
   notifyScreenshotState,
   notifyAnalysisState,
+  notifyConversationEvent,
   workspace,
+  conversation,
   getAppStatus,
 }: IpcHandlerDependencies): void {
   const analysisHandler = analysis ?? analysisService;
   const codexHandler = codex ?? codexService ?? codexCli;
   const windowHandler = window ?? windowTarget ?? browserWindow;
   const applyWindowOpacityHandler = applyOpacity ?? applyWindowOpacity;
-  const workspaceHandler = workspace ?? createDefaultWorkspaceHandler(screenshots, analysisHandler);
+  const workspaceHandler = workspace ?? createDefaultWorkspaceHandler(screenshots, conversation);
   const workspaceRequestDeduper = createRequestIdDeduper<IpcResult<WorkspaceCommandResult>>();
   ipcMain.handle("settings:get", () => success(settings.get()));
 
@@ -704,7 +614,7 @@ export function registerIpcHandlers({
         JSON.stringify(command),
         async () => {
           try {
-            return success(await workspaceHandler.execute(command));
+            return success(await workspaceHandler.execute(command, "desktop"));
           } catch (error) {
             return failure<WorkspaceCommandResult>(errorFromUnknown(error, {
               code: "INTERNAL_ERROR",
@@ -720,6 +630,34 @@ export function registerIpcHandlers({
       )));
     }
   });
+
+  if (conversation) {
+    ipcMain.handle("conversation:get-snapshot", () => {
+      try {
+        return success(conversation.snapshot());
+      } catch (error) {
+        return failure<ConversationSnapshot>(errorFromUnknown(error, {
+          code: "INTERNAL_ERROR",
+          message: "Fluely could not read the current conversation.",
+          action: "Restart Fluely and try again.",
+        }));
+      }
+    });
+
+    if (notifyConversationEvent) {
+      try {
+        conversation.subscribe((event) => {
+          try {
+            notifyConversationEvent(event);
+          } catch {
+            // Renderer teardown must not break canonical conversation writes.
+          }
+        });
+      } catch {
+        // A failed observer registration must not prevent command handlers.
+      }
+    }
+  }
 
   if (codexHandler) {
     ipcMain.handle("codex:get-status", async () => {
@@ -775,45 +713,6 @@ export function registerIpcHandlers({
         // A failed observer registration should not prevent request handlers.
       }
     }
-
-    ipcMain.handle("analysis:start", async (_event, payload) => {
-      const normalized = normalizeAnalysisRequest(payload);
-      if (normalized.error || !normalized.request) {
-        return failure<AnalysisState>(normalized.error ?? invalidAnalysisRequest());
-      }
-
-      try {
-        const queuedIds = new Set(screenshots.getState().items.map((item) => item.id));
-        if (normalized.request.screenshotIds.some((id) => !queuedIds.has(id))) {
-          return failure<AnalysisState>(unknownScreenshotError());
-        }
-      } catch (error) {
-        return failure<AnalysisState>(errorFromUnknown(error, internalFailure("Refresh the screenshot queue and try again.")));
-      }
-
-      try {
-        const state = await analysisHandler.start(normalized.request);
-        return success(serializeAnalysisState(state));
-      } catch (error) {
-        return failure<AnalysisState>(errorFromUnknown(error, {
-          code: "ANALYSIS_FAILED",
-          message: "Fluely could not start the analysis request.",
-          action: "Cancel any running request and try again.",
-        }));
-      }
-    });
-
-    ipcMain.handle("analysis:cancel", async () => {
-      try {
-        return success(serializeAnalysisState(await analysisHandler.cancel()));
-      } catch (error) {
-        return failure<AnalysisState>(errorFromUnknown(error, {
-          code: "ANALYSIS_FAILED",
-          message: "Fluely could not cancel the analysis request.",
-          action: "Wait for the current request to finish, then try again.",
-        }));
-      }
-    });
 
     ipcMain.handle("analysis:get-status", () => {
       try {

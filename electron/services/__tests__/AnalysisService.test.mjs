@@ -229,6 +229,26 @@ test("AnalysisService reports provider failures without changing the screenshot 
   assert.deepEqual(events.map((event) => event.event), ["started", "delta", "error"]);
 });
 
+test("AnalysisService turns a clean empty provider completion into a terminal error", async () => {
+  const provider = {
+    stream: async function* () {
+      // The provider completed without producing a visible answer.
+    },
+  };
+  const service = makeService({ provider });
+  const events = [];
+  service.onStateChanged((event) => events.push(event));
+
+  service.start({ prompt: "Question", screenshotIds: [FIRST_ID], intent: "answer", fast: false });
+  await service.whenIdle();
+
+  const state = service.getState();
+  assert.equal(state.status, "error");
+  assert.equal(state.text, "");
+  assert.equal(state.error.code, "ANALYSIS_FAILED");
+  assert.deepEqual(events.map((event) => event.event), ["started", "error"]);
+});
+
 test("AnalysisService preserves typed timeout categories and keeps diagnostics out of public state", async () => {
   const diagnostics = Object.freeze({
     elapsedMs: 120000,

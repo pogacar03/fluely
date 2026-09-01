@@ -36,11 +36,6 @@ const SHORTCUT_ACTIONS: readonly ShortcutAction[] = [
   "cancelAndClear",
 ];
 
-const PLACEHOLDER_ACTIONS = new Set<ShortcutAction>([
-  "analyzeQueue",
-  "captureAndAnalyze",
-]);
-
 function cloneStatus(status: ShortcutStatus): ShortcutStatus {
   return {
     entries: status.entries.map((entry) => ({ ...entry })),
@@ -185,16 +180,6 @@ export class ShortcutManager {
         available: false,
         message: "This shortcut is unavailable because another application is using it.",
         errorCode: "SHORTCUT_CONFLICT",
-      };
-    }
-
-    if (PLACEHOLDER_ACTIONS.has(action)) {
-      return {
-        action,
-        accelerator,
-        registered: true,
-        available: false,
-        message: "Reserved for a later Fluely milestone.",
       };
     }
 

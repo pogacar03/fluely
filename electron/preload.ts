@@ -1,11 +1,13 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
-  AnalysisRequest,
   AnalysisState,
   AnalysisStateChangedEvent,
   AnalysisStateListener,
   AppStatus,
   CodexStatus,
+  ConversationEvent,
+  ConversationEventListener,
+  ConversationSnapshot,
   FluelyApi,
   FluelySettings,
   IpcResult,
@@ -53,8 +55,6 @@ const api: FluelyApi = {
     validate: (path: string) => invoke<CodexStatus>("codex:validate", path),
   },
   analysis: {
-    start: (request: AnalysisRequest) => invoke<AnalysisState>("analysis:start", request),
-    cancel: () => invoke<AnalysisState>("analysis:cancel"),
     getStatus: () => invoke<AnalysisState>("analysis:get-status"),
     onStateChanged: (listener: AnalysisStateListener) => {
       const eventListener = (_event: Electron.IpcRendererEvent, event: AnalysisStateChangedEvent) => {
@@ -70,6 +70,14 @@ const api: FluelyApi = {
   },
   workspace: {
     execute: (command: WorkspaceCommand) => invoke<WorkspaceCommandResult>("workspace:execute", command),
+  },
+  conversation: {
+    getSnapshot: () => invoke<ConversationSnapshot>("conversation:get-snapshot"),
+    onEvent: (listener: ConversationEventListener) => {
+      const eventListener = (_event: Electron.IpcRendererEvent, event: ConversationEvent) => listener(event);
+      ipcRenderer.on("conversation:event", eventListener);
+      return () => ipcRenderer.removeListener("conversation:event", eventListener);
+    },
   },
 };
 

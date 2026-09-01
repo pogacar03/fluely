@@ -26,7 +26,7 @@ function screenshot(id, capturedAt) {
   };
 }
 
-function makeHarness({ captureFailure = null } = {}) {
+function makeHarness({ captureFailure = null, withWorkspace = true } = {}) {
   const registrations = new Map();
   const calls = [];
   const analysisCalls = [];
@@ -83,6 +83,42 @@ function makeHarness({ captureFailure = null } = {}) {
     onStateChanged: () => () => undefined,
   };
 
+  const workspace = {
+    execute: async (command) => {
+      switch (command.type) {
+        case "capture":
+          await screenshots.capture();
+          return { queue: screenshots.getState(), conversation: { sessionId: "session", revision: 0, messages: [], attachments: [] } };
+        case "remove":
+          return { queue: await screenshots.delete(command.screenshotId), conversation: { sessionId: "session", revision: 0, messages: [], attachments: [] } };
+        case "clear-queue":
+          return { queue: await screenshots.clear(), conversation: { sessionId: "session", revision: 0, messages: [], attachments: [] } };
+        case "clear-conversation":
+          return { queue: screenshots.getState(), conversation: { sessionId: "session", revision: 0, messages: [], attachments: [] } };
+        case "cancel":
+          return { queue: screenshots.getState(), conversation: { sessionId: "session", revision: 0, messages: [], attachments: [] }, analysis: await analysis.cancel() };
+        case "send":
+        case "capture-and-send": {
+          if (command.type === "capture-and-send") {
+            await screenshots.capture();
+          }
+          const queueSnapshot = screenshots.getState();
+          const state = await analysis.start({
+            prompt: command.prompt.trim() || "Analyze the attached screenshots.",
+            screenshotIds: queueSnapshot.items.map((item) => item.id),
+            intent: "answer",
+            fast: false,
+          });
+          return {
+            queue: queueSnapshot,
+            conversation: { sessionId: "session", revision: 0, messages: [], attachments: [] },
+            analysis: state,
+          };
+        }
+      }
+    },
+  };
+
   registerIpcHandlers({
     ipcMain: {
       handle(channel, handler) {
@@ -100,6 +136,7 @@ function makeHarness({ captureFailure = null } = {}) {
     },
     screenshots,
     analysis,
+    ...(withWorkspace ? { workspace } : {}),
     getAppStatus: () => ({ name: "Fluely", version: "0.1.0", platform: "linux", visible: true }),
   });
 
@@ -160,6 +197,18 @@ test("Send images sends all queued IDs, normalizes an empty prompt, and retains 
   }]);
   assert.deepEqual(result.value.queue.items.map((item) => item.id), [FIRST_ID, SECOND_ID]);
   assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [FIRST_ID, SECOND_ID]);
+});
+
+test("workspace IPC refuses direct sends when the canonical CommandRouter is absent", async () => {
+  const harness = makeHarness({ withWorkspace: false });
+  const execute = harness.registrations.get("workspace:execute");
+
+  const result = await execute({}, { type: "send", requestId: "send-without-router", prompt: "Question" });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "INTERNAL_ERROR");
+  assert.deepEqual(harness.calls, []);
+  assert.deepEqual(harness.analysisCalls, []);
 });
 
 test("duplicate workspace request IDs share one result and do not repeat a send", async () => {

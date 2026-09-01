@@ -132,71 +132,10 @@ function makeHarness(overrides = {}) {
   };
 }
 
-test("analysis IPC rejects malformed requests and unknown queued screenshot IDs before starting", async () => {
+test("analysis IPC no longer exposes a direct start or cancel channel", () => {
   const harness = makeHarness();
-
-  const malformed = await harness.registrations.get("analysis:start")({}, {
-    prompt: "question",
-    screenshotIds: ["../../settings.json"],
-    intent: "answer",
-    fast: false,
-  });
-  assert.equal(malformed.ok, false);
-  assert.equal(malformed.error.code, "INVALID_ARGUMENT");
-
-  const unknown = await harness.registrations.get("analysis:start")({}, {
-    prompt: "question",
-    screenshotIds: [unknownScreenshotId],
-    intent: "answer",
-    fast: false,
-  });
-  assert.equal(unknown.ok, false);
-  assert.equal(unknown.error.code, "SCREENSHOT_NOT_FOUND");
-  assert.deepEqual(harness.analysisCalls, []);
-
-  const notAnObject = await harness.registrations.get("analysis:start")({}, null);
-  assert.equal(notAnObject.ok, false);
-  assert.equal(notAnObject.error.code, "INVALID_ARGUMENT");
-});
-
-test("analysis IPC forwards only the validated request and serializes service failures", async () => {
-  const expected = {
-    prompt: "Summarize this screen",
-    screenshotIds: [screenshotId],
-    intent: "recap",
-    fast: true,
-  };
-  const harness = makeHarness();
-  const result = await harness.registrations.get("analysis:start")({}, expected);
-
-  assert.equal(result.ok, true);
-  assert.deepEqual(harness.analysisCalls, [expected]);
-  assert.deepEqual(result.value.screenshotIds, [screenshotId]);
-  assert.equal(Object.hasOwn(result.value, "paths"), false);
-
-  const failingHarness = makeHarness({
-    analysis: {
-      start: () => {
-        throw {
-          code: "ANALYSIS_IN_PROGRESS",
-          message: "already running",
-          action: "Cancel the running request first.",
-        };
-      },
-      cancel: () => ({ status: "cancelled" }),
-      getState: () => ({ status: "running" }),
-      onStateChanged: () => () => undefined,
-    },
-  });
-  const failure = await failingHarness.registrations.get("analysis:start")({}, expected);
-  assert.deepEqual(failure, {
-    ok: false,
-    error: {
-      code: "ANALYSIS_IN_PROGRESS",
-      message: "already running",
-      action: "Cancel the running request first.",
-    },
-  });
+  assert.equal(harness.registrations.has("analysis:start"), false);
+  assert.equal(harness.registrations.has("analysis:cancel"), false);
 });
 
 test("window opacity IPC clamps valid values and rejects invalid input", async () => {
@@ -333,8 +272,8 @@ test("settings updates refresh the next analysis provider call without changing 
     intent: "answer",
     fast: false,
   };
-  const first = await registrations.get("analysis:start")({}, request);
-  assert.equal(first.ok, true);
+  const first = analysis.start(request);
+  assert.equal(first.status, "running");
   await firstProviderStarted;
 
   const updated = await registrations.get("settings:update")({}, {
@@ -351,8 +290,8 @@ test("settings updates refresh the next analysis provider call without changing 
 
   releaseFirst();
   await analysis.whenIdle();
-  const second = await registrations.get("analysis:start")({}, request);
-  assert.equal(second.ok, true);
+  const second = analysis.start(request);
+  assert.equal(second.status, "running");
   await analysis.whenIdle();
 
   assert.equal(calls.length, 2);
