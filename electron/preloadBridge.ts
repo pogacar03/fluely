@@ -10,6 +10,8 @@ import type {
   FluelyApi,
   FluelySettings,
   IpcResult,
+  PhoneGatewayStatus,
+  PhoneGatewayStatusListener,
   SettingsPatch,
   ScreenshotStateListener,
   ScreenshotState,
@@ -111,6 +113,26 @@ export function exposeFluelyApi(
         };
         ipcRenderer.on("conversation:event", eventListener);
         return () => ipcRenderer.removeListener?.("conversation:event", eventListener);
+      },
+    },
+    phoneGateway: {
+      getStatus: () => invoke<PhoneGatewayStatus>(ipcRenderer, "phone-gateway:get-status"),
+      enable: () => invoke<PhoneGatewayStatus>(ipcRenderer, "phone-gateway:enable"),
+      disable: () => invoke<PhoneGatewayStatus>(ipcRenderer, "phone-gateway:disable"),
+      regeneratePairing: () => invoke<PhoneGatewayStatus>(ipcRenderer, "phone-gateway:regenerate-pairing"),
+      onStatusChanged: (listener: PhoneGatewayStatusListener) => {
+        if (!ipcRenderer.on || !ipcRenderer.removeListener) {
+          return () => undefined;
+        }
+
+        const eventListener = (...args: unknown[]) => {
+          const status = args[1] as PhoneGatewayStatus | undefined;
+          if (status) {
+            listener(status);
+          }
+        };
+        ipcRenderer.on("phone-gateway:status-changed", eventListener);
+        return () => ipcRenderer.removeListener?.("phone-gateway:status-changed", eventListener);
       },
     },
   });

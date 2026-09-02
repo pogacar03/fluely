@@ -5,11 +5,13 @@ import type {
   FluelySettings,
   IpcError,
   PrivacySettings,
+  PhoneGatewaySettings,
   SettingsPatch,
   ShortcutAction,
   ShortcutSettings,
   WindowSettings,
 } from "../../src/shared/ipc";
+import { DEFAULT_PHONE_GATEWAY_SETTINGS } from "../../src/shared/phone-gateway";
 
 const SHORTCUT_ACTIONS: readonly ShortcutAction[] = [
   "toggleVisibility",
@@ -47,6 +49,7 @@ export const DEFAULT_SETTINGS: FluelySettings = {
   window: { width: 960, height: 720, opacity: 0.92 },
   privacy: { ...DEFAULT_PRIVACY },
   codex: { ...DEFAULT_CODEX },
+  phoneGateway: { ...DEFAULT_PHONE_GATEWAY_SETTINGS },
 };
 
 const MIN_WINDOW_WIDTH = 480;
@@ -82,6 +85,7 @@ function cloneDefaultSettings(): FluelySettings {
     window: { ...DEFAULT_SETTINGS.window },
     privacy: { ...DEFAULT_SETTINGS.privacy },
     codex: { ...DEFAULT_SETTINGS.codex },
+    phoneGateway: { ...DEFAULT_SETTINGS.phoneGateway },
   };
 }
 
@@ -232,6 +236,10 @@ export function normalizeSettings(input: unknown): FluelySettings {
     );
   }
 
+  if (isRecord(input.phoneGateway) && typeof input.phoneGateway.enabled === "boolean") {
+    settings.phoneGateway.enabled = input.phoneGateway.enabled;
+  }
+
   return settings;
 }
 
@@ -302,6 +310,14 @@ export function normalizeSettingsPatch(input: unknown): SettingsPatch {
       codex.modelReasoningEffort = input.codex.modelReasoningEffort as CodexModelReasoningEffort;
     }
     patch.codex = codex;
+  }
+
+  if (isRecord(input.phoneGateway)) {
+    const phoneGateway: Partial<PhoneGatewaySettings> = {};
+    if ("enabled" in input.phoneGateway) {
+      phoneGateway.enabled = input.phoneGateway.enabled as boolean;
+    }
+    patch.phoneGateway = phoneGateway;
   }
 
   return patch;
@@ -463,6 +479,23 @@ export function validateSettingsPatch(input: unknown): IpcError | null {
     }
   }
 
+  if ("phoneGateway" in input && !isRecord(input.phoneGateway)) {
+    return {
+      code: "INVALID_ARGUMENT",
+      message: "Phone gateway settings must be an object.",
+      action: "Choose whether to start the phone companion on the LAN and try again.",
+    };
+  }
+
+  if (isRecord(input.phoneGateway) && "enabled" in input.phoneGateway &&
+    typeof input.phoneGateway.enabled !== "boolean") {
+    return {
+      code: "INVALID_ARGUMENT",
+      message: "Phone gateway enabled must be a boolean.",
+      action: "Choose whether to start the phone companion on the LAN and try again.",
+    };
+  }
+
   return null;
 }
 
@@ -473,5 +506,6 @@ export function mergeSettings(current: FluelySettings, patch: SettingsPatch): Fl
     window: { ...current.window, ...patch.window },
     privacy: { ...current.privacy, ...patch.privacy },
     codex: { ...current.codex, ...patch.codex },
+    phoneGateway: { ...current.phoneGateway, ...patch.phoneGateway },
   });
 }

@@ -29,6 +29,30 @@ test("normalizeSettings returns Fluely defaults for empty input", () => {
       sandboxMode: "read-only",
       modelReasoningEffort: "medium",
     },
+    phoneGateway: {
+      enabled: false,
+    },
+  });
+});
+
+test("phone gateway settings default off and discard every credential-shaped field", () => {
+  assert.deepEqual(normalizeSettings({
+    phoneGateway: {
+      enabled: true,
+      pairingSecret: "secret-that-must-not-persist",
+      cookieToken: "cookie-that-must-not-persist",
+    },
+  }).phoneGateway, { enabled: true });
+  assert.deepEqual(normalizeSettings({}).phoneGateway, { enabled: false });
+});
+
+test("validateSettingsPatch accepts only a boolean phone gateway enabled flag", () => {
+  assert.equal(validateSettingsPatch({ phoneGateway: { enabled: true } }), null);
+  const error = validateSettingsPatch({ phoneGateway: { enabled: "yes" } });
+  assert.deepEqual(error, {
+    code: "INVALID_ARGUMENT",
+    message: "Phone gateway enabled must be a boolean.",
+    action: "Choose whether to start the phone companion on the LAN and try again.",
   });
 });
 

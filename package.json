@@ -14,12 +14,15 @@
     "dev": "npm run build && electron .",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p electron/tsconfig.json --noEmit",
     "test": "npm run build:electron && node --test",
-    "package:dir": "npm run build && electron-builder --dir"
+    "package:dir": "npm run build && electron-builder --dir",
+    "smoke:packaged": "node scripts/smoke-packaged.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^40.10.2",
     "electron-builder": "^25.1.8",
@@ -29,5 +32,9 @@
     "rimraf": "^6.0.1",
     "typescript": "^5.7.2",
     "vite": "^6.0.5"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "ws": "^8.21.3"
   }
 }

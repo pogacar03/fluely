@@ -1,0 +1,48 @@
+import assert from "node:assert/strict";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { test } from "node:test";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const modulePath = path.resolve(__dirname, "../../../dist-electron/electron/services/network-address.js");
+let networkAddress;
+try {
+  networkAddress = await import(pathToFileURL(modulePath).href);
+} catch {
+  networkAddress = {};
+}
+
+test("private IPv4 selection rejects loopback, link-local, public, and non-IPv4 addresses", () => {
+  assert.equal(typeof networkAddress.isPrivateIpv4, "function");
+  for (const address of ["10.0.0.4", "172.16.4.9", "172.31.255.254", "192.168.1.20"]) {
+    assert.equal(networkAddress.isPrivateIpv4(address), true, address);
+  }
+  for (const address of [
+    "127.0.0.1",
+    "169.254.10.4",
+    "172.32.0.1",
+    "192.0.2.10",
+    "8.8.8.8",
+    "0.0.0.0",
+    "224.0.0.1",
+    "::1",
+  ]) {
+    assert.equal(networkAddress.isPrivateIpv4(address), false, address);
+  }
+});
+
+test("private IPv4 selection ignores internal and public interfaces without public fallback", () => {
+  assert.equal(typeof networkAddress.selectPrivateIpv4, "function");
+  const interfaces = {
+    lo0: [{ address: "127.0.0.1", family: "IPv4", internal: true }],
+    en0: [
+      { address: "203.0.113.10", family: "IPv4", internal: false },
+      { address: "fe80::1", family: "IPv6", internal: false },
+    ],
+    en1: [{ address: "192.168.50.8", family: "IPv4", internal: false }],
+  };
+  assert.equal(networkAddress.selectPrivateIpv4(interfaces), "192.168.50.8");
+  assert.equal(networkAddress.selectPrivateIpv4({
+    en0: [{ address: "198.51.100.7", family: "IPv4", internal: false }],
+  }), null);
+});

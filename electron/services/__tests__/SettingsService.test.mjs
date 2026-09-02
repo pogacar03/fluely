@@ -51,6 +51,25 @@ test("SettingsService writes normalized settings through an atomic 0600 file", a
   assert.equal(result.value.window.width, 480);
 });
 
+test("SettingsService persists only the phone gateway enabled flag", async () => {
+  const directory = await makeDirectory();
+  const service = new SettingsService(directory);
+  await service.load();
+
+  const result = await service.update({
+    phoneGateway: {
+      enabled: true,
+      pairingSecret: "must-not-persist",
+      cookieToken: "must-not-persist",
+    },
+  });
+  const onDisk = JSON.parse(await readFile(path.join(directory, "settings.json"), "utf8"));
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(onDisk.phoneGateway, { enabled: true });
+  assert.equal(JSON.stringify(onDisk).includes("must-not-persist"), false);
+});
+
 test("SettingsService backs up malformed JSON before returning defaults", async () => {
   const directory = await makeDirectory();
   await writeFile(path.join(directory, "settings.json"), "{malformed", "utf8");

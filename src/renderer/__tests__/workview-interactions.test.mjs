@@ -228,6 +228,12 @@ function createBackend({
       setOpacity: () => undefined,
       hide: () => undefined,
     },
+    phoneGateway: {
+      getStatus: () => ({ state: "disabled" }),
+      enable: async () => ({ ok: true, value: { state: "disabled" } }),
+      disable: async () => ({ ok: true, value: { state: "disabled" } }),
+      regeneratePairing: async () => ({ ok: true, value: { state: "disabled" } }),
+    },
     getAppStatus: () => ({ name: "Fluely", version: "0.1.0", platform: "linux", visible: true }),
   });
 

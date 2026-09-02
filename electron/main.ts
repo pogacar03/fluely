@@ -17,6 +17,7 @@ import type {
   ConversationEvent,
   FluelySettings,
   IpcError,
+  PhoneGatewayStatus,
   ScreenshotState,
 } from "../src/shared/ipc";
 import { AttachmentStore } from "./services/AttachmentStore";
@@ -33,7 +34,7 @@ import {
   createApplicationWindowFocusController,
   createApplicationInstancePort,
 } from "./services/application-instance";
-import { registerIpcHandlers } from "./services/ipcHandlers";
+import { registerIpcHandlers, serializePhoneGatewayStatus } from "./services/ipcHandlers";
 import { SettingsService } from "./services/SettingsService";
 import { ScreenshotService } from "./services/ScreenshotService";
 import { CommandRouter } from "./services/CommandRouter";
@@ -45,6 +46,11 @@ import { isScreenshotSessionActive, waitForScreenshotSessionIdle } from "./servi
 import { attachApplicationLifecycle, attachWindowLifecycle } from "./services/window-lifecycle";
 import { SESSION_MEDIA_SCHEME, createSessionMediaHandler } from "./services/session-media-protocol";
 import { getWindowPreferences } from "./windowConfig";
+import { PhoneGateway } from "./services/PhoneGateway";
+import {
+  createPhoneGatewayLifecycle,
+  type PhoneGatewayLifecycle,
+} from "./services/phone-gateway-lifecycle";
 
 let mainWindow: BrowserWindow | null = null;
 let mainWindowReady = false;
@@ -57,6 +63,8 @@ let analysisService: AnalysisService | null = null;
 let attachmentStore: AttachmentStore | null = null;
 let conversationStore: ConversationStore | null = null;
 let commandRouter: CommandRouter | null = null;
+let phoneGateway: PhoneGateway | null = null;
+let phoneGatewayLifecycle: PhoneGatewayLifecycle | null = null;
 let dockPrivacyCoordinator: DockPrivacyCoordinator | null = null;
 let ipcHandlersRegistered = false;
 let contextMediaProtocolRegistered = false;
@@ -199,6 +207,31 @@ function notifyConversationEvent(event: ConversationEvent): void {
   } catch {
     // The renderer may be tearing down while a conversation mutation completes.
   }
+}
+
+function notifyPhoneGatewayStatus(status: PhoneGatewayStatus): void {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) {
+    return;
+  }
+
+  try {
+    window.webContents.send("phone-gateway:status-changed", serializePhoneGatewayStatus(status));
+  } catch {
+    // The renderer may be tearing down while the gateway changes state.
+  }
+}
+
+function getPhoneGatewayLifecycle(settings: SettingsService): PhoneGatewayLifecycle {
+  if (!phoneGatewayLifecycle) {
+    phoneGateway = new PhoneGateway();
+    phoneGatewayLifecycle = createPhoneGatewayLifecycle({
+      gateway: phoneGateway,
+      settings,
+      notifyStatus: notifyPhoneGatewayStatus,
+    });
+  }
+  return phoneGatewayLifecycle;
 }
 
 function getScreenshotService(): ScreenshotService {
@@ -383,6 +416,8 @@ async function ensureSettingsService(): Promise<SettingsService> {
 
 async function initializeMainServices(): Promise<SettingsService> {
   const loadedSettings = await ensureSettingsService();
+  const phoneLifecycle = getPhoneGatewayLifecycle(loadedSettings);
+  await phoneLifecycle.initialize(loadedSettings.get().phoneGateway);
   const screenshots = getScreenshotService();
   const attachments = getAttachmentStore();
   const conversation = getConversationStore();
@@ -421,6 +456,10 @@ async function initializeMainServices(): Promise<SettingsService> {
       applyCodexSettings: (codexSettings) => analysis.updateCodexSettings(codexSettings),
       workspace: router,
       conversation,
+      phoneGateway: phoneLifecycle.handler,
+      applyPhoneGatewaySettings: async (phoneSettings) => {
+        await phoneLifecycle.applySettings(phoneSettings);
+      },
       window: {
         setOpacity: (opacity) => {
           const currentWindow = mainWindow;
@@ -566,6 +605,11 @@ if (acquireSingleInstance(applicationInstance, () => app.quit())) {
 
   const clearSessionStores = async (): Promise<void> => {
     try {
+      await phoneGatewayLifecycle?.dispose();
+    } catch {
+      // Best-effort gateway shutdown must not prevent the app from quitting.
+    }
+    try {
       analysisService?.cancel();
       await analysisService?.whenIdle();
     } catch {
@@ -608,6 +652,7 @@ if (acquireSingleInstance(applicationInstance, () => app.quit())) {
     shortcutManager?.dispose();
     analysisService?.cancel();
     screenshotService?.dispose();
+    void phoneGatewayLifecycle?.dispose();
   });
 
   app.on("window-all-closed", () => {

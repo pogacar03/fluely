@@ -5,6 +5,40 @@ import type {
   ConversationEventListener,
   ConversationSnapshot,
 } from "./conversation";
+import type {
+  PhoneGatewaySettings,
+  PhoneGatewayStatusListener,
+  PhoneGatewayStatus,
+} from "./phone-gateway";
+
+export type { PhoneGatewaySettings, PhoneGatewayStatus, PhoneGatewayStatusListener } from "./phone-gateway";
+
+export interface PhoneGatewayStatusSubscriptionSource {
+  onStatusChanged(listener: PhoneGatewayStatusListener): () => void;
+}
+
+/** Keeps renderer phone-gateway listeners scoped to a live component and idempotent. */
+export function subscribeToPhoneGatewayStatus(
+  source: PhoneGatewayStatusSubscriptionSource,
+  listener: PhoneGatewayStatusListener,
+  isActive: () => boolean = () => true,
+): () => void {
+  let subscribed = true;
+  const wrappedListener: PhoneGatewayStatusListener = (status) => {
+    if (subscribed && isActive()) {
+      listener(status);
+    }
+  };
+  const unsubscribeSource = source.onStatusChanged(wrappedListener);
+
+  return () => {
+    if (!subscribed) {
+      return;
+    }
+    subscribed = false;
+    unsubscribeSource();
+  };
+}
 
 export type {
   CommandResult,
@@ -66,6 +100,7 @@ export interface FluelySettings {
   window: WindowSettings;
   privacy: PrivacySettings;
   codex: CodexCliSettings;
+  phoneGateway: PhoneGatewaySettings;
 }
 
 export type SettingsPatch = Partial<{
@@ -74,6 +109,7 @@ export type SettingsPatch = Partial<{
   window: Partial<WindowSettings>;
   privacy: Partial<PrivacySettings>;
   codex: Partial<CodexCliSettings>;
+  phoneGateway: Partial<PhoneGatewaySettings>;
 }>;
 
 export type ScreenshotPermission =
@@ -284,6 +320,13 @@ export interface FluelyApi {
   conversation: {
     getSnapshot: () => Promise<IpcResult<ConversationSnapshot>>;
     onEvent: (listener: ConversationEventListener) => () => void;
+  };
+  phoneGateway: {
+    getStatus: () => Promise<IpcResult<PhoneGatewayStatus>>;
+    enable: () => Promise<IpcResult<PhoneGatewayStatus>>;
+    disable: () => Promise<IpcResult<PhoneGatewayStatus>>;
+    regeneratePairing: () => Promise<IpcResult<PhoneGatewayStatus>>;
+    onStatusChanged: (listener: PhoneGatewayStatusListener) => () => void;
   };
 }
 

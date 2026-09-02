@@ -11,6 +11,8 @@ import type {
   FluelyApi,
   FluelySettings,
   IpcResult,
+  PhoneGatewayStatus,
+  PhoneGatewayStatusListener,
   SettingsPatch,
   ScreenshotStateListener,
   ScreenshotState,
@@ -73,6 +75,17 @@ const api: FluelyApi = {
       const eventListener = (_event: Electron.IpcRendererEvent, event: ConversationEvent) => listener(event);
       ipcRenderer.on("conversation:event", eventListener);
       return () => ipcRenderer.removeListener("conversation:event", eventListener);
+    },
+  },
+  phoneGateway: {
+    getStatus: () => invoke<PhoneGatewayStatus>("phone-gateway:get-status"),
+    enable: () => invoke<PhoneGatewayStatus>("phone-gateway:enable"),
+    disable: () => invoke<PhoneGatewayStatus>("phone-gateway:disable"),
+    regeneratePairing: () => invoke<PhoneGatewayStatus>("phone-gateway:regenerate-pairing"),
+    onStatusChanged: (listener: PhoneGatewayStatusListener) => {
+      const eventListener = (_event: Electron.IpcRendererEvent, status: PhoneGatewayStatus) => listener(status);
+      ipcRenderer.on("phone-gateway:status-changed", eventListener);
+      return () => ipcRenderer.removeListener("phone-gateway:status-changed", eventListener);
     },
   },
 };

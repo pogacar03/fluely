@@ -7,6 +7,8 @@ import type {
   FluelySettings,
   IpcError,
   IpcResult,
+  PhoneGatewaySettings,
+  PhoneGatewayStatus,
   ScreenshotState,
   SettingsPatch,
   ShortcutSettings,
@@ -67,6 +69,13 @@ export interface WindowHandlerService {
   hide?: () => void | Promise<void>;
 }
 
+export interface PhoneGatewayHandlerService {
+  getStatus(): PhoneGatewayStatus;
+  enable(): IpcResult<PhoneGatewayStatus> | Promise<IpcResult<PhoneGatewayStatus>>;
+  disable(): IpcResult<PhoneGatewayStatus> | Promise<IpcResult<PhoneGatewayStatus>>;
+  regeneratePairing(): IpcResult<PhoneGatewayStatus> | Promise<IpcResult<PhoneGatewayStatus>>;
+}
+
 export interface WorkspaceHandlerService {
   execute(command: WorkspaceCommand, source?: "desktop" | "phone"): WorkspaceCommandResult | Promise<WorkspaceCommandResult>;
 }
@@ -97,6 +106,8 @@ export interface IpcHandlerDependencies {
   applyShortcuts?: (shortcuts: ShortcutSettings) => IpcResult<ShortcutStatus> | void;
   notifyAnalysisState?: (event: AnalysisStateChangedEvent) => void;
   notifyConversationEvent?: (event: ConversationEvent) => void;
+  phoneGateway?: PhoneGatewayHandlerService;
+  applyPhoneGatewaySettings?: (settings: PhoneGatewaySettings) => void | Promise<void>;
   getAppStatus(): AppStatus;
 }
 
@@ -433,6 +444,70 @@ function serializeCodexStatus(value: unknown, configuredPath: string): CodexStat
   return status;
 }
 
+const PHONE_GATEWAY_ERROR_MESSAGES: Record<Extract<PhoneGatewayStatus, { state: "error" }>["code"], string> = {
+  no_lan_address: "No private LAN address is available.",
+  port_unavailable: "No gateway port is available.",
+  start_failed: "Phone companion could not start.",
+};
+
+export function serializePhoneGatewayStatus(value: unknown): PhoneGatewayStatus {
+  if (!isRecord(value)) {
+    return { state: "disabled" };
+  }
+  if (value.state === "starting") {
+    return { state: "starting" };
+  }
+  if (value.state === "ready") {
+    let origin = "";
+    try {
+      const parsed = new URL(typeof value.origin === "string" ? value.origin : "");
+      if (parsed.protocol === "http:" && parsed.pathname === "/" && !parsed.search && !parsed.hash &&
+        !parsed.username && !parsed.password) {
+        origin = parsed.origin;
+      }
+    } catch {
+      origin = "";
+    }
+    const qrDataUrl = typeof value.qrDataUrl === "string" &&
+      /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(value.qrDataUrl)
+      ? value.qrDataUrl
+      : "";
+    const pairingExpiresAt = typeof value.pairingExpiresAt === "number" &&
+      Number.isSafeInteger(value.pairingExpiresAt) && value.pairingExpiresAt >= 0
+      ? value.pairingExpiresAt
+      : 0;
+    return {
+      state: "ready",
+      origin,
+      qrDataUrl,
+      pairingExpiresAt,
+      paired: value.paired === true,
+    };
+  }
+  if (value.state === "error" &&
+    (value.code === "no_lan_address" || value.code === "port_unavailable" || value.code === "start_failed")) {
+    return {
+      state: "error",
+      code: value.code,
+      message: PHONE_GATEWAY_ERROR_MESSAGES[value.code],
+    };
+  }
+  return { state: "disabled" };
+}
+
+function serializePhoneGatewayResult(
+  result: IpcResult<PhoneGatewayStatus>,
+): IpcResult<PhoneGatewayStatus> {
+  if (!result.ok) {
+    return failure<PhoneGatewayStatus>(safeIpcError(result.error.code, {
+      code: "INTERNAL_ERROR",
+      message: "Fluely could not update the phone companion.",
+      action: "Restart Fluely and try again.",
+    }));
+  }
+  return success(serializePhoneGatewayStatus(result.value));
+}
+
 function statusFailure(value: unknown): IpcError {
   return errorFromUnknown(value, {
     code: "INTERNAL_ERROR",
@@ -534,6 +609,8 @@ export function registerIpcHandlers({
   notifyConversationEvent,
   workspace,
   conversation,
+  phoneGateway,
+  applyPhoneGatewaySettings,
   getAppStatus,
 }: IpcHandlerDependencies): void {
   const analysisHandler = analysis ?? analysisService;
@@ -576,6 +653,18 @@ export function registerIpcHandlers({
         return failure<FluelySettings>(shortcutError);
       }
     }
+    if (result.ok && applyPhoneGatewaySettings && isRecord(payload) && isRecord(payload.phoneGateway) &&
+      typeof payload.phoneGateway.enabled === "boolean") {
+      try {
+        await applyPhoneGatewaySettings(result.value.phoneGateway);
+      } catch {
+        return failure<FluelySettings>({
+          code: "INTERNAL_ERROR",
+          message: "Fluely saved the phone companion setting but could not apply it.",
+          action: "Restart Fluely and try again.",
+        });
+      }
+    }
     return serializeIpcResult(result);
   });
 
@@ -610,6 +699,17 @@ export function registerIpcHandlers({
       const shortcutError = applyShortcutSettings(applyShortcuts, result.value.shortcuts);
       if (shortcutError) {
         return failure<FluelySettings>(shortcutError);
+      }
+    }
+    if (result.ok && applyPhoneGatewaySettings && result.value.phoneGateway) {
+      try {
+        await applyPhoneGatewaySettings(result.value.phoneGateway);
+      } catch {
+        return failure<FluelySettings>({
+          code: "INTERNAL_ERROR",
+          message: "Fluely restored settings but could not apply the phone companion state.",
+          action: "Restart Fluely to apply the restored phone companion setting.",
+        });
       }
     }
     return serializeIpcResult(result);
@@ -760,6 +860,40 @@ export function registerIpcHandlers({
         }));
       }
     });
+  }
+
+  if (phoneGateway) {
+    ipcMain.handle("phone-gateway:get-status", () => {
+      try {
+        return success(serializePhoneGatewayStatus(phoneGateway.getStatus()));
+      } catch {
+        return failure<PhoneGatewayStatus>({
+          code: "INTERNAL_ERROR",
+          message: "Fluely could not read the phone companion state.",
+          action: "Restart Fluely and try again.",
+        });
+      }
+    });
+
+    const actions = [
+      ["phone-gateway:enable", () => phoneGateway.enable()],
+      ["phone-gateway:disable", () => phoneGateway.disable()],
+      ["phone-gateway:regenerate-pairing", () => phoneGateway.regeneratePairing()],
+    ] as const;
+    for (const [channel, action] of actions) {
+      ipcMain.handle(channel, async () => {
+        try {
+          const result = await action();
+          return serializePhoneGatewayResult(result);
+        } catch {
+          return failure<PhoneGatewayStatus>({
+            code: "INTERNAL_ERROR",
+            message: "Fluely could not update the phone companion.",
+            action: "Restart Fluely and try again.",
+          });
+        }
+      });
+    }
   }
 
   if (windowHandler || applyWindowOpacityHandler) {

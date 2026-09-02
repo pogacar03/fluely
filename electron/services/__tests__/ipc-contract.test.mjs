@@ -41,6 +41,7 @@ test("preload exposes only the documented Fluely API groups", async () => {
     "app",
     "codex",
     "conversation",
+    "phoneGateway",
     "screenshots",
     "settings",
     "shortcuts",
@@ -56,6 +57,13 @@ test("preload exposes only the documented Fluely API groups", async () => {
   assert.deepEqual(Object.keys(exposedApi.window).sort(), ["hide", "setOpacity"]);
   assert.deepEqual(Object.keys(exposedApi.workspace).sort(), ["execute"]);
   assert.deepEqual(Object.keys(exposedApi.conversation).sort(), ["getSnapshot", "onEvent"]);
+  assert.deepEqual(Object.keys(exposedApi.phoneGateway).sort(), [
+    "disable",
+    "enable",
+    "getStatus",
+    "onStatusChanged",
+    "regeneratePairing",
+  ]);
   assert.equal(exposedApi.ipcRenderer, undefined);
   assert.equal(exposedApi.invoke, undefined);
   await exposedApi.settings.get();
@@ -73,6 +81,18 @@ test("preload exposes only the documented Fluely API groups", async () => {
   assert.equal(exposedApi.screenshots.clear, undefined);
   await exposedApi.workspace.execute({ type: "capture", requestId: "workspace-1" });
   await exposedApi.conversation.getSnapshot();
+  await exposedApi.phoneGateway.getStatus();
+  await exposedApi.phoneGateway.enable();
+  await exposedApi.phoneGateway.regeneratePairing();
+  await exposedApi.phoneGateway.disable();
+  let receivedPhoneStatus;
+  const unsubscribePhone = exposedApi.phoneGateway.onStatusChanged((status) => {
+    receivedPhoneStatus = status;
+  });
+  assert.equal(typeof unsubscribePhone, "function");
+  subscriptions.get("phone-gateway:status-changed")({}, { state: "disabled" });
+  assert.deepEqual(receivedPhoneStatus, { state: "disabled" });
+  unsubscribePhone();
   let receivedState;
   const unsubscribe = exposedApi.screenshots.onStateChanged((state) => {
     receivedState = state;
@@ -131,6 +151,10 @@ test("preload exposes only the documented Fluely API groups", async () => {
     "screenshots:get",
     "workspace:execute",
     "conversation:get-snapshot",
+    "phone-gateway:get-status",
+    "phone-gateway:enable",
+    "phone-gateway:regenerate-pairing",
+    "phone-gateway:disable",
   ]);
 });
 

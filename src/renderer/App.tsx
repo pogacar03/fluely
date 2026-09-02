@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { subscribeToAnalysisState, subscribeToScreenshotState } from "../shared/ipc";
+import {
+  subscribeToAnalysisState,
+  subscribeToPhoneGatewayStatus,
+  subscribeToScreenshotState,
+} from "../shared/ipc";
 import type { ConversationEvent, ConversationSnapshot } from "../shared/conversation";
 import type {
   AnalysisState,
@@ -7,6 +11,7 @@ import type {
   FluelySettings,
   IpcError,
   IpcResult,
+  PhoneGatewayStatus,
   SettingsPatch,
   ScreenshotState,
   WorkspaceCommand,
@@ -85,9 +90,11 @@ export function App() {
   const [analysisState, setAnalysisState] = useState<AnalysisState | null>(null);
   const [conversationSnapshot, setConversationSnapshot] = useState<ConversationSnapshot | null>(null);
   const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
+  const [phoneGatewayStatus, setPhoneGatewayStatus] = useState<PhoneGatewayStatus | null>(null);
   const [appVersion, setAppVersion] = useState("0.1.0");
   const [busy, setBusy] = useState(true);
   const [actionBusy, setActionBusy] = useState(false);
+  const [phoneGatewayBusy, setPhoneGatewayBusy] = useState(false);
   const [notice, setNotice] = useState<SetupNotice | null>(null);
   const mountedRef = useRef(true);
   const opacityRequestRef = useRef(0);
@@ -154,6 +161,27 @@ export function App() {
       }
     }
 
+    async function refreshPhoneGatewayStatus() {
+      try {
+        const result = await window.fluely.phoneGateway.getStatus();
+        if (!active) {
+          return;
+        }
+        if (result.ok) {
+          setPhoneGatewayStatus(result.value);
+        } else {
+          setNotice(noticeFromResult(result));
+        }
+      } catch {
+        if (active) {
+          setNotice({
+            tone: "error",
+            text: "Fluely could not refresh the phone companion. Restart the app and try again.",
+          });
+        }
+      }
+    }
+
     async function loadWorkspace() {
       try {
         const conversationSnapshotPromise: Promise<IpcResult<ConversationSnapshot>> = window.fluely.conversation.getSnapshot()
@@ -165,7 +193,7 @@ export function App() {
               action: "Retry the workspace action.",
             },
           }));
-        const [settingsResult, shortcutsResult, appResult, screenshotsResult, codexResult, analysisResult, conversationResult] = await Promise.all([
+        const [settingsResult, shortcutsResult, appResult, screenshotsResult, codexResult, analysisResult, conversationResult, phoneGatewayResult] = await Promise.all([
           window.fluely.settings.get(),
           window.fluely.shortcuts.get(),
           window.fluely.app.getStatus(),
@@ -173,13 +201,14 @@ export function App() {
           window.fluely.codex.getStatus(),
           window.fluely.analysis.getStatus(),
           conversationSnapshotPromise,
+          window.fluely.phoneGateway.getStatus(),
         ]);
 
         if (!active) {
           return;
         }
 
-        const firstError = [settingsResult, shortcutsResult, appResult, screenshotsResult, codexResult, analysisResult, conversationResult]
+        const firstError = [settingsResult, shortcutsResult, appResult, screenshotsResult, codexResult, analysisResult, conversationResult, phoneGatewayResult]
           .map((result) => noticeFromResult(result))
           .find((value): value is SetupNotice => value !== null);
         if (firstError) {
@@ -206,6 +235,9 @@ export function App() {
         } else {
           void conversationHydration.retryHydration();
         }
+        if (phoneGatewayResult.ok) {
+          setPhoneGatewayStatus(phoneGatewayResult.value);
+        }
       } catch {
         if (active) {
           setNotice({
@@ -223,6 +255,7 @@ export function App() {
 
     const refreshOnFocus = () => {
       void refreshScreenshotState();
+      void refreshPhoneGatewayStatus();
     };
     window.addEventListener("focus", refreshOnFocus);
     const unsubscribeScreenshotState = subscribeToScreenshotState(
@@ -236,6 +269,11 @@ export function App() {
       () => active,
     );
     const unsubscribeConversation = window.fluely.conversation.onEvent(applyConversationEvent);
+    const unsubscribePhoneGateway = subscribeToPhoneGatewayStatus(
+      window.fluely.phoneGateway,
+      (status) => setPhoneGatewayStatus(status),
+      () => active,
+    );
     void loadWorkspace();
 
     return () => {
@@ -245,6 +283,7 @@ export function App() {
       unsubscribeScreenshotState();
       unsubscribeAnalysisState();
       unsubscribeConversation();
+      unsubscribePhoneGateway();
       conversationHydrationRef.current = null;
     };
   }, []);
@@ -336,6 +375,100 @@ export function App() {
           tone: "error",
           text: "Fluely could not save the window opacity. Try again.",
         });
+      }
+    }
+  }
+
+  async function enablePhoneGateway() {
+    if (!mountedRef.current || phoneGatewayBusy) {
+      return;
+    }
+    setPhoneGatewayBusy(true);
+    try {
+      const result = await window.fluely.phoneGateway.enable();
+      if (!mountedRef.current) {
+        return;
+      }
+      if (!result.ok) {
+        showError(result.error);
+        return;
+      }
+      setPhoneGatewayStatus(result.value);
+      setSettings((current) => current ? { ...current, phoneGateway: { enabled: true } } : current);
+      if (result.value.state === "ready") {
+        setNotice({ tone: "success", text: "Phone companion is ready on your trusted local network." });
+      }
+    } catch {
+      if (mountedRef.current) {
+        setNotice({
+          tone: "error",
+          text: "Fluely could not start the phone companion. Check the LAN connection and try again.",
+        });
+      }
+    } finally {
+      if (mountedRef.current) {
+        setPhoneGatewayBusy(false);
+      }
+    }
+  }
+
+  async function disablePhoneGateway() {
+    if (!mountedRef.current || phoneGatewayBusy) {
+      return;
+    }
+    setPhoneGatewayBusy(true);
+    try {
+      const result = await window.fluely.phoneGateway.disable();
+      if (!mountedRef.current) {
+        return;
+      }
+      if (!result.ok) {
+        showError(result.error);
+        return;
+      }
+      setPhoneGatewayStatus(result.value);
+      setSettings((current) => current ? { ...current, phoneGateway: { enabled: false } } : current);
+      setNotice({ tone: "success", text: "Phone companion disabled and paired sessions revoked." });
+    } catch {
+      if (mountedRef.current) {
+        setNotice({
+          tone: "error",
+          text: "Fluely could not disable the phone companion. Try again.",
+        });
+      }
+    } finally {
+      if (mountedRef.current) {
+        setPhoneGatewayBusy(false);
+      }
+    }
+  }
+
+  async function regeneratePhonePairing() {
+    if (!mountedRef.current || phoneGatewayBusy) {
+      return;
+    }
+    setPhoneGatewayBusy(true);
+    try {
+      const result = await window.fluely.phoneGateway.regeneratePairing();
+      if (!mountedRef.current) {
+        return;
+      }
+      if (!result.ok) {
+        showError(result.error);
+        return;
+      }
+      setPhoneGatewayStatus(result.value);
+      setNotice({ tone: "success", text: "A new pairing code was generated. Any previous phone session was revoked." });
+    } catch {
+      if (mountedRef.current) {
+        setNotice({
+          tone: "error",
+          text: "Fluely could not generate a new pairing code. Try again.",
+        });
+      }
+    } finally {
+      if (mountedRef.current) {
+        setPhoneGatewayBusy(false);
       }
     }
   }
@@ -513,6 +646,11 @@ export function App() {
         notice={notice}
         onStart={startSetup}
         onBackToWork={settings.setupComplete ? () => { navigation.openWork(); } : undefined}
+        phoneGatewayStatus={phoneGatewayStatus}
+        phoneGatewayBusy={phoneGatewayBusy}
+        onPhoneGatewayEnable={enablePhoneGateway}
+        onPhoneGatewayDisable={disablePhoneGateway}
+        onPhoneGatewayRegeneratePairing={regeneratePhonePairing}
       />
     );
   }

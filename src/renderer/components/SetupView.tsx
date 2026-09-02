@@ -4,9 +4,11 @@ import type {
   CodexModelReasoningEffort,
   CodexStatus,
   FluelySettings,
+  PhoneGatewayStatus,
   SettingsPatch,
 } from "../../shared/ipc";
 import { timeoutPolicyCopy } from "../../shared/workspace-view";
+import { PhoneConnectionPanel } from "./PhoneConnectionPanel";
 
 export interface SetupNotice {
   tone: "success" | "error";
@@ -20,6 +22,11 @@ export interface SetupViewProps {
   notice?: SetupNotice | null;
   onStart: (settingsPatch: SettingsPatch) => Promise<void> | void;
   onBackToWork?: () => Promise<void> | void;
+  phoneGatewayStatus: PhoneGatewayStatus | null;
+  phoneGatewayBusy?: boolean;
+  onPhoneGatewayEnable: () => Promise<void> | void;
+  onPhoneGatewayDisable: () => Promise<void> | void;
+  onPhoneGatewayRegeneratePairing: () => Promise<void> | void;
 }
 
 interface SetupDraft {
@@ -96,7 +103,19 @@ function statusCopy(codexStatus: CodexStatus | null): { label: string; detail: s
   };
 }
 
-export function SetupView({ settings, codexStatus, busy = false, notice, onStart, onBackToWork }: SetupViewProps) {
+export function SetupView({
+  settings,
+  codexStatus,
+  busy = false,
+  notice,
+  onStart,
+  onBackToWork,
+  phoneGatewayStatus,
+  phoneGatewayBusy = false,
+  onPhoneGatewayEnable,
+  onPhoneGatewayDisable,
+  onPhoneGatewayRegeneratePairing,
+}: SetupViewProps) {
   const [draft, setDraft] = useState<SetupDraft>(() => makeDraft(settings));
   const [errors, setErrors] = useState<SetupErrors>({});
   const [submitting, setSubmitting] = useState(false);
@@ -303,6 +322,24 @@ export function SetupView({ settings, codexStatus, busy = false, notice, onStart
               <span className="switch-label">{draft.captureProtection ? "On" : "Off"}</span>
             </button>
           </div>
+
+          <div className="setup-section-heading setup-section-heading-spaced">
+            <div>
+              <span className="section-number">03</span>
+              <div>
+                <h3>Connect your phone</h3>
+                <p>Keep the companion on your trusted local network.</p>
+              </div>
+            </div>
+          </div>
+
+          <PhoneConnectionPanel
+            status={phoneGatewayStatus}
+            busy={disabled || phoneGatewayBusy}
+            onEnable={onPhoneGatewayEnable}
+            onDisable={onPhoneGatewayDisable}
+            onRegeneratePairing={onPhoneGatewayRegeneratePairing}
+          />
 
           <div className="setup-footer">
             <div className="setup-footnote">
