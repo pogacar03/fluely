@@ -65,3 +65,18 @@ test("expired pairing is rejected and replacement pairing revokes the previous p
   assert.equal(manager.authenticate(secondCookie), false);
   assert.equal(manager.exchange(replacement.secret), null);
 });
+
+test("expiring pending pairing clears only the pending secret and preserves a paired session", () => {
+  assert.equal(typeof pairingModule.createPairingSessionManager, "function");
+  const manager = pairingModule.createPairingSessionManager({
+    now: () => 10_000,
+    randomBytes: deterministicRandomBytes(),
+  });
+
+  const first = manager.issue();
+  const firstCookie = manager.exchange(first.secret).cookieToken;
+  manager.revokePending();
+
+  assert.equal(manager.authenticate(firstCookie), true);
+  assert.equal(manager.isPaired(), true);
+});

@@ -49,20 +49,38 @@ export function PhoneConnectionPanel({
   onRegeneratePairing,
 }: PhoneConnectionPanelProps) {
   const [now, setNow] = useState(() => Date.now());
-  const readyExpiry = status?.state === "ready" ? status.pairingExpiresAt : 0;
+  const [visibleQrDataUrl, setVisibleQrDataUrl] = useState("");
+  const isReady = status?.state === "ready";
+  const isPaired = isReady && status.paired;
+  const readyExpiry = isReady ? status.pairingExpiresAt : 0;
+  const readyQrDataUrl = isReady ? status.qrDataUrl : "";
+
+  useEffect(() => {
+    if (!isReady || isPaired || !readyQrDataUrl || readyExpiry <= Date.now()) {
+      setVisibleQrDataUrl("");
+      return;
+    }
+    setVisibleQrDataUrl(readyQrDataUrl);
+  }, [isPaired, isReady, readyExpiry, readyQrDataUrl]);
 
   useEffect(() => {
     setNow(Date.now());
-    if (status?.state !== "ready") {
+    if (!isReady || isPaired) {
       return undefined;
     }
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    const timer = window.setInterval(() => {
+      const currentTime = Date.now();
+      setNow(currentTime);
+      if (currentTime >= readyExpiry) {
+        setVisibleQrDataUrl("");
+      }
+    }, 1000);
     return () => window.clearInterval(timer);
-  }, [status?.state, readyExpiry]);
+  }, [isPaired, isReady, readyExpiry]);
 
-  const isReady = status?.state === "ready";
   const remainingMs = isReady ? status.pairingExpiresAt - now : 0;
-  const pairingActive = isReady && remainingMs > 0 && status.qrDataUrl.length > 0;
+  const pairingActive = isReady && !isPaired && remainingMs > 0 && visibleQrDataUrl.length > 0;
+  const pairingExpired = isReady && !isPaired && readyExpiry > 0 && remainingMs <= 0;
 
   return (
     <section className="phone-panel" aria-labelledby="phone-panel-title">
@@ -88,12 +106,20 @@ export function PhoneConnectionPanel({
       {status?.state === "ready" && (
         <div className="phone-ready-grid">
           <div className="phone-qr-card">
-            {pairingActive ? (
-              <img className="phone-qr" src={status.qrDataUrl} alt="Scan to pair your phone" />
-            ) : (
+            {isPaired ? (
+              <div className="phone-qr-paired" role="status">Pairing QR hidden while the phone is paired.</div>
+            ) : pairingActive ? (
+              <img className="phone-qr" src={visibleQrDataUrl} alt="Scan to pair your phone" />
+            ) : pairingExpired ? (
               <div className="phone-qr-expired" role="status">Pairing code expired</div>
+            ) : (
+              <div className="phone-qr-expired" role="status">Pairing code is being generated</div>
             )}
-            <span className="phone-expiry">{formatPairingExpiry(remainingMs)}</span>
+            {!isPaired && (
+              <span className="phone-expiry">
+                {pairingExpired ? formatPairingExpiry(remainingMs) : pairingActive ? formatPairingExpiry(remainingMs) : ""}
+              </span>
+            )}
           </div>
           <div className="phone-pairing-details">
             <span className="field-label">LAN address</span>

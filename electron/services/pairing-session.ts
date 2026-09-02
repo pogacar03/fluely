@@ -19,6 +19,7 @@ export interface PairingSessionManager {
   issue(nowMs?: number): { secret: string; expiresAt: number };
   exchange(secret: string, nowMs?: number): { cookieToken: string } | null;
   authenticate(cookieToken: string): boolean;
+  revokePending(): void;
   revokeAll(): void;
   isPaired(): boolean;
 }
@@ -98,6 +99,10 @@ export function createPairingSessionManager(
 
     authenticate(cookieToken) {
       return sessionToken !== null && constantTimeCredentialEqual(cookieToken, sessionToken);
+    },
+
+    revokePending() {
+      pending = null;
     },
 
     revokeAll() {

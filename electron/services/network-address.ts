@@ -8,7 +8,7 @@ export type NetworkInterfacesSnapshot = Record<string, readonly NetworkInterface
 
 function parseIpv4(address: string): [number, number, number, number] | null {
   const parts = address.split(".");
-  if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/.test(part))) {
+  if (parts.length !== 4 || parts.some((part) => !/^(0|[1-9]\d{0,2})$/.test(part))) {
     return null;
   }
 
@@ -18,6 +18,11 @@ function parseIpv4(address: string): [number, number, number, number] | null {
   }
 
   return octets as [number, number, number, number];
+}
+
+export function canonicalizeIpv4(address: string): string | null {
+  const parsed = parseIpv4(address);
+  return parsed ? parsed.join(".") : null;
 }
 
 /** Returns true only for RFC1918 IPv4 addresses, never for public or special-use ranges. */
@@ -47,8 +52,9 @@ export function selectPrivateIpv4(
       if (!candidate || candidate.internal || !isIpv4Family(candidate.family)) {
         continue;
       }
-      if (isPrivateIpv4(candidate.address)) {
-        return candidate.address;
+      const canonical = canonicalizeIpv4(candidate.address);
+      if (canonical && isPrivateIpv4(canonical)) {
+        return canonical;
       }
     }
   }

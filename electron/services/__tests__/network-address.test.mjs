@@ -31,6 +31,28 @@ test("private IPv4 selection rejects loopback, link-local, public, and non-IPv4 
   }
 });
 
+test("private IPv4 validation requires four canonical decimal octets without leading zeros", () => {
+  assert.equal(typeof networkAddress.isPrivateIpv4, "function");
+  for (const address of [
+    "010.8.8.8",
+    "10.08.8.8",
+    "+10.8.8.8",
+    "-10.8.8.8",
+    " 10.8.8.8",
+    "10.8.8.8 ",
+    "0x0a.8.8.8",
+    "10.8.8",
+    "10.8.8.8.1",
+  ]) {
+    assert.equal(networkAddress.isPrivateIpv4(address), false, address);
+  }
+
+  assert.equal(networkAddress.selectPrivateIpv4({
+    en0: [{ address: "010.8.8.8", family: "IPv4", internal: false }],
+    en1: [{ address: "10.8.8.8", family: "IPv4", internal: false }],
+  }), "10.8.8.8");
+});
+
 test("private IPv4 selection ignores internal and public interfaces without public fallback", () => {
   assert.equal(typeof networkAddress.selectPrivateIpv4, "function");
   const interfaces = {

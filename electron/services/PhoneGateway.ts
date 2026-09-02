@@ -9,12 +9,22 @@ import {
   type PhoneGatewayStatusListener,
   type PhoneGatewayStatus,
 } from "../../src/shared/phone-gateway";
-import { selectPrivateIpv4, type NetworkInterfacesSnapshot } from "./network-address";
+import {
+  canonicalizeIpv4,
+  isPrivateIpv4,
+  selectPrivateIpv4,
+  type NetworkInterfacesSnapshot,
+} from "./network-address";
 import {
   createPairingSessionManager,
   type PairingSessionManager,
   type PairingRandomBytesSource,
 } from "./pairing-session";
+import {
+  createPairingFailureLimiter,
+  type PairingFailureLimiter,
+  type PairingFailureRateLimitOptions,
+} from "./pairing-rate-limiter";
 
 const BIND_HOST = "0.0.0.0";
 const FALLBACK_PORT = 0;
@@ -64,6 +74,11 @@ export interface PhoneGatewayQrCodeAdapter {
   toDataURL(value: string): Promise<string> | string;
 }
 
+export interface PhoneGatewayTimer {
+  setTimeout(callback: () => void, delayMs: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
 export interface PhoneGatewayOptions {
   createServer?: (handler: PhoneGatewayRequestHandler) => GatewayHttpServer;
   networkInterfaces?: () => NetworkInterfacesSnapshot;
@@ -73,6 +88,8 @@ export interface PhoneGatewayOptions {
   fallbackPort?: number;
   now?: () => number;
   randomBytes?: PairingRandomBytesSource;
+  timer?: PhoneGatewayTimer;
+  pairingFailureRateLimit?: PairingFailureRateLimitOptions;
 }
 
 interface ListeningServer {
@@ -131,6 +148,19 @@ function responseEmpty(response: ServerResponse, statusCode: number): void {
   response.end();
 }
 
+function buildGatewayOrigin(address: string, port: number): string {
+  const canonicalAddress = canonicalizeIpv4(address);
+  if (!canonicalAddress || !isPrivateIpv4(canonicalAddress)) {
+    throw new Error("Gateway address is not a canonical private IPv4 address.");
+  }
+
+  const origin = new URL(`http://${canonicalAddress}:${port}`);
+  if (origin.protocol !== "http:" || origin.hostname !== canonicalAddress || !isPrivateIpv4(origin.hostname)) {
+    throw new Error("Gateway origin hostname did not preserve its private IPv4 address.");
+  }
+  return origin.origin;
+}
+
 export class PhoneGateway {
   private readonly createServer: (handler: PhoneGatewayRequestHandler) => GatewayHttpServer;
   private readonly getNetworkInterfaces: () => NetworkInterfacesSnapshot;
@@ -139,6 +169,8 @@ export class PhoneGateway {
   private readonly portCandidates: readonly number[];
   private readonly fallbackPort: number;
   private readonly now: () => number;
+  private readonly timer: PhoneGatewayTimer;
+  private readonly pairingFailures: PairingFailureLimiter;
   private server: GatewayHttpServer | null = null;
   private selectedAddress: string | null = null;
   private selectedPort: number | null = null;
@@ -150,6 +182,8 @@ export class PhoneGateway {
   private readonly statusListeners = new Set<PhoneGatewayStatusListener>();
   private startPromise: Promise<PhoneGatewayStatus> | undefined;
   private stopPromise: Promise<PhoneGatewayStatus> | undefined;
+  private pairingGeneration = 0;
+  private pairingExpiryTimer: unknown = null;
 
   public constructor(options: PhoneGatewayOptions = {}) {
     this.createServer = options.createServer ?? ((handler) => createHttpServer(handler) as unknown as GatewayHttpServer);
@@ -162,6 +196,14 @@ export class PhoneGateway {
     this.qrCode = options.qrCode ?? { toDataURL: (value) => QRCode.toDataURL(value) };
     this.portCandidates = options.portCandidates ?? PHONE_GATEWAY_PORTS;
     this.fallbackPort = options.fallbackPort ?? FALLBACK_PORT;
+    this.timer = options.timer ?? {
+      setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+      clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
+    };
+    this.pairingFailures = createPairingFailureLimiter({
+      now: this.now,
+      ...options.pairingFailureRateLimit,
+    });
   }
 
   public getStatus(): PhoneGatewayStatus {
@@ -206,6 +248,7 @@ export class PhoneGateway {
         await this.closeServer();
         this.status = errorStatus("start_failed", "Phone companion could not start.");
         this.pairing.revokeAll();
+        this.pairingFailures.reset();
         this.publishStatus();
         return this.getStatus();
       })
@@ -224,10 +267,12 @@ export class PhoneGateway {
     }
 
     const promise = (async () => {
+      this.invalidatePairingWork();
+      this.pairing.revokeAll();
+      this.pairingFailures.reset();
       if (this.startPromise) {
         await this.startPromise;
       }
-      this.pairing.revokeAll();
       await this.closeServer();
       this.status = { state: "disabled" };
       this.publishStatus();
@@ -242,6 +287,10 @@ export class PhoneGateway {
   }
 
   public async regeneratePairing(): Promise<PhoneGatewayStatus> {
+    if (this.stopPromise) {
+      await this.stopPromise;
+      return this.getStatus();
+    }
     if (this.startPromise) {
       await this.startPromise;
     }
@@ -249,15 +298,27 @@ export class PhoneGateway {
       return this.getStatus();
     }
 
+    const origin = this.origin;
+    const generation = this.beginPairingGeneration();
     const pairing = this.pairing.issue(this.now());
+    this.pairingFailures.reset();
+    this.pairingExpiresAt = pairing.expiresAt;
+    this.schedulePairingExpiry(generation, pairing.expiresAt);
+    this.publishStatus();
     try {
-      const qrDataUrl = await this.qrCode.toDataURL(this.buildPairingUrl(this.origin, pairing.secret));
+      const qrDataUrl = await this.qrCode.toDataURL(this.buildPairingUrl(origin, pairing.secret));
+      if (!this.isCurrentPairingGeneration(generation, origin)) {
+        return this.getStatus();
+      }
       this.qrDataUrl = qrDataUrl;
-      this.pairingExpiresAt = pairing.expiresAt;
       this.publishStatus();
       return this.getStatus();
     } catch {
+      if (!this.isCurrentPairingGeneration(generation, origin)) {
+        return this.getStatus();
+      }
       this.pairing.revokeAll();
+      this.pairingFailures.reset();
       await this.closeServer();
       this.status = errorStatus("start_failed", "Phone companion could not start.");
       this.publishStatus();
@@ -276,7 +337,9 @@ export class PhoneGateway {
       return errorStatus("no_lan_address", "No private LAN address is available.");
     }
 
+    const generation = this.beginPairingGeneration();
     const pairing = this.pairing.issue(this.now());
+    this.pairingFailures.reset();
     let listening: ListeningServer;
     try {
       listening = await this.listenOnAvailablePort();
@@ -291,20 +354,28 @@ export class PhoneGateway {
     this.server = listening.server;
     this.selectedAddress = address;
     this.selectedPort = listening.port;
-    this.origin = `http://${address}:${listening.port}`;
+    try {
+      this.origin = buildGatewayOrigin(address, listening.port);
+    } catch {
+      await this.closeServer();
+      this.pairing.revokeAll();
+      return errorStatus("start_failed", "Phone companion could not start.");
+    }
     this.trackServerConnections(listening.server);
+    this.pairingExpiresAt = pairing.expiresAt;
+    this.schedulePairingExpiry(generation, pairing.expiresAt);
 
     try {
-      this.qrDataUrl = await this.qrCode.toDataURL(this.buildPairingUrl(this.origin, pairing.secret));
-      this.pairingExpiresAt = pairing.expiresAt;
-      return {
-        state: "ready",
-        origin: this.origin,
-        qrDataUrl: this.qrDataUrl,
-        pairingExpiresAt: this.pairingExpiresAt,
-        paired: this.pairing.isPaired(),
-      };
+      const qrDataUrl = await this.qrCode.toDataURL(this.buildPairingUrl(this.origin, pairing.secret));
+      if (!this.isCurrentPairingGeneration(generation, this.origin)) {
+        return this.currentReadyStatus();
+      }
+      this.qrDataUrl = qrDataUrl;
+      return this.currentReadyStatus();
     } catch {
+      if (!this.isCurrentPairingGeneration(generation, this.origin)) {
+        return this.currentReadyStatus();
+      }
       await this.closeServer();
       this.pairing.revokeAll();
       return errorStatus("start_failed", "Phone companion could not start.");
@@ -391,6 +462,7 @@ export class PhoneGateway {
   }
 
   private async closeServer(): Promise<void> {
+    this.invalidatePairingWork();
     const server = this.server;
     this.server = null;
     this.selectedAddress = null;
@@ -432,6 +504,61 @@ export class PhoneGateway {
     return `${origin}/pair?secret=${encodeURIComponent(secret)}`;
   }
 
+  private currentReadyStatus(): Extract<PhoneGatewayStatus, { state: "ready" }> {
+    if (!this.origin) {
+      throw new Error("Gateway is not ready.");
+    }
+    return {
+      state: "ready",
+      origin: this.origin,
+      qrDataUrl: this.qrDataUrl,
+      pairingExpiresAt: this.pairingExpiresAt,
+      paired: this.pairing.isPaired(),
+    };
+  }
+
+  private clearPairingExpiryTimer(): void {
+    if (this.pairingExpiryTimer === null) {
+      return;
+    }
+    try {
+      this.timer.clearTimeout(this.pairingExpiryTimer);
+    } finally {
+      this.pairingExpiryTimer = null;
+    }
+  }
+
+  private invalidatePairingWork(): void {
+    this.pairingGeneration += 1;
+    this.clearPairingExpiryTimer();
+    this.qrDataUrl = "";
+    this.pairingExpiresAt = 0;
+  }
+
+  private beginPairingGeneration(): number {
+    this.invalidatePairingWork();
+    return this.pairingGeneration;
+  }
+
+  private isCurrentPairingGeneration(generation: number, origin: string): boolean {
+    return generation === this.pairingGeneration && this.server !== null && this.origin === origin;
+  }
+
+  private schedulePairingExpiry(generation: number, expiresAt: number): void {
+    this.clearPairingExpiryTimer();
+    const delayMs = Math.max(0, expiresAt - this.now());
+    this.pairingExpiryTimer = this.timer.setTimeout(() => {
+      if (generation !== this.pairingGeneration) {
+        return;
+      }
+      this.pairingExpiryTimer = null;
+      this.pairing.revokePending();
+      this.qrDataUrl = "";
+      this.pairingGeneration += 1;
+      this.publishStatus();
+    }, delayMs);
+  }
+
   private isAllowedRequestMetadata(request: IncomingMessage): boolean {
     if (!this.origin || this.selectedAddress === null || this.selectedPort === null) {
       return false;
@@ -470,7 +597,7 @@ export class PhoneGateway {
     }
 
     if (request.method === "GET" && url.pathname === "/pair") {
-      this.handlePairing(url, response);
+      this.handlePairing(url, response, request.socket?.remoteAddress ?? "<unknown>");
       return;
     }
 
@@ -487,20 +614,28 @@ export class PhoneGateway {
     responseBody(response, 404, "text/plain; charset=utf-8", "Not found.");
   }
 
-  private handlePairing(url: URL, response: ServerResponse): void {
+  private handlePairing(url: URL, response: ServerResponse, remoteAddress: string): void {
+    if (!this.pairingFailures.allow(remoteAddress)) {
+      responseBody(response, 429, "text/plain; charset=utf-8", "Too many pairing attempts.");
+      return;
+    }
+
     const secrets = url.searchParams.getAll("secret");
     if (secrets.length !== 1 || !secrets[0]) {
+      this.pairingFailures.recordFailure(remoteAddress);
       responseBody(response, 401, "text/plain; charset=utf-8", "Pairing failed.");
       return;
     }
 
     const exchange = this.pairing.exchange(secrets[0], this.now());
     if (!exchange) {
+      this.pairingFailures.recordFailure(remoteAddress);
       responseBody(response, 401, "text/plain; charset=utf-8", "Pairing failed.");
       return;
     }
 
-    this.qrDataUrl = "";
+    this.pairingFailures.recordSuccess();
+    this.invalidatePairingWork();
     response.setHeader("Set-Cookie", `${SESSION_COOKIE}=${exchange.cookieToken}; HttpOnly; SameSite=Strict; Path=/`);
     response.setHeader("Location", "/");
     this.publishStatus();

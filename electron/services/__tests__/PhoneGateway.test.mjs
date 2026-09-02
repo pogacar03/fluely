@@ -85,27 +85,41 @@ function randomBytesFactory() {
   };
 }
 
-function makeGateway({ unavailablePorts = new Set(), portCandidates, createServer, qrUrls } = {}) {
+function makeGateway({
+  unavailablePorts = new Set(),
+  portCandidates,
+  createServer,
+  qrUrls,
+  qrCode,
+  networkInterfaces,
+  now,
+  timer,
+  pairingFailureRateLimit,
+} = {}) {
   const servers = [];
+  const clock = now ?? (() => 10_000);
   const gateway = new gatewayModule.PhoneGateway({
-    networkInterfaces: () => ({
+    networkInterfaces: networkInterfaces ?? (() => ({
       en0: [{ address: "192.168.50.8", family: "IPv4", internal: false }],
-    }),
+    })),
     createServer: createServer ?? ((handler) => {
       const server = new FakeServer(handler, unavailablePorts);
       servers.push(server);
       return server;
     }),
     pairing: pairingModule.createPairingSessionManager({
-      now: () => 10_000,
+      now: clock,
       randomBytes: randomBytesFactory(),
     }),
-    qrCode: {
+    qrCode: qrCode ?? {
       toDataURL: async (url) => {
         qrUrls?.push(url);
         return `data:image/png;base64,${Buffer.from(url).toString("base64")}`;
       },
     },
+    now: clock,
+    ...(timer ? { timer } : {}),
+    ...(pairingFailureRateLimit ? { pairingFailureRateLimit } : {}),
     ...(portCandidates ? { portCandidates } : {}),
   });
   gateways.push(gateway);
@@ -178,6 +192,78 @@ function request(port, requestPath, headers = {}) {
     });
     void client.catch(reject);
   });
+}
+
+function invokeHandler(gateway, requestPath, {
+  method = "GET",
+  remoteAddress = "192.168.50.20",
+  headers = {},
+} = {}) {
+  return new Promise((resolve) => {
+    const responseHeaders = {};
+    const response = {
+      statusCode: 200,
+      setHeader(name, value) {
+        responseHeaders[name.toLowerCase()] = value;
+      },
+      end(body = "") {
+        resolve({
+          statusCode: response.statusCode,
+          headers: responseHeaders,
+          body: String(body),
+        });
+      },
+    };
+    const status = gateway.getStatus();
+    gateway.handleRequest({
+      method,
+      url: requestPath,
+      headers: {
+        host: status.state === "ready" ? new URL(status.origin).host : "",
+        ...headers,
+      },
+      socket: { remoteAddress },
+    }, response);
+  });
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
+function makeFakeTimer() {
+  const entries = [];
+  return {
+    entries,
+    setTimeout(callback, delay) {
+      const entry = { callback, delay, cleared: false };
+      entries.push(entry);
+      return entry;
+    },
+    clearTimeout(entry) {
+      if (entry) {
+        entry.cleared = true;
+      }
+    },
+    fire(entry) {
+      entry.callback();
+    },
+  };
+}
+
+function assertSafeHeaders(response) {
+  assert.equal(response.headers["cache-control"], "no-store");
+  assert.equal(response.headers["referrer-policy"], "no-referrer");
+  assert.equal(response.headers["x-content-type-options"], "nosniff");
+  assert.equal(response.headers["x-frame-options"], "DENY");
+  assert.match(response.headers["content-security-policy"], /default-src 'none'/);
+  assert.match(response.headers["content-security-policy"], /frame-ancestors 'none'/);
 }
 
 test("authenticated shell and pairing exchange use safe headers and never redirect with a secret", async () => {
@@ -276,4 +362,258 @@ test("gateway broadcasts paired state and replacement pairing revokes the old co
   await gateway.stop();
   assert.equal(statusEvents.at(-1).state, "disabled");
   unsubscribe();
+});
+
+test("gateway rejects non-canonical private addresses before constructing an advertised origin", async () => {
+  assert.equal(typeof gatewayModule.PhoneGateway, "function");
+  const { gateway } = makeGateway({
+    networkInterfaces: () => ({
+      en0: [{ address: "010.8.8.8", family: "IPv4", internal: false }],
+    }),
+  });
+
+  assert.deepEqual(await gateway.start(), {
+    state: "error",
+    code: "no_lan_address",
+    message: "No private LAN address is available.",
+  });
+});
+
+test("pairing failures are bounded per socket address and globally with generic 429 responses", async () => {
+  assert.equal(typeof gatewayModule.PhoneGateway, "function");
+  const qrUrls = [];
+  const { gateway } = makeGateway({
+    portCandidates: [0],
+    qrUrls,
+    pairingFailureRateLimit: {
+      windowMs: 1_000,
+      maxFailuresPerAddress: 3,
+      maxFailuresGlobal: 4,
+      maxTrackedAddresses: 8,
+    },
+  });
+  await gateway.start();
+
+  for (const requestPath of ["/pair", "/pair?secret=", "/pair?secret=one&secret=two"]) {
+    const response = await invokeHandler(gateway, requestPath, {
+      remoteAddress: "192.168.50.21",
+      headers: { "x-forwarded-for": "192.168.50.99" },
+    });
+    assert.equal(response.statusCode, 401, requestPath);
+    assert.equal(response.body, "Pairing failed.");
+    assertSafeHeaders(response);
+  }
+
+  const perAddressLimited = await invokeHandler(gateway, "/pair?secret=wrong", {
+    remoteAddress: "192.168.50.21",
+    headers: { "x-forwarded-for": "192.168.50.99" },
+  });
+  assert.equal(perAddressLimited.statusCode, 429);
+  assert.equal(perAddressLimited.body, "Too many pairing attempts.");
+  assertSafeHeaders(perAddressLimited);
+
+  const otherAddress = await invokeHandler(gateway, "/pair?secret=wrong", {
+    remoteAddress: "192.168.50.22",
+  });
+  assert.equal(otherAddress.statusCode, 401);
+
+  const globalLimited = await invokeHandler(gateway, "/pair?secret=wrong", {
+    remoteAddress: "192.168.50.23",
+  });
+  assert.equal(globalLimited.statusCode, 429);
+  assert.equal(globalLimited.body, "Too many pairing attempts.");
+  assertSafeHeaders(globalLimited);
+});
+
+test("successful pairing clears prior failure limits and stop clears limits before restart", async () => {
+  const qrUrls = [];
+  const { gateway } = makeGateway({
+    portCandidates: [0],
+    qrUrls,
+    pairingFailureRateLimit: {
+      windowMs: 60_000,
+      maxFailuresPerAddress: 5,
+      maxFailuresGlobal: 3,
+      maxTrackedAddresses: 8,
+    },
+  });
+  await gateway.start();
+  const secret = new URL(qrUrls[0]).searchParams.get("secret");
+
+  assert.equal((await invokeHandler(gateway, "/pair?secret=wrong", { remoteAddress: "192.168.50.30" })).statusCode, 401);
+  assert.equal((await invokeHandler(gateway, "/pair?secret=wrong", { remoteAddress: "192.168.50.31" })).statusCode, 401);
+  assert.equal((await invokeHandler(gateway, `/pair?secret=${secret}`, { remoteAddress: "192.168.50.32" })).statusCode, 302);
+  assert.equal((await invokeHandler(gateway, "/pair?secret=wrong", { remoteAddress: "192.168.50.32" })).statusCode, 401);
+  assert.equal((await invokeHandler(gateway, "/pair?secret=wrong", { remoteAddress: "192.168.50.32" })).statusCode, 401);
+  assert.equal((await invokeHandler(gateway, "/pair?secret=wrong", { remoteAddress: "192.168.50.32" })).statusCode, 401);
+  assert.equal((await invokeHandler(gateway, "/pair?secret=wrong", { remoteAddress: "192.168.50.32" })).statusCode, 429);
+
+  await gateway.stop();
+  await gateway.start();
+  assert.equal((await invokeHandler(gateway, "/pair?secret=wrong", { remoteAddress: "192.168.50.32" })).statusCode, 401);
+});
+
+test("gateway keeps the B1 GET Host and Origin boundary and does not add write routes", async () => {
+  const { gateway } = makeGateway({ portCandidates: [0] });
+  const ready = await gateway.start();
+  const host = new URL(ready.origin).host;
+
+  assert.equal((await invokeHandler(gateway, "/", { headers: { host: "attacker.invalid" } })).statusCode, 404);
+  assert.equal((await invokeHandler(gateway, "/", { headers: { origin: "http://attacker.invalid" } })).statusCode, 404);
+  assert.equal((await invokeHandler(gateway, "/pair?secret=wrong", {
+    method: "POST",
+    headers: { host },
+  })).statusCode, 404);
+});
+
+test("late concurrent QR generation cannot overwrite the latest valid pairing", async () => {
+  const qrCalls = [];
+  const qrDeferreds = [];
+  const { gateway } = makeGateway({
+    portCandidates: [0],
+    qrCode: {
+      toDataURL: (url) => {
+        const pending = deferred();
+        qrCalls.push(url);
+        qrDeferreds.push(pending);
+        return pending.promise;
+      },
+    },
+  });
+
+  const starting = gateway.start();
+  assert.equal(qrDeferreds.length, 0);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(qrDeferreds.length, 1);
+  qrDeferreds[0].resolve("data:image/png;base64,start");
+  await starting;
+
+  const first = gateway.regeneratePairing();
+  const second = gateway.regeneratePairing();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(qrDeferreds.length, 3);
+
+  qrDeferreds[2].resolve("data:image/png;base64,latest");
+  await second;
+  qrDeferreds[1].resolve("data:image/png;base64,stale");
+  await first;
+
+  const status = gateway.getStatus();
+  assert.equal(status.state, "ready");
+  assert.equal(status.qrDataUrl, "data:image/png;base64,latest");
+  assert.equal(new URL(qrCalls[2]).searchParams.get("secret") !== new URL(qrCalls[1]).searchParams.get("secret"), true);
+  assert.equal(new URL(status.qrDataUrl).search, "");
+});
+
+test("a stale QR rejection from before stop/restart cannot tear down the restarted gateway", async () => {
+  const qrDeferreds = [];
+  const { gateway } = makeGateway({
+    portCandidates: [0],
+    qrCode: {
+      toDataURL: () => {
+        const pending = deferred();
+        qrDeferreds.push(pending);
+        return pending.promise;
+      },
+    },
+  });
+
+  const starting = gateway.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  qrDeferreds[0].resolve("data:image/png;base64,start");
+  await starting;
+
+  const stale = gateway.regeneratePairing();
+  await new Promise((resolve) => setImmediate(resolve));
+  await gateway.stop();
+
+  const restarting = gateway.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(qrDeferreds.length, 3);
+  qrDeferreds[2].resolve("data:image/png;base64,restarted");
+  await restarting;
+  qrDeferreds[1].reject(new Error("stale QR failure"));
+  await stale;
+
+  assert.deepEqual(gateway.getStatus(), {
+    state: "ready",
+    origin: "http://192.168.50.8:45678",
+    qrDataUrl: "data:image/png;base64,restarted",
+    pairingExpiresAt: 130_000,
+    paired: false,
+  });
+});
+
+test("stop revokes pending pairing before an in-flight QR generation finishes", async () => {
+  const qrDeferreds = [];
+  const qrUrls = [];
+  const { gateway } = makeGateway({
+    portCandidates: [0],
+    qrUrls,
+    qrCode: {
+      toDataURL: (url) => {
+        const pending = deferred();
+        qrUrls.push(url);
+        qrDeferreds.push(pending);
+        return pending.promise;
+      },
+    },
+  });
+
+  const starting = gateway.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  const secret = new URL(qrUrls[0]).searchParams.get("secret");
+  const stopping = gateway.stop();
+  const duringStop = await invokeHandler(gateway, `/pair?secret=${secret}`, {
+    headers: { host: "192.168.50.8:45678" },
+  });
+  assert.equal(duringStop.statusCode, 401);
+
+  qrDeferreds[0].resolve("data:image/png;base64,stopped");
+  await starting;
+  await stopping;
+  assert.deepEqual(gateway.getStatus(), { state: "disabled" });
+});
+
+test("pairing expiry clears the QR and pending secret, broadcasts status, and uses an injectable timer", async () => {
+  const timer = makeFakeTimer();
+  const qrUrls = [];
+  const statusEvents = [];
+  const { gateway } = makeGateway({ portCandidates: [0], qrUrls, timer });
+  gateway.onStatusChanged((status) => statusEvents.push(status));
+  await gateway.start();
+  const secret = new URL(qrUrls[0]).searchParams.get("secret");
+  assert.equal(timer.entries.length, 1);
+  assert.equal(timer.entries[0].delay, 120_000);
+
+  timer.fire(timer.entries[0]);
+
+  assert.deepEqual(gateway.getStatus(), {
+    state: "ready",
+    origin: "http://192.168.50.8:45678",
+    qrDataUrl: "",
+    pairingExpiresAt: 130_000,
+    paired: false,
+  });
+  assert.equal(statusEvents.at(-1).qrDataUrl, "");
+  assert.equal((await invokeHandler(gateway, `/pair?secret=${secret}`)).statusCode, 401);
+});
+
+test("regeneration and stop invalidate old timers so stale callbacks cannot clear newer state", async () => {
+  const timer = makeFakeTimer();
+  const { gateway } = makeGateway({ portCandidates: [0], timer });
+  await gateway.start();
+  const firstTimer = timer.entries[0];
+  const regenerated = await gateway.regeneratePairing();
+  const secondTimer = timer.entries[1];
+  assert.equal(firstTimer.cleared, true);
+  assert.equal(secondTimer.cleared, false);
+
+  timer.fire(firstTimer);
+  assert.equal(gateway.getStatus().qrDataUrl, regenerated.qrDataUrl);
+
+  await gateway.stop();
+  assert.equal(secondTimer.cleared, true);
+  timer.fire(secondTimer);
+  assert.deepEqual(gateway.getStatus(), { state: "disabled" });
 });

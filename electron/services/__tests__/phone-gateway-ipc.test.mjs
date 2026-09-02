@@ -7,7 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const bridgePath = path.resolve(__dirname, "../../../dist-electron/electron/preloadBridge.js");
 const handlersPath = path.resolve(__dirname, "../../../dist-electron/electron/services/ipcHandlers.js");
 const { exposeFluelyApi } = await import(pathToFileURL(bridgePath).href);
-const { registerIpcHandlers } = await import(pathToFileURL(handlersPath).href);
+const { registerIpcHandlers, serializePhoneGatewayStatus } = await import(pathToFileURL(handlersPath).href);
 
 const disabledStatus = { state: "disabled" };
 
@@ -108,4 +108,21 @@ test("settings IPC applies persisted phone gateway changes and reset disables it
   assert.equal(updateResult.ok, true);
   assert.equal(resetResult.ok, true);
   assert.deepEqual(applied, [enabledSettings.phoneGateway, disabledSettings.phoneGateway]);
+});
+
+test("IPC preserves an expired ready status with its QR data cleared", () => {
+  assert.equal(typeof serializePhoneGatewayStatus, "function");
+  assert.deepEqual(serializePhoneGatewayStatus({
+    state: "ready",
+    origin: "http://192.168.50.8:45678",
+    qrDataUrl: "",
+    pairingExpiresAt: 130_000,
+    paired: false,
+  }), {
+    state: "ready",
+    origin: "http://192.168.50.8:45678",
+    qrDataUrl: "",
+    pairingExpiresAt: 130_000,
+    paired: false,
+  });
 });
