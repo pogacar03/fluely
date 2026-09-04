@@ -9,7 +9,7 @@
   "scripts": {
     "clean": "rimraf dist dist-electron release",
     "build:renderer": "vite build",
-    "build:electron": "tsc -p electron/tsconfig.json",
+    "build:electron": "tsc -p electron/tsconfig.json && node scripts/build-phone.mjs",
     "build": "npm run clean && npm run build:renderer && npm run build:electron",
     "dev": "npm run build && electron .",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p electron/tsconfig.json --noEmit",

@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { createServer as createHttpServer } from "node:http";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test, afterEach } from "node:test";
+import WebSocket from "ws";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const gatewayPath = path.resolve(__dirname, "../../../dist-electron/electron/services/PhoneGateway.js");
@@ -18,6 +21,7 @@ try {
 }
 
 const gateways = [];
+const temporaryDirectories = [];
 
 class FakeServer {
   constructor(handler, unavailablePorts = new Set()) {
@@ -95,6 +99,10 @@ function makeGateway({
   now,
   timer,
   pairingFailureRateLimit,
+  projection,
+  context,
+  attachments,
+  phoneAssetsDirectory,
 } = {}) {
   const servers = [];
   const clock = now ?? (() => 10_000);
@@ -121,6 +129,10 @@ function makeGateway({
     ...(timer ? { timer } : {}),
     ...(pairingFailureRateLimit ? { pairingFailureRateLimit } : {}),
     ...(portCandidates ? { portCandidates } : {}),
+    ...(projection ? { projection } : {}),
+    ...(context ? { context } : {}),
+    ...(attachments ? { attachments } : {}),
+    ...(phoneAssetsDirectory ? { phoneAssetsDirectory } : {}),
   });
   gateways.push(gateway);
   return { gateway, servers };
@@ -128,6 +140,7 @@ function makeGateway({
 
 afterEach(async () => {
   await Promise.all(gateways.splice(0).map((gateway) => gateway.stop()));
+  await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
 test("gateway is disabled by default, binds only when started, falls back deterministically, and stops idempotently", async () => {
@@ -192,6 +205,47 @@ function request(port, requestPath, headers = {}) {
     });
     void client.catch(reject);
   });
+}
+
+function requestBuffer(port, requestPath, headers = {}) {
+  return new Promise((resolve, reject) => {
+    import("node:http").then(({ request: makeRequest }) => {
+      const req = makeRequest({ host: "127.0.0.1", port, path: requestPath, headers }, (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        response.on("end", () => resolve({
+          statusCode: response.statusCode,
+          headers: response.headers,
+          body: Buffer.concat(chunks),
+        }));
+      });
+      req.on("error", reject);
+      req.end();
+    }).catch(reject);
+  });
+}
+
+function makeProjection(initialSnapshot) {
+  let snapshot = structuredClone(initialSnapshot);
+  let snapshotReads = 0;
+  const listeners = new Set();
+  return {
+    getSnapshot: () => {
+      snapshotReads += 1;
+      return structuredClone(snapshot);
+    },
+    getSnapshotReadCount: () => snapshotReads,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    publish(event, nextSnapshot) {
+      snapshot = structuredClone(nextSnapshot ?? snapshot);
+      for (const listener of listeners) {
+        listener(structuredClone(event));
+      }
+    },
+  };
 }
 
 function invokeHandler(gateway, requestPath, {
@@ -616,4 +670,320 @@ test("regeneration and stop invalidate old timers so stale callbacks cannot clea
   assert.equal(secondTimer.cleared, true);
   timer.fire(secondTimer);
   assert.deepEqual(gateway.getStatus(), { state: "disabled" });
+});
+
+test("authenticated phone assets and media routes return exact bytes and generic safe failures", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "fluely-phone-media-test-"));
+  temporaryDirectories.push(root);
+  const contextPath = path.join(root, "context.png");
+  const attachmentPath = path.join(root, "attachment.png");
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x04, 0x05, 0x06]);
+  await writeFile(contextPath, pngBytes);
+  await writeFile(attachmentPath, pngBytes);
+  const contextId = "11111111-1111-4111-8111-111111111111";
+  const attachmentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const qrCalls = [];
+  const pairedGateway = makeGateway({
+    portCandidates: [0],
+    qrUrls: qrCalls,
+    createServer: (handler) => createHttpServer(handler),
+    context: { getManagedPaths: (ids) => ids[0] === contextId ? [contextPath] : [] },
+    attachments: { getPath: (id) => id === attachmentId ? attachmentPath : undefined },
+    projection: {
+      getSnapshot: () => ({ revision: 0, conversation: {
+        sessionId: "session-phone",
+        revision: 0,
+        messages: [],
+        attachments: [],
+      }, queue: [] }),
+      subscribe: () => () => undefined,
+    },
+  }).gateway;
+  const pairedReady = await pairedGateway.start();
+  const pairedPort = Number(new URL(pairedReady.origin).port);
+  const pairingSecret = new URL(qrCalls[0]).searchParams.get("secret");
+  const exchange = await request(pairedPort, `/pair?secret=${pairingSecret}`);
+  const cookieHeader = exchange.headers["set-cookie"][0].match(/^(fluely_phone_session=[^;]+)/)[1];
+
+  const protectedRoutes = [
+    "/",
+    "/phone.js",
+    "/phone.css",
+    `/api/context/${contextId}`,
+    `/api/attachments/${attachmentId}`,
+  ];
+  for (const route of protectedRoutes) {
+    const unauthorized = await requestBuffer(pairedPort, route);
+    assert.equal(unauthorized.statusCode, 401, route);
+    assertSafeHeaders(unauthorized);
+
+    const hostRejected = await requestBuffer(pairedPort, route, {
+      Cookie: cookieHeader,
+      Host: "attacker.invalid",
+    });
+    assert.equal(hostRejected.statusCode, 404, route);
+    assertSafeHeaders(hostRejected);
+
+    const originRejected = await requestBuffer(pairedPort, route, {
+      Cookie: cookieHeader,
+      Origin: "http://attacker.invalid",
+    });
+    assert.equal(originRejected.statusCode, 404, route);
+    assertSafeHeaders(originRejected);
+  }
+
+  for (const [route, headers] of [
+    [`/api/context/${contextId}/extra`, { Cookie: cookieHeader }],
+    [`/api/context/..%2F${contextId}`, { Cookie: cookieHeader }],
+    [`/api/context/${attachmentId}`, { Cookie: cookieHeader }],
+    [`/api/attachments/${contextId}`, { Cookie: cookieHeader }],
+    [`/api/context/${contextId}?content-type=image%2Fpng`, { Cookie: cookieHeader }],
+    [`/api/attachments/${attachmentId}`, { Cookie: cookieHeader, Range: "bytes=0-1" }],
+  ]) {
+    const rejected = await requestBuffer(pairedPort, route, headers);
+    assert.equal(rejected.statusCode, 404, route);
+    assert.equal(rejected.body.toString("utf8").includes("/Users/"), false);
+    assertSafeHeaders(rejected);
+  }
+
+  const contextResponse = await requestBuffer(pairedPort, `/api/context/${contextId}`, { Cookie: cookieHeader });
+  const attachmentResponse = await requestBuffer(pairedPort, `/api/attachments/${attachmentId}`, { Cookie: cookieHeader });
+  for (const response of [contextResponse, attachmentResponse]) {
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.body, pngBytes);
+    assert.equal(response.headers["content-type"], "image/png");
+    assert.equal(response.headers["content-length"], String(pngBytes.byteLength));
+    assert.equal(response.headers["cache-control"], "no-store");
+    assert.equal(response.headers["x-content-type-options"], "nosniff");
+    assert.equal(response.headers["content-disposition"], undefined);
+  }
+
+  for (const asset of ["/phone.js", "/phone.css", "/"]) {
+    const response = await requestBuffer(pairedPort, asset, { Cookie: cookieHeader });
+    assert.equal(response.statusCode, 200, asset);
+    assert.equal(response.body.includes(Buffer.from("/Users/")), false, asset);
+    assert.equal(response.body.includes(Buffer.from("fluely_phone_session")), false, asset);
+  }
+});
+
+test("authenticated WebSocket sends an immediate snapshot, ordered events, ping/pong, and fresh resync snapshots without commands", async () => {
+  const WS_TEST_DEADLINE_MS = 3_000;
+  const activeSockets = new Set();
+
+  const closeActiveSockets = () => {
+    for (const socket of activeSockets) {
+      try {
+        socket.terminate();
+      } catch {
+        // A test socket may already be closed.
+      }
+    }
+    activeSockets.clear();
+  };
+
+  const frameStates = new WeakMap();
+  const waitForObservedMessage = (socket, onFrame = () => undefined) => new Promise((resolve, reject) => {
+    const state = frameStates.get(socket);
+    assert.ok(state);
+    const deliver = (data) => {
+      try {
+        const frame = JSON.parse(data.toString("utf8"));
+        onFrame(frame);
+        resolve(frame);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    if (state.frames.length > 0) {
+      deliver(state.frames.shift());
+      return;
+    }
+    state.waiters.push({ resolve: deliver, reject });
+  });
+
+  const runWithDeadline = async (operation) => {
+    let timer;
+    try {
+      return await Promise.race([
+        operation(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("WS focused test deadline exceeded.")), WS_TEST_DEADLINE_MS);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      closeActiveSockets();
+    }
+  };
+
+  const connect = (wsUrl, options) => new Promise((resolve, reject) => {
+    const candidate = new WebSocket(wsUrl, options);
+    activeSockets.add(candidate);
+    const state = { frames: [], waiters: [] };
+    frameStates.set(candidate, state);
+    let opened = false;
+    let settled = false;
+    candidate.on("message", (data) => {
+      const waiter = state.waiters.shift();
+      if (waiter) {
+        waiter.resolve(data);
+      } else {
+        state.frames.push(data);
+      }
+    });
+    candidate.once("open", () => {
+      opened = true;
+      if (!settled) {
+        settled = true;
+        resolve(candidate);
+      }
+    });
+    candidate.on("error", () => {
+      if (!opened && !settled) {
+        settled = true;
+        reject(new Error("WebSocket client connection failed."));
+      }
+      for (const waiter of state.waiters.splice(0)) {
+        waiter.reject(new Error("WebSocket client frame failed."));
+      }
+    });
+    candidate.once("close", () => {
+      activeSockets.delete(candidate);
+      if (!opened && !settled) {
+        settled = true;
+        reject(new Error("WebSocket client closed before opening."));
+      }
+    });
+  });
+
+  const closeSocket = (socket) => new Promise((resolve) => {
+    if (socket.readyState === WebSocket.CLOSED) {
+      resolve();
+      return;
+    }
+    socket.once("close", () => {
+      activeSockets.delete(socket);
+      resolve();
+    });
+    socket.close();
+  });
+
+  const expectRejectedConnection = (wsUrl, options) => new Promise((resolve) => {
+    const candidate = new WebSocket(wsUrl, options);
+    activeSockets.add(candidate);
+    let settled = false;
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(result);
+    };
+    candidate.once("open", () => finish("opened"));
+    candidate.once("error", () => finish("rejected"));
+    candidate.once("close", () => {
+      activeSockets.delete(candidate);
+      finish("rejected");
+    });
+  });
+
+  await runWithDeadline(async () => {
+    const message = {
+      id: "message-1",
+      sequence: 1,
+      role: "assistant",
+      text: "Streaming",
+      attachmentIds: [],
+      status: "streaming",
+      createdAt: 100,
+    };
+    const initialSnapshot = {
+      revision: 0,
+      conversation: {
+        sessionId: "session-ws",
+        revision: 0,
+        messages: [],
+        attachments: [],
+      },
+      queue: [],
+    };
+    const projection = makeProjection(initialSnapshot);
+    const qrUrls = [];
+    const { gateway } = makeGateway({
+      portCandidates: [0],
+      qrUrls,
+      createServer: (handler) => createHttpServer(handler),
+      projection,
+    });
+    const ready = await gateway.start();
+    const port = Number(new URL(ready.origin).port);
+    const pairingSecret = new URL(qrUrls[0]).searchParams.get("secret");
+    const exchange = await request(port, `/pair?secret=${pairingSecret}`);
+    const cookieHeader = exchange.headers["set-cookie"]?.[0]?.match(/^(fluely_phone_session=[^;]+)/)?.[1];
+    assert.ok(cookieHeader);
+    const wsUrl = `ws://127.0.0.1:${port}/ws`;
+
+    const readsBeforeConnect = projection.getSnapshotReadCount();
+    const socket = await connect(wsUrl, { headers: { Cookie: cookieHeader }, origin: ready.origin });
+    const snapshotFrame = await waitForObservedMessage(socket);
+    assert.equal(snapshotFrame.type, "snapshot");
+    assert.equal(snapshotFrame.revision, 0);
+    assert.equal(snapshotFrame.payload.conversation.sessionId, "session-ws");
+    assert.equal(projection.getSnapshotReadCount(), readsBeforeConnect + 1);
+
+    const event = {
+      type: "conversation",
+      revision: 1,
+      event: {
+        type: "message-added",
+        revision: 1,
+        activeMessageId: message.id,
+        message,
+      },
+    };
+    projection.publish(event, {
+      ...initialSnapshot,
+      revision: 1,
+      conversation: { ...initialSnapshot.conversation, revision: 1, messages: [message], activeMessageId: message.id },
+    });
+    const eventFrame = await waitForObservedMessage(socket);
+    assert.deepEqual(eventFrame, { type: "event", revision: 1, payload: event.event });
+
+    socket.send(JSON.stringify({ type: "ping", at: 456 }));
+    assert.deepEqual(await waitForObservedMessage(socket), { type: "pong", at: 456 });
+
+    const readsBeforeResync = projection.getSnapshotReadCount();
+    socket.send(JSON.stringify({ type: "resync", requestId: "resync-1", afterRevision: 0 }));
+    const resyncFrame = await waitForObservedMessage(socket);
+    assert.equal(resyncFrame.type, "snapshot");
+    assert.equal(resyncFrame.revision, 1);
+    assert.equal(resyncFrame.payload.conversation.messages[0].text, "Streaming");
+    assert.equal(projection.getSnapshotReadCount(), readsBeforeResync + 1);
+
+    socket.send(JSON.stringify({ type: "command", command: { type: "capture", requestId: "b3" } }));
+    const invalidFrame = await waitForObservedMessage(socket);
+    assert.deepEqual(invalidFrame, {
+      type: "error",
+      code: "INVALID_FRAME",
+      message: "Invalid phone frame.",
+    });
+    assert.equal(socket.readyState, WebSocket.OPEN);
+
+    await closeSocket(socket);
+    const reconnected = await connect(wsUrl, { headers: { Cookie: cookieHeader }, origin: ready.origin });
+    const reconnectedSnapshot = await waitForObservedMessage(reconnected);
+    assert.equal(reconnectedSnapshot.type, "snapshot");
+    assert.equal(reconnectedSnapshot.payload.conversation.messages[0].status, "streaming");
+    await closeSocket(reconnected);
+
+    assert.equal(await expectRejectedConnection(wsUrl, { origin: ready.origin }), "rejected");
+    assert.equal(await expectRejectedConnection(wsUrl, {
+      headers: { Cookie: cookieHeader },
+      origin: "http://attacker.invalid",
+    }), "rejected");
+    assert.equal(await expectRejectedConnection(wsUrl, {
+      headers: { Cookie: cookieHeader, Host: "attacker.invalid" },
+      origin: ready.origin,
+    }), "rejected");
+  });
 });

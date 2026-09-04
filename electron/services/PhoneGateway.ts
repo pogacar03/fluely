@@ -1,14 +1,24 @@
 import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { readFile } from "node:fs/promises";
 import { networkInterfaces } from "node:os";
+import { join } from "node:path";
 import type { Socket } from "node:net";
 import * as QRCode from "qrcode";
 import {
+  PHONE_GATEWAY_MAX_FRAME_BYTES,
+  parsePhoneClientFrame,
   PHONE_GATEWAY_PAIRING_TTL_MS,
   PHONE_GATEWAY_PORTS,
+  serializePhoneServerFrame,
+  type ServerFrame,
   type PhoneGatewayStatusListener,
   type PhoneGatewayStatus,
 } from "../../src/shared/phone-gateway";
+import type {
+  SessionProjectionEvent,
+  SessionProjectionPort,
+} from "../../src/shared/conversation";
 import {
   canonicalizeIpv4,
   isPrivateIpv4,
@@ -25,10 +35,18 @@ import {
   type PairingFailureLimiter,
   type PairingFailureRateLimitOptions,
 } from "./pairing-rate-limiter";
+import {
+  createPhoneProjection,
+  type PhoneProjectionPort,
+} from "./phone-projection";
+import { WebSocketServer, WebSocket } from "ws";
+import type { RawData } from "ws";
 
 const BIND_HOST = "0.0.0.0";
 const FALLBACK_PORT = 0;
 const SESSION_COOKIE = "fluely_phone_session";
+const OPAQUE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const PHONE_ASSET_DIRECTORY = join(__dirname, "../../../dist-phone");
 const SECURITY_HEADERS = {
   "Content-Security-Policy": "default-src 'none'; base-uri 'none'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; img-src 'self' data:; script-src 'self'; style-src 'self'",
   "Cache-Control": "no-store",
@@ -36,19 +54,6 @@ const SECURITY_HEADERS = {
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
 } as const;
-
-const PHONE_SHELL = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Fluely Phone Companion</title>
-</head>
-<body>
-  <main><h1>Fluely Phone companion</h1><p>Your paired phone is connected.</p></main>
-</body>
-</html>
-`;
 
 export interface GatewaySocket {
   destroy?: () => void;
@@ -60,7 +65,7 @@ export interface GatewayHttpServer {
   listen(port: number, host: string, callback?: () => void): unknown;
   close(callback?: (error?: Error) => void): unknown;
   address(): { port: number } | string | null;
-  on(event: "error" | "connection", listener: (...args: unknown[]) => void): unknown;
+  on(event: "error" | "connection" | "upgrade", listener: (...args: unknown[]) => void): unknown;
   once(event: "error", listener: (...args: unknown[]) => void): unknown;
   removeListener?(event: "error", listener: (...args: unknown[]) => void): unknown;
 }
@@ -73,6 +78,16 @@ export type PhoneGatewayRequestHandler = (
 export interface PhoneGatewayQrCodeAdapter {
   toDataURL(value: string): Promise<string> | string;
 }
+
+export interface PhoneGatewayContextSource {
+  getManagedPaths(ids: readonly string[]): string[];
+}
+
+export interface PhoneGatewayAttachmentSource {
+  getPath(id: string): string | undefined;
+}
+
+export type PhoneGatewayFileReader = (path: string) => Promise<Uint8Array>;
 
 export interface PhoneGatewayTimer {
   setTimeout(callback: () => void, delayMs: number): unknown;
@@ -90,11 +105,20 @@ export interface PhoneGatewayOptions {
   randomBytes?: PairingRandomBytesSource;
   timer?: PhoneGatewayTimer;
   pairingFailureRateLimit?: PairingFailureRateLimitOptions;
+  projection?: SessionProjectionPort;
+  context?: PhoneGatewayContextSource;
+  attachments?: PhoneGatewayAttachmentSource;
+  phoneAssetsDirectory?: string;
+  readFile?: PhoneGatewayFileReader;
 }
 
 interface ListeningServer {
   server: GatewayHttpServer;
   port: number;
+}
+
+interface PhoneClient {
+  socket: WebSocket;
 }
 
 function isAddressInUse(error: unknown): boolean {
@@ -148,6 +172,54 @@ function responseEmpty(response: ServerResponse, statusCode: number): void {
   response.end();
 }
 
+function responseBytes(
+  response: ServerResponse,
+  statusCode: number,
+  contentType: string,
+  bytes: Uint8Array,
+): void {
+  const body = Buffer.from(bytes);
+  response.statusCode = statusCode;
+  response.setHeader("Content-Type", contentType);
+  response.setHeader("Content-Length", body.byteLength);
+  response.end(body);
+}
+
+type PhoneMediaRoute =
+  | { namespace: "context"; id: string }
+  | { namespace: "attachments"; id: string };
+
+function parseMediaRoute(pathname: string, search: string, hash: string): PhoneMediaRoute | null {
+  if (search || hash) {
+    return null;
+  }
+
+  const routes = [
+    ["/api/context/", "context"],
+    ["/api/attachments/", "attachments"],
+  ] as const;
+  for (const [prefix, namespace] of routes) {
+    if (!pathname.startsWith(prefix)) {
+      continue;
+    }
+    const rawId = pathname.slice(prefix.length);
+    if (!rawId || rawId.includes("/")) {
+      return null;
+    }
+    let id: string;
+    try {
+      id = decodeURIComponent(rawId);
+    } catch {
+      return null;
+    }
+    if (!OPAQUE_ID_PATTERN.test(id)) {
+      return null;
+    }
+    return { namespace, id };
+  }
+  return null;
+}
+
 function buildGatewayOrigin(address: string, port: number): string {
   const canonicalAddress = canonicalizeIpv4(address);
   if (!canonicalAddress || !isPrivateIpv4(canonicalAddress)) {
@@ -171,6 +243,11 @@ export class PhoneGateway {
   private readonly now: () => number;
   private readonly timer: PhoneGatewayTimer;
   private readonly pairingFailures: PairingFailureLimiter;
+  private readonly projection: PhoneProjectionPort | null;
+  private readonly context: PhoneGatewayContextSource | null;
+  private readonly attachments: PhoneGatewayAttachmentSource | null;
+  private readonly phoneAssetsDirectory: string;
+  private readonly readManagedFile: PhoneGatewayFileReader;
   private server: GatewayHttpServer | null = null;
   private selectedAddress: string | null = null;
   private selectedPort: number | null = null;
@@ -184,6 +261,10 @@ export class PhoneGateway {
   private stopPromise: Promise<PhoneGatewayStatus> | undefined;
   private pairingGeneration = 0;
   private pairingExpiryTimer: unknown = null;
+  private webSocketServer: WebSocketServer | null = null;
+  private removeProjectionSubscription: (() => void) | null = null;
+  private readonly phoneClients = new Set<PhoneClient>();
+  private lastBroadcastRevision = 0;
 
   public constructor(options: PhoneGatewayOptions = {}) {
     this.createServer = options.createServer ?? ((handler) => createHttpServer(handler) as unknown as GatewayHttpServer);
@@ -204,6 +285,11 @@ export class PhoneGateway {
       now: this.now,
       ...options.pairingFailureRateLimit,
     });
+    this.projection = options.projection ? createPhoneProjection(options.projection) : null;
+    this.context = options.context ?? null;
+    this.attachments = options.attachments ?? null;
+    this.phoneAssetsDirectory = options.phoneAssetsDirectory ?? PHONE_ASSET_DIRECTORY;
+    this.readManagedFile = options.readFile ?? (async (path) => new Uint8Array(await readFile(path)));
   }
 
   public getStatus(): PhoneGatewayStatus {
@@ -301,6 +387,7 @@ export class PhoneGateway {
     const origin = this.origin;
     const generation = this.beginPairingGeneration();
     const pairing = this.pairing.issue(this.now());
+    this.closePhoneClients();
     this.pairingFailures.reset();
     this.pairingExpiresAt = pairing.expiresAt;
     this.schedulePairingExpiry(generation, pairing.expiresAt);
@@ -362,6 +449,9 @@ export class PhoneGateway {
       return errorStatus("start_failed", "Phone companion could not start.");
     }
     this.trackServerConnections(listening.server);
+    this.createWebSocketServer();
+    this.lastBroadcastRevision = this.projection?.getSnapshot().revision ?? 0;
+    this.subscribeToProjection();
     this.pairingExpiresAt = pairing.expiresAt;
     this.schedulePairingExpiry(generation, pairing.expiresAt);
 
@@ -459,10 +549,219 @@ export class PhoneGateway {
         candidate.on?.("close", remove);
       }
     });
+    server.on("upgrade", (...args) => {
+      const request = args[0] as IncomingMessage | undefined;
+      const socket = args[1] as Socket | undefined;
+      const head = args[2] as Buffer | undefined;
+      if (!request || !socket || !head) {
+        return;
+      }
+      this.handleUpgrade(request, socket, head);
+    });
+  }
+
+  private createWebSocketServer(): void {
+    const webSocketServer = new WebSocketServer({
+      noServer: true,
+      maxPayload: PHONE_GATEWAY_MAX_FRAME_BYTES,
+    });
+    webSocketServer.on("error", () => {
+      // Protocol errors are reported to the affected socket when possible;
+      // they must never expose ws internals to the phone or main process.
+    });
+    webSocketServer.on("connection", (socket) => this.acceptWebSocket(socket));
+    this.webSocketServer = webSocketServer;
+  }
+
+  private subscribeToProjection(): void {
+    if (!this.projection || this.removeProjectionSubscription) {
+      return;
+    }
+    this.removeProjectionSubscription = this.projection.subscribe((event) => {
+      this.broadcastProjectionEvent(event);
+    });
+  }
+
+  private broadcastProjectionEvent(event: SessionProjectionEvent): void {
+    if (!this.projection || event.revision <= this.lastBroadcastRevision) {
+      return;
+    }
+
+    const snapshot = this.projection.getSnapshot();
+    const frame: ServerFrame = event.type === "conversation"
+      ? {
+        type: "event",
+        revision: event.revision,
+        payload: event.event,
+      }
+      : {
+        type: "snapshot",
+        revision: event.revision,
+        payload: snapshot,
+      };
+    this.lastBroadcastRevision = event.revision;
+    this.broadcastFrame(frame);
+  }
+
+  private broadcastFrame(frame: ServerFrame): void {
+    for (const client of [...this.phoneClients]) {
+      this.sendFrame(client, frame);
+    }
+  }
+
+  private sendFrame(client: PhoneClient, frame: ServerFrame): void {
+    if (client.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    try {
+      client.socket.send(serializePhoneServerFrame(frame));
+    } catch {
+      try {
+        client.socket.terminate();
+      } catch {
+        // The socket may already be closing.
+      }
+    }
+  }
+
+  private acceptWebSocket(socket: WebSocket): void {
+    if (!this.projection) {
+      socket.close(1011, "Phone projection unavailable.");
+      return;
+    }
+
+    const client: PhoneClient = { socket };
+    this.phoneClients.add(client);
+    const remove = () => {
+      this.phoneClients.delete(client);
+    };
+    socket.once("close", remove);
+    socket.once("error", remove);
+    socket.on("message", (data: RawData) => this.handleClientFrame(client, data));
+    const snapshot = this.projection.getSnapshot();
+    this.sendFrame(client, {
+      type: "snapshot",
+      revision: snapshot.revision,
+      payload: snapshot,
+    });
+  }
+
+  private handleClientFrame(client: PhoneClient, data: RawData): void {
+    let bytes: Uint8Array;
+    if (typeof data === "string") {
+      bytes = new TextEncoder().encode(data);
+    } else if (data instanceof ArrayBuffer) {
+      bytes = new Uint8Array(data);
+    } else if (Array.isArray(data)) {
+      bytes = Buffer.concat(data);
+    } else {
+      bytes = data;
+    }
+
+    const frame = parsePhoneClientFrame(bytes);
+    if (!frame) {
+      this.sendFrame(client, {
+        type: "error",
+        code: "INVALID_FRAME",
+        message: "Invalid phone frame.",
+      });
+      return;
+    }
+
+    if (frame.type === "ping") {
+      this.sendFrame(client, { type: "pong", at: frame.at });
+      return;
+    }
+
+    if (!this.projection) {
+      return;
+    }
+    const snapshot = this.projection.getSnapshot();
+    this.sendFrame(client, {
+      type: "snapshot",
+      revision: snapshot.revision,
+      payload: snapshot,
+    });
+  }
+
+  private handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer): void {
+    let url: URL;
+    try {
+      url = new URL(request.url ?? "/", "http://fluely.invalid");
+    } catch {
+      this.rejectUpgrade(socket, 404, "Not found.");
+      return;
+    }
+
+    if (
+      request.method !== "GET" ||
+      url.pathname !== "/ws" ||
+      url.search ||
+      url.hash ||
+      !this.isAllowedRequestMetadata(request, true)
+    ) {
+      this.rejectUpgrade(socket, 404, "Not found.");
+      return;
+    }
+
+    const token = parseCookies(request.headers.cookie).get(SESSION_COOKIE);
+    if (!token || !this.pairing.authenticate(token)) {
+      this.rejectUpgrade(socket, 401, "Authentication required.");
+      return;
+    }
+    if (!this.webSocketServer || !this.projection) {
+      this.rejectUpgrade(socket, 404, "Not found.");
+      return;
+    }
+
+    try {
+      this.webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+        this.webSocketServer?.emit("connection", webSocket, request);
+      });
+    } catch {
+      this.rejectUpgrade(socket, 404, "Not found.");
+    }
+  }
+
+  private rejectUpgrade(socket: Socket, statusCode: 401 | 404, body: string): void {
+    const reason = statusCode === 401 ? "Unauthorized" : "Not Found";
+    const bodyBytes = Buffer.from(body, "utf8");
+    const headers = [
+      `HTTP/1.1 ${statusCode} ${reason}`,
+      ...Object.entries(SECURITY_HEADERS).map(([name, value]) => `${name}: ${value}`),
+      "Content-Type: text/plain; charset=utf-8",
+      `Content-Length: ${bodyBytes.byteLength}`,
+      "Connection: close",
+      "",
+      "",
+    ].join("\r\n");
+    try {
+      socket.write(`${headers}${body}`);
+    } finally {
+      socket.destroy();
+    }
+  }
+
+  private closePhoneClients(): void {
+    for (const client of [...this.phoneClients]) {
+      try {
+        client.socket.close(1001, "Phone session ended.");
+        client.socket.terminate();
+      } catch {
+        // A peer can close concurrently while pairing or stopping.
+      }
+    }
+    this.phoneClients.clear();
   }
 
   private async closeServer(): Promise<void> {
     this.invalidatePairingWork();
+    this.closePhoneClients();
+    const webSocketServer = this.webSocketServer;
+    this.webSocketServer = null;
+    this.removeProjectionSubscription?.();
+    this.removeProjectionSubscription = null;
+    this.lastBroadcastRevision = 0;
     const server = this.server;
     this.server = null;
     this.selectedAddress = null;
@@ -480,6 +779,15 @@ export class PhoneGateway {
     this.sockets.clear();
     if (server) {
       await this.closeOneServer(server);
+    }
+    if (webSocketServer) {
+      await new Promise<void>((resolve) => {
+        try {
+          webSocketServer.close(() => resolve());
+        } catch {
+          resolve();
+        }
+      });
     }
   }
 
@@ -559,7 +867,7 @@ export class PhoneGateway {
     }, delayMs);
   }
 
-  private isAllowedRequestMetadata(request: IncomingMessage): boolean {
+  private isAllowedRequestMetadata(request: IncomingMessage, requireOrigin = false): boolean {
     if (!this.origin || this.selectedAddress === null || this.selectedPort === null) {
       return false;
     }
@@ -575,7 +883,7 @@ export class PhoneGateway {
     }
 
     const origin = request.headers.origin;
-    return origin === undefined || origin === this.origin;
+    return requireOrigin ? origin === this.origin : origin === undefined || origin === this.origin;
   }
 
   private handleRequest(request: IncomingMessage, response: ServerResponse): void {
@@ -601,17 +909,81 @@ export class PhoneGateway {
       return;
     }
 
-    if (request.method === "GET" && url.pathname === "/") {
-      const token = parseCookies(request.headers.cookie).get(SESSION_COOKIE);
-      if (!token || !this.pairing.authenticate(token)) {
-        responseBody(response, 401, "text/plain; charset=utf-8", "Authentication required.");
-        return;
-      }
-      responseBody(response, 200, "text/html; charset=utf-8", PHONE_SHELL);
+    if (request.method !== "GET") {
+      responseBody(response, 404, "text/plain; charset=utf-8", "Not found.");
       return;
     }
 
-    responseBody(response, 404, "text/plain; charset=utf-8", "Not found.");
+    const assetName = url.pathname === "/" && !url.search && !url.hash
+      ? "index.html"
+      : url.pathname === "/phone.js" && !url.search && !url.hash
+        ? "phone.js"
+        : url.pathname === "/phone.css" && !url.search && !url.hash
+          ? "phone.css"
+          : null;
+    const mediaRoute = parseMediaRoute(url.pathname, url.search, url.hash);
+    const isProtectedRoute = assetName !== null || mediaRoute !== null;
+
+    if (!isProtectedRoute) {
+      responseBody(response, 404, "text/plain; charset=utf-8", "Not found.");
+      return;
+    }
+
+    const token = parseCookies(request.headers.cookie).get(SESSION_COOKIE);
+    if (!token || !this.pairing.authenticate(token)) {
+      responseBody(response, 401, "text/plain; charset=utf-8", "Authentication required.");
+      return;
+    }
+
+    if (assetName) {
+      this.serveAsset(assetName, response);
+      return;
+    }
+
+    if (!mediaRoute) {
+      responseBody(response, 404, "text/plain; charset=utf-8", "Not found.");
+      return;
+    }
+
+    if (
+      request.headers.range !== undefined ||
+      request.headers["content-type"] !== undefined ||
+      request.headers["content-disposition"] !== undefined
+    ) {
+      responseBody(response, 404, "text/plain; charset=utf-8", "Not found.");
+      return;
+    }
+    this.serveMedia(mediaRoute, response);
+  }
+
+  private serveAsset(assetName: "index.html" | "phone.js" | "phone.css", response: ServerResponse): void {
+    const contentType = assetName === "index.html"
+      ? "text/html; charset=utf-8"
+      : assetName === "phone.js"
+        ? "text/javascript; charset=utf-8"
+        : "text/css; charset=utf-8";
+    void this.readManagedFile(join(this.phoneAssetsDirectory, assetName))
+      .then((bytes) => responseBytes(response, 200, contentType, bytes))
+      .catch(() => responseBody(response, 404, "text/plain; charset=utf-8", "Not found."));
+  }
+
+  private serveMedia(route: PhoneMediaRoute, response: ServerResponse): void {
+    let managedPath: string | undefined;
+    try {
+      managedPath = route.namespace === "context"
+        ? this.context?.getManagedPaths([route.id])[0]
+        : this.attachments?.getPath(route.id);
+    } catch {
+      managedPath = undefined;
+    }
+    if (!managedPath) {
+      responseBody(response, 404, "text/plain; charset=utf-8", "Not found.");
+      return;
+    }
+
+    void this.readManagedFile(managedPath)
+      .then((bytes) => responseBytes(response, 200, "image/png", bytes))
+      .catch(() => responseBody(response, 404, "text/plain; charset=utf-8", "Not found."));
   }
 
   private handlePairing(url: URL, response: ServerResponse, remoteAddress: string): void {
@@ -635,6 +1007,7 @@ export class PhoneGateway {
     }
 
     this.pairingFailures.recordSuccess();
+    this.closePhoneClients();
     this.invalidatePairingWork();
     response.setHeader("Set-Cookie", `${SESSION_COOKIE}=${exchange.cookieToken}; HttpOnly; SameSite=Strict; Path=/`);
     response.setHeader("Location", "/");

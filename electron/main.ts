@@ -47,6 +47,7 @@ import { attachApplicationLifecycle, attachWindowLifecycle } from "./services/wi
 import { SESSION_MEDIA_SCHEME, createSessionMediaHandler } from "./services/session-media-protocol";
 import { getWindowPreferences } from "./windowConfig";
 import { PhoneGateway } from "./services/PhoneGateway";
+import { SessionProjectionStore } from "./services/SessionProjectionStore";
 import {
   createPhoneGatewayLifecycle,
   type PhoneGatewayLifecycle,
@@ -65,10 +66,12 @@ let conversationStore: ConversationStore | null = null;
 let commandRouter: CommandRouter | null = null;
 let phoneGateway: PhoneGateway | null = null;
 let phoneGatewayLifecycle: PhoneGatewayLifecycle | null = null;
+let sessionProjectionStore: SessionProjectionStore | null = null;
 let dockPrivacyCoordinator: DockPrivacyCoordinator | null = null;
 let ipcHandlersRegistered = false;
 let contextMediaProtocolRegistered = false;
 let sessionShutdownStarted = false;
+const screenshotProjectionListeners = new Set<(state: ScreenshotState) => void>();
 
 const MIN_WINDOW_OPACITY = 0.35;
 const MAX_WINDOW_OPACITY = 1;
@@ -171,13 +174,22 @@ function getAppStatus(): AppStatus {
 }
 
 function notifyScreenshotState(state?: ScreenshotState): void {
+  const nextState = state ?? getScreenshotService().getState();
+  for (const listener of [...screenshotProjectionListeners]) {
+    try {
+      listener(nextState);
+    } catch {
+      // Projection subscribers must not break renderer notifications or queue mutations.
+    }
+  }
+
   const window = mainWindow;
   if (!window || window.isDestroyed()) {
     return;
   }
 
   try {
-    window.webContents.send("screenshots:state-changed", state ?? getScreenshotService().getState());
+    window.webContents.send("screenshots:state-changed", nextState);
   } catch {
     // The renderer may be tearing down while a background mutation completes.
   }
@@ -224,7 +236,15 @@ function notifyPhoneGatewayStatus(status: PhoneGatewayStatus): void {
 
 function getPhoneGatewayLifecycle(settings: SettingsService): PhoneGatewayLifecycle {
   if (!phoneGatewayLifecycle) {
-    phoneGateway = new PhoneGateway();
+    phoneGateway = new PhoneGateway({
+      projection: getSessionProjectionStore(),
+      context: {
+        getManagedPaths: (ids) => getScreenshotService().getManagedPaths(ids),
+      },
+      attachments: {
+        getPath: (id) => getAttachmentStore().getPath(id),
+      },
+    });
     phoneGatewayLifecycle = createPhoneGatewayLifecycle({
       gateway: phoneGateway,
       settings,
@@ -232,6 +252,23 @@ function getPhoneGatewayLifecycle(settings: SettingsService): PhoneGatewayLifecy
     });
   }
   return phoneGatewayLifecycle;
+}
+
+function getSessionProjectionStore(): SessionProjectionStore {
+  if (!sessionProjectionStore) {
+    const screenshots = getScreenshotService();
+    sessionProjectionStore = new SessionProjectionStore({
+      conversation: getConversationStore(),
+      queue: {
+        getState: () => screenshots.getState(),
+        onStateChanged: (listener) => {
+          screenshotProjectionListeners.add(listener);
+          return () => screenshotProjectionListeners.delete(listener);
+        },
+      },
+    });
+  }
+  return sessionProjectionStore;
 }
 
 function getScreenshotService(): ScreenshotService {
@@ -631,6 +668,7 @@ if (acquireSingleInstance(applicationInstance, () => app.quit())) {
     } catch {
       // Best-effort attachment cleanup is retried by the next startup sweep.
     }
+    sessionProjectionStore?.dispose();
   };
 
   app.on("before-quit", (event) => {
@@ -652,6 +690,7 @@ if (acquireSingleInstance(applicationInstance, () => app.quit())) {
     shortcutManager?.dispose();
     analysisService?.cancel();
     screenshotService?.dispose();
+    sessionProjectionStore?.dispose();
     void phoneGatewayLifecycle?.dispose();
   });
 

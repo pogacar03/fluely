@@ -1,0 +1,437 @@
+import type {
+  ConversationEvent,
+  ConversationMessage,
+  ConversationSnapshot,
+  SessionProjectionSnapshot,
+} from "../../src/shared/conversation";
+import type {
+  ServerFrame,
+} from "../../src/shared/phone-gateway";
+
+export type PhoneConnectionState = "connecting" | "connected" | "disconnected" | "error" | "revoked";
+
+export interface PhoneClientState {
+  snapshot: SessionProjectionSnapshot | null;
+  connection: PhoneConnectionState;
+  resyncPending: boolean;
+  reconnectAttempt: number;
+  errorMessage?: string;
+}
+
+export type PhoneClientEffect = { type: "resync"; afterRevision: number } | null;
+
+export interface PhoneFrameApplication {
+  state: PhoneClientState;
+  effect: PhoneClientEffect;
+}
+
+function cloneMessage(message: ConversationMessage): ConversationMessage {
+  return {
+    ...message,
+    attachmentIds: [...message.attachmentIds],
+    ...(message.error ? { error: { ...message.error } } : {}),
+  };
+}
+
+function cloneConversation(snapshot: ConversationSnapshot): ConversationSnapshot {
+  return {
+    sessionId: snapshot.sessionId,
+    revision: snapshot.revision,
+    messages: snapshot.messages.map(cloneMessage),
+    attachments: snapshot.attachments.map((attachment) => ({ ...attachment })),
+    ...(snapshot.activeMessageId ? { activeMessageId: snapshot.activeMessageId } : {}),
+  };
+}
+
+function cloneProjection(snapshot: SessionProjectionSnapshot): SessionProjectionSnapshot {
+  return {
+    revision: snapshot.revision,
+    conversation: cloneConversation(snapshot.conversation),
+    queue: snapshot.queue.map((item) => ({ ...item })),
+  };
+}
+
+function applyConversationEvent(
+  current: ConversationSnapshot,
+  event: ConversationEvent,
+): { status: "applied" | "duplicate" | "gap"; snapshot: ConversationSnapshot } {
+  const snapshot = cloneConversation(current);
+  if (event.revision <= snapshot.revision) {
+    return { status: "duplicate", snapshot };
+  }
+  if (event.revision !== snapshot.revision + 1) {
+    return { status: "gap", snapshot };
+  }
+
+  if (event.type === "cleared" || event.type === "turn-evicted") {
+    const next = cloneConversation(event.snapshot);
+    next.revision = event.revision;
+    if (event.activeMessageId) {
+      next.activeMessageId = event.activeMessageId;
+    } else {
+      delete next.activeMessageId;
+    }
+    return { status: "applied", snapshot: next };
+  }
+
+  if (event.type === "attachment-added") {
+    const index = snapshot.attachments.findIndex((item) => item.id === event.attachment.id);
+    if (index >= 0) {
+      snapshot.attachments[index] = { ...event.attachment };
+    } else {
+      snapshot.attachments.push({ ...event.attachment });
+    }
+  } else {
+    const index = snapshot.messages.findIndex((item) => item.id === event.message.id);
+    const nextMessage = cloneMessage(event.message);
+    if (index >= 0) {
+      snapshot.messages[index] = nextMessage;
+    } else {
+      snapshot.messages.push(nextMessage);
+      snapshot.messages.sort((left, right) => left.sequence - right.sequence);
+    }
+  }
+
+  snapshot.revision = event.revision;
+  if (event.activeMessageId) {
+    snapshot.activeMessageId = event.activeMessageId;
+  } else {
+    delete snapshot.activeMessageId;
+  }
+  return { status: "applied", snapshot };
+}
+
+export function createPhoneClientState(): PhoneClientState {
+  return {
+    snapshot: null,
+    connection: "connecting",
+    resyncPending: false,
+    reconnectAttempt: 0,
+  };
+}
+
+/** Applies one server frame without inventing local conversation messages. */
+export function applyPhoneServerFrame(
+  current: PhoneClientState,
+  frame: ServerFrame,
+): PhoneFrameApplication {
+  const state: PhoneClientState = {
+    ...current,
+    ...(current.snapshot ? { snapshot: cloneProjection(current.snapshot) } : {}),
+  };
+
+  if (frame.type === "snapshot") {
+    if (!state.snapshot || frame.revision >= state.snapshot.revision) {
+      state.snapshot = cloneProjection(frame.payload);
+      state.resyncPending = false;
+      state.errorMessage = undefined;
+    }
+    return { state, effect: null };
+  }
+
+  if (frame.type === "event") {
+    if (!state.snapshot || state.resyncPending) {
+      return {
+        state: state.snapshot
+          ? state
+          : { ...state, resyncPending: true },
+        effect: state.resyncPending ? null : {
+          type: "resync",
+          afterRevision: state.snapshot?.revision ?? 0,
+        },
+      };
+    }
+    if (frame.revision <= state.snapshot.revision) {
+      return { state, effect: null };
+    }
+    if (frame.revision !== state.snapshot.revision + 1) {
+      state.resyncPending = true;
+      return {
+        state,
+        effect: {
+          type: "resync",
+          afterRevision: state.snapshot.revision,
+        },
+      };
+    }
+    const applied = applyConversationEvent(state.snapshot.conversation, frame.payload);
+    if (applied.status === "gap") {
+      state.resyncPending = true;
+      return {
+        state,
+        effect: {
+          type: "resync",
+          afterRevision: state.snapshot.revision,
+        },
+      };
+    }
+    state.snapshot = {
+      ...state.snapshot,
+      revision: frame.revision,
+      conversation: applied.snapshot,
+    };
+    return { state, effect: null };
+  }
+
+  if (frame.type === "error") {
+    state.connection = frame.code === "SESSION_REVOKED" ? "revoked" : "error";
+    state.errorMessage = frame.message;
+  }
+  return { state, effect: null };
+}
+
+export function phoneImageUrl(namespace: "context" | "attachments", id: string): string {
+  return `/api/${namespace}/${encodeURIComponent(id)}`;
+}
+
+export function reconnectDelayMs(attempt: number): number {
+  const normalizedAttempt = Math.max(0, Math.floor(attempt));
+  return Math.min(8_000, 250 * (2 ** normalizedAttempt));
+}
+
+function timestampLabel(value: number): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? ""
+    : new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(date);
+}
+
+function messageStatusLabel(status: ConversationMessage["status"]): string {
+  switch (status) {
+    case "pending": return "Preparing";
+    case "streaming": return "Streaming";
+    case "completed": return "Complete";
+    case "error": return "Error";
+    case "cancelled": return "Cancelled";
+  }
+}
+
+function appendText(parent: HTMLElement, tag: string, text: string, className?: string): HTMLElement {
+  const element = document.createElement(tag);
+  if (className) {
+    element.className = className;
+  }
+  element.textContent = text;
+  parent.append(element);
+  return element;
+}
+
+function renderPhoneClient(root: HTMLElement, state: PhoneClientState): void {
+  root.replaceChildren();
+  const shell = document.createElement("main");
+  shell.className = "phone-shell";
+  appendText(shell, "p", "FLUELY PHONE COMPANION", "phone-eyebrow");
+  appendText(shell, "h1", "Your workspace, in sync", "phone-title");
+  const connectionText = state.connection === "connected"
+    ? "Connected"
+    : state.connection === "connecting"
+      ? "Connecting…"
+      : state.connection === "revoked"
+        ? "Pairing revoked"
+        : state.connection === "error"
+          ? "Connection error"
+          : "Disconnected — reconnecting…";
+  appendText(shell, "p", connectionText, `phone-connection phone-connection-${state.connection}`);
+  if (state.errorMessage) {
+    appendText(shell, "p", state.errorMessage, "phone-error");
+  }
+
+  const queueSection = document.createElement("section");
+  queueSection.className = "phone-card";
+  appendText(queueSection, "h2", "Context to send");
+  const queue = state.snapshot?.queue ?? [];
+  if (queue.length === 0) {
+    appendText(queueSection, "p", "No screenshots queued.", "phone-empty");
+  } else {
+    const queueList = document.createElement("div");
+    queueList.className = "phone-thumbnail-row";
+    for (const item of queue) {
+      const image = document.createElement("img");
+      image.src = phoneImageUrl("context", item.id);
+      image.alt = `Queued screenshot, ${item.width} by ${item.height}`;
+      image.width = 160;
+      image.height = Math.max(1, Math.round(160 * item.height / item.width));
+      queueList.append(image);
+    }
+    queueSection.append(queueList);
+  }
+  shell.append(queueSection);
+
+  const conversationSection = document.createElement("section");
+  conversationSection.className = "phone-card";
+  appendText(conversationSection, "h2", "Conversation");
+  const messages = state.snapshot?.conversation.messages.slice().sort((left, right) => left.sequence - right.sequence) ?? [];
+  const attachments = new Map((state.snapshot?.conversation.attachments ?? []).map((item) => [item.id, item]));
+  if (messages.length === 0) {
+    appendText(conversationSection, "p", "Sent screenshots and answers will appear here.", "phone-empty");
+  }
+  for (const message of messages) {
+    const article = document.createElement("article");
+    article.className = `phone-message phone-message-${message.role}`;
+    article.dataset.messageId = message.id;
+    article.dataset.messageSequence = String(message.sequence);
+    appendText(article, "div", `${message.role === "user" ? "You" : "Fluely"} · ${messageStatusLabel(message.status)}${timestampLabel(message.createdAt) ? ` · ${timestampLabel(message.createdAt)}` : ""}`, "phone-message-meta");
+    if (message.text.trim()) {
+      appendText(article, "p", message.text, "phone-message-text");
+    } else if (message.status === "streaming" || message.status === "pending") {
+      appendText(article, "p", message.status === "streaming" ? "Fluely is thinking…" : "Preparing your request…", "phone-message-placeholder");
+    } else if (message.status === "error") {
+      appendText(article, "p", "Fluely could not finish this request.", "phone-message-placeholder");
+    } else if (message.status === "cancelled") {
+      appendText(article, "p", "Request cancelled.", "phone-message-placeholder");
+    }
+    if (message.error) {
+      appendText(article, "p", message.error.message, "phone-error");
+    }
+    const messageImages = document.createElement("div");
+    messageImages.className = "phone-thumbnail-row";
+    for (const attachmentId of message.attachmentIds) {
+      const attachment = attachments.get(attachmentId);
+      if (!attachment) continue;
+      const image = document.createElement("img");
+      image.src = phoneImageUrl("attachments", attachment.id);
+      image.alt = `Sent screenshot, ${attachment.width} by ${attachment.height}`;
+      image.width = 160;
+      image.height = Math.max(1, Math.round(160 * attachment.height / attachment.width));
+      messageImages.append(image);
+    }
+    if (messageImages.childElementCount > 0) {
+      article.append(messageImages);
+    }
+    conversationSection.append(article);
+  }
+  shell.append(conversationSection);
+
+  const controls = document.createElement("section");
+  controls.className = "phone-card phone-controls";
+  appendText(controls, "h2", "Phone controls");
+  appendText(controls, "p", "This first companion slice is read-only. Changes continue to be made on the computer.", "phone-empty");
+  const fieldset = document.createElement("fieldset");
+  fieldset.disabled = true;
+  const prompt = document.createElement("textarea");
+  prompt.rows = 3;
+  prompt.placeholder = "Ask Fluely about your screenshots";
+  fieldset.append(prompt);
+  for (const label of ["Send", "Capture computer screen", "Clear conversation"]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    fieldset.append(button);
+  }
+  controls.append(fieldset);
+  shell.append(controls);
+  root.append(shell);
+}
+
+function nextResyncRequestId(): string {
+  const random = typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `phone-resync-${random}`;
+}
+
+export interface PhoneClientController {
+  getState(): PhoneClientState;
+  stop(): void;
+}
+
+/** Starts the dependency-free browser client. It only sends B2 resync frames. */
+export function startPhoneClient(root: HTMLElement): PhoneClientController {
+  let state = createPhoneClientState();
+  let socket: WebSocket | null = null;
+  let stopped = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const publish = () => renderPhoneClient(root, state);
+  const scheduleReconnect = () => {
+    if (stopped || reconnectTimer !== null) return;
+    const attempt = state.reconnectAttempt;
+    state = { ...state, reconnectAttempt: attempt + 1 };
+    publish();
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connect();
+    }, reconnectDelayMs(attempt));
+  };
+  const sendResync = (afterRevision: number) => {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({
+      type: "resync",
+      requestId: nextResyncRequestId(),
+      afterRevision,
+    }));
+  };
+  const handleMessage = (data: unknown) => {
+    let frame: ServerFrame;
+    try {
+      const raw = typeof data === "string" ? data : String(data);
+      frame = JSON.parse(raw) as ServerFrame;
+    } catch {
+      state = { ...state, connection: "error", errorMessage: "The phone companion sent an invalid update." };
+      publish();
+      return;
+    }
+    const applied = applyPhoneServerFrame(state, frame);
+    state = applied.state;
+    publish();
+    if (applied.effect?.type === "resync") {
+      sendResync(applied.effect.afterRevision);
+    }
+  };
+  function connect() {
+    if (stopped) return;
+    state = { ...state, connection: "connecting", errorMessage: undefined };
+    publish();
+    try {
+      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      socket = new WebSocket(`${protocol}//${location.host}/ws`);
+    } catch {
+      state = { ...state, connection: "error", errorMessage: "The phone companion could not open a connection." };
+      publish();
+      scheduleReconnect();
+      return;
+    }
+    const currentSocket = socket;
+    currentSocket.addEventListener("open", () => {
+      if (socket !== currentSocket || stopped) return;
+      state = { ...state, connection: "connected", reconnectAttempt: 0, errorMessage: undefined };
+      publish();
+    });
+    currentSocket.addEventListener("message", (event) => {
+      if (socket === currentSocket && !stopped) handleMessage(event.data);
+    });
+    currentSocket.addEventListener("error", () => {
+      if (socket === currentSocket && !stopped) {
+        state = { ...state, connection: "error", errorMessage: "The phone companion connection failed." };
+        publish();
+      }
+    });
+    currentSocket.addEventListener("close", () => {
+      if (socket !== currentSocket || stopped) return;
+      socket = null;
+      state = { ...state, connection: "disconnected" };
+      publish();
+      scheduleReconnect();
+    });
+  }
+
+  publish();
+  connect();
+  return {
+    getState: () => ({ ...state, ...(state.snapshot ? { snapshot: cloneProjection(state.snapshot) } : {}) }),
+    stop: () => {
+      stopped = true;
+      if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+      socket?.close();
+      socket = null;
+    },
+  };
+}
+
+if (typeof document !== "undefined") {
+  const root = document.getElementById("phone-app");
+  if (root) {
+    startPhoneClient(root);
+  }
+}

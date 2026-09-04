@@ -23,7 +23,7 @@ const positivePatterns = filesBlock
   .map((line) => line.match(/^\s+-\s+([^!].*)$/)?.[1]?.trim())
   .filter(Boolean);
 
-for (const requiredPattern of ["dist/**", "dist-electron/**", "package.json"]) {
+for (const requiredPattern of ["dist/**", "dist-electron/**", "dist-phone/**", "package.json"]) {
   if (!positivePatterns.includes(requiredPattern)) {
     fail(`required allowlist entry is missing: ${requiredPattern}`);
   }
@@ -68,6 +68,16 @@ const forbidden = listing.stdout.split("\n").filter((entry) =>
 );
 if (forbidden.length > 0) {
   fail(`forbidden files are packaged: ${forbidden.join(", ")}`);
+}
+
+for (const requiredAsset of [
+  "/dist-phone/index.html",
+  "/dist-phone/phone.css",
+  "/dist-phone/phone.js",
+]) {
+  if (!listing.stdout.split("\n").includes(requiredAsset)) {
+    fail(`required phone asset is missing from app.asar: ${requiredAsset}`);
+  }
 }
 
 if (process.exitCode !== 1) {

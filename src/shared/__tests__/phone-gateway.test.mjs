@@ -20,3 +20,38 @@ test("shared phone gateway contract fixes the default-off pairing policy", () =>
     4129, 4130, 4131, 4132, 4133, 4134,
   ]);
 });
+
+test("B2 accepts only exact typed resync and ping client frames and serializes server frames", () => {
+  assert.equal(typeof phoneGateway.parsePhoneClientFrame, "function");
+  assert.equal(typeof phoneGateway.serializePhoneServerFrame, "function");
+
+  assert.deepEqual(phoneGateway.parsePhoneClientFrame(JSON.stringify({
+    type: "ping",
+    at: 123,
+  })), { type: "ping", at: 123 });
+  assert.deepEqual(phoneGateway.parsePhoneClientFrame(JSON.stringify({
+    type: "resync",
+    requestId: "phone-resync-1",
+    afterRevision: 7,
+  })), {
+    type: "resync",
+    requestId: "phone-resync-1",
+    afterRevision: 7,
+  });
+
+  for (const invalid of [
+    { type: "command", command: { type: "capture", requestId: "b3" } },
+    { type: "ping", at: 123, requestId: "unexpected" },
+    { type: "resync", requestId: "", afterRevision: 7 },
+    { type: "resync", requestId: "phone-resync-1", afterRevision: -1 },
+    { type: "resync", requestId: "phone-resync-1", afterRevision: 7, extra: true },
+  ]) {
+    assert.equal(phoneGateway.parsePhoneClientFrame(JSON.stringify(invalid)), null);
+  }
+  assert.equal(phoneGateway.parsePhoneClientFrame("not-json"), null);
+
+  assert.equal(phoneGateway.serializePhoneServerFrame({
+    type: "pong",
+    at: 123,
+  }), JSON.stringify({ type: "pong", at: 123 }));
+});
