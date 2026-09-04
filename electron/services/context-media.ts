@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readSecureMediaFile } from "./secure-media-file";
 
 export const CONTEXT_MEDIA_SCHEME = "fluely-media";
 const CONTEXT_MEDIA_HOST = "context";
@@ -24,7 +24,7 @@ function notFoundContextMedia(): Response {
 /** Serves only current working-queue PNGs through opaque context IDs. */
 export function createContextMediaHandler(
   pathSource: ContextMediaPathSource,
-  readManagedFile: ContextMediaReader = readFile,
+  readManagedFile: ContextMediaReader = readSecureMediaFile,
 ): ContextMediaHandler {
   return async (request) => {
     if (request.method !== "GET") {

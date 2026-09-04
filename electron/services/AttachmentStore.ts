@@ -14,6 +14,7 @@ import {
 import { join } from "node:path";
 import type { ContextScreenshot } from "../../src/shared/context-queue";
 import type { ConversationAttachment } from "../../src/shared/conversation";
+import { readSecureMediaFile } from "./secure-media-file";
 
 export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const ATTACHMENT_DIRECTORY_NAME = "session-attachments";
@@ -269,7 +270,7 @@ export class AttachmentStore {
       return undefined;
     }
     try {
-      return new Uint8Array(await readFile(managedPath));
+      return await readSecureMediaFile(managedPath);
     } catch {
       return undefined;
     }

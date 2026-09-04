@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer as createHttpServer } from "node:http";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { connect as connectNet } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -225,6 +226,126 @@ function requestBuffer(port, requestPath, headers = {}) {
   });
 }
 
+function rawRequest(port, requestTarget, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const socket = connectNet({ host: "127.0.0.1", port });
+    const chunks = [];
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      if (error) {
+        reject(error);
+      } else {
+        resolve(Buffer.concat(chunks).toString("latin1"));
+      }
+    };
+    socket.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    socket.once("error", (error) => finish(error));
+    socket.once("close", () => finish());
+    socket.setTimeout(2_000, () => {
+      socket.destroy(new Error("raw request timed out"));
+    });
+    socket.once("connect", () => {
+      const requestHeaders = {
+        Host: `127.0.0.1:${port}`,
+        Connection: "close",
+        ...headers,
+      };
+      const lines = [
+        `GET ${requestTarget} HTTP/1.1`,
+        ...Object.entries(requestHeaders).map(([name, value]) => `${name}: ${value}`),
+        "",
+        "",
+      ];
+      socket.end(lines.join("\r\n"));
+    });
+  });
+}
+
+function createLoopbackServer(handler) {
+  const server = createHttpServer(handler);
+  const listen = server.listen.bind(server);
+  server.listen = (port, _host, callback) => listen(port, "127.0.0.1", callback);
+  return server;
+}
+
+function parseRawResponse(raw) {
+  const separator = raw.indexOf("\r\n\r\n");
+  const headerText = separator >= 0 ? raw.slice(0, separator) : raw;
+  const body = separator >= 0 ? raw.slice(separator + 4) : "";
+  const lines = headerText.split("\r\n");
+  const statusCode = Number(lines[0]?.split(" ")[1]);
+  const headers = {};
+  for (const line of lines.slice(1)) {
+    const colon = line.indexOf(":");
+    if (colon <= 0) continue;
+    headers[line.slice(0, colon).toLowerCase()] = line.slice(colon + 1).trim();
+  }
+  return { statusCode, headers, body };
+}
+
+function assertRawSafeHeaders(response) {
+  assert.equal(response.headers["cache-control"], "no-store");
+  assert.equal(response.headers["referrer-policy"], "no-referrer");
+  assert.equal(response.headers["x-content-type-options"], "nosniff");
+  assert.equal(response.headers["x-frame-options"], "DENY");
+  assert.match(response.headers["content-security-policy"], /default-src 'none'/);
+}
+
+function makeUpgradeSocket() {
+  const writes = [];
+  return {
+    writes,
+    destroyed: false,
+    write(value) {
+      writes.push(String(value));
+    },
+    destroy() {
+      this.destroyed = true;
+    },
+  };
+}
+
+test("raw request target parser accepts only strict origin-form paths without ambiguous encodings", () => {
+  assert.equal(typeof gatewayModule.parseRawRequestTarget, "function");
+  const valid = gatewayModule.parseRawRequestTarget("/api/context/11111111-1111-4111-8111-111111111111");
+  assert.deepEqual(valid, {
+    path: "/api/context/11111111-1111-4111-8111-111111111111",
+    query: "",
+    hasQuery: false,
+  });
+  assert.deepEqual(gatewayModule.parseRawRequestTarget("/pair?secret=abc"), {
+    path: "/pair",
+    query: "secret=abc",
+    hasQuery: true,
+  });
+
+  for (const target of [
+    "http://192.168.50.8:4123/api/context/11111111-1111-4111-8111-111111111111",
+    "//192.168.50.8:4123/api/context/11111111-1111-4111-8111-111111111111",
+    "/api/context/../context/11111111-1111-4111-8111-111111111111",
+    "/api/context/%2e%2e/context/11111111-1111-4111-8111-111111111111",
+    "/api/context/%252e%252e/context/11111111-1111-4111-8111-111111111111",
+    "/api/context/%2f11111111-1111-4111-8111-111111111111",
+    "/api/context/%252f11111111-1111-4111-8111-111111111111",
+    "/api/context/%5c11111111-1111-4111-8111-111111111111",
+    "/api/context/%00/11111111-1111-4111-8111-111111111111",
+    "/api/context/11111111-1111-4111-8111-111111111111?cache=1",
+  ]) {
+    const parsed = gatewayModule.parseRawRequestTarget(target);
+    if (target.includes("?cache=1")) {
+      assert.deepEqual(parsed, {
+        path: "/api/context/11111111-1111-4111-8111-111111111111",
+        query: "cache=1",
+        hasQuery: true,
+      });
+    } else {
+      assert.equal(parsed, null, target);
+    }
+  }
+});
+
 function makeProjection(initialSnapshot) {
   let snapshot = structuredClone(initialSnapshot);
   let snapshotReads = 0;
@@ -281,6 +402,65 @@ function invokeHandler(gateway, requestPath, {
   });
 }
 
+test("invalid WebSocket handshakes are rejected before ws handling with safe headers", async () => {
+  const qrUrls = [];
+  const { gateway } = makeGateway({ portCandidates: [0], qrUrls });
+  const ready = await gateway.start();
+  const port = Number(new URL(ready.origin).port);
+  const secret = new URL(qrUrls[0]).searchParams.get("secret");
+  const exchanged = await invokeHandler(gateway, `/pair?secret=${secret}`);
+  const cookie = exchanged.headers["set-cookie"].match(/^(fluely_phone_session=[^;]+)/)[1];
+  let handleUpgradeCalls = 0;
+  gateway.webSocketServer = {
+    handleUpgrade() {
+      handleUpgradeCalls += 1;
+    },
+  };
+  const baseRequest = {
+    method: "GET",
+    url: "/ws",
+    headers: {
+      host: `192.168.50.8:${port}`,
+      origin: ready.origin,
+      cookie,
+      connection: "Upgrade",
+      upgrade: "websocket",
+      "sec-websocket-version": "13",
+      "sec-websocket-key": Buffer.from("the sample nonce").toString("base64"),
+    },
+  };
+
+  const invalidRequests = [
+    { label: "missing connection", headers: { connection: undefined } },
+    { label: "wrong connection", headers: { connection: "keep-alive" } },
+    { label: "missing upgrade", headers: { upgrade: undefined } },
+    { label: "wrong upgrade", headers: { upgrade: "h2c" } },
+    { label: "wrong version", headers: { "sec-websocket-version": "12" } },
+    { label: "malformed key", headers: { "sec-websocket-key": "not-base64" } },
+    { label: "short key", headers: { "sec-websocket-key": Buffer.alloc(15).toString("base64") } },
+    { label: "traversal target", url: "/ws/../ws", headers: {} },
+    { label: "query target", url: "/ws?cache=1", headers: {} },
+  ];
+
+  for (const invalid of invalidRequests) {
+    const socket = makeUpgradeSocket();
+    const request = {
+      ...baseRequest,
+      ...(invalid.url ? { url: invalid.url } : {}),
+      headers: { ...baseRequest.headers, ...invalid.headers },
+    };
+    gateway.handleUpgrade(request, socket, Buffer.alloc(0));
+    const response = parseRawResponse(socket.writes.join(""));
+    assert.equal(response.statusCode, 404, invalid.label);
+    assertRawSafeHeaders(response);
+    assert.equal(response.headers.connection, "close", invalid.label);
+    assert.equal(response.headers["sec-websocket-accept"], undefined, invalid.label);
+    assert.equal(response.body, "Not found.", invalid.label);
+    assert.equal(socket.destroyed, true, invalid.label);
+  }
+  assert.equal(handleUpgradeCalls, 0);
+});
+
 function deferred() {
   let resolve;
   let reject;
@@ -327,7 +507,7 @@ test("authenticated shell and pairing exchange use safe headers and never redire
   const { gateway } = makeGateway({
     portCandidates: [0],
     qrUrls,
-    createServer: (handler) => createHttpServer(handler),
+    createServer: (handler) => createLoopbackServer(handler),
   });
   const ready = await gateway.start();
   assert.equal(ready.state, "ready");
@@ -386,7 +566,7 @@ test("gateway broadcasts paired state and replacement pairing revokes the old co
   const { gateway } = makeGateway({
     portCandidates: [0],
     qrUrls,
-    createServer: (handler) => createHttpServer(handler),
+    createServer: (handler) => createLoopbackServer(handler),
   });
   const unsubscribe = gateway.onStatusChanged?.((status) => statusEvents.push(status));
   assert.equal(typeof unsubscribe, "function");
@@ -678,15 +858,15 @@ test("authenticated phone assets and media routes return exact bytes and generic
   const contextPath = path.join(root, "context.png");
   const attachmentPath = path.join(root, "attachment.png");
   const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x04, 0x05, 0x06]);
-  await writeFile(contextPath, pngBytes);
-  await writeFile(attachmentPath, pngBytes);
+  await writeFile(contextPath, pngBytes, { mode: 0o600 });
+  await writeFile(attachmentPath, pngBytes, { mode: 0o600 });
   const contextId = "11111111-1111-4111-8111-111111111111";
   const attachmentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const qrCalls = [];
   const pairedGateway = makeGateway({
     portCandidates: [0],
     qrUrls: qrCalls,
-    createServer: (handler) => createHttpServer(handler),
+    createServer: (handler) => createLoopbackServer(handler),
     context: { getManagedPaths: (ids) => ids[0] === contextId ? [contextPath] : [] },
     attachments: { getPath: (id) => id === attachmentId ? attachmentPath : undefined },
     projection: {
@@ -912,7 +1092,7 @@ test("authenticated WebSocket sends an immediate snapshot, ordered events, ping/
     const { gateway } = makeGateway({
       portCandidates: [0],
       qrUrls,
-      createServer: (handler) => createHttpServer(handler),
+      createServer: (handler) => createLoopbackServer(handler),
       projection,
     });
     const ready = await gateway.start();
@@ -986,4 +1166,179 @@ test("authenticated WebSocket sends an immediate snapshot, ordered events, ping/
       origin: ready.origin,
     }), "rejected");
   });
+});
+
+test("raw HTTP request targets are matched before URL normalization and reject traversal, encoded separators, and query confusion", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "fluely-phone-route-test-"));
+  temporaryDirectories.push(root);
+  const contextId = "11111111-1111-4111-8111-111111111111";
+  const contextPath = path.join(root, "context.png");
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01]);
+  await writeFile(contextPath, pngBytes, { mode: 0o600 });
+
+  const qrUrls = [];
+  const { gateway } = makeGateway({
+    portCandidates: [0],
+    qrUrls,
+    createServer: (handler) => createLoopbackServer(handler),
+    context: { getManagedPaths: (ids) => ids[0] === contextId ? [contextPath] : [] },
+  });
+  const ready = await gateway.start();
+  const port = Number(new URL(ready.origin).port);
+  const host = new URL(ready.origin).host;
+  const secret = new URL(qrUrls[0]).searchParams.get("secret");
+  const exchange = await request(port, "/pair?secret=" + secret);
+  const cookie = exchange.headers["set-cookie"][0].match(/^(fluely_phone_session=[^;]+)/)[1];
+
+  const valid = parseRawResponse(await rawRequest(port, "/api/context/" + contextId, {
+    Host: host,
+    Cookie: cookie,
+  }));
+  assert.equal(valid.statusCode, 200);
+  assert.equal(Buffer.from(valid.body, "latin1").equals(pngBytes), true);
+
+  const invalidTargets = [
+    "http://" + host + "/api/context/" + contextId,
+    "/api/context/../context/" + contextId,
+    "/api/context/%2e%2e/context/" + contextId,
+    "/api/context/..\\context\\" + contextId,
+    "/api/context/%252e%252e/context/" + contextId,
+    "/api/context/" + contextId + "%2f..%2f" + contextId,
+    "/api/context/" + contextId + "?cache=1",
+    "/api/context//" + contextId,
+    "/api/context/" + contextId + "/",
+    "/api/context/%00" + contextId,
+  ];
+
+  for (const target of invalidTargets) {
+    const response = parseRawResponse(await rawRequest(port, target, {
+      Host: host,
+      Cookie: cookie,
+    }));
+    assert.equal(response.statusCode, 404, target);
+    assertRawSafeHeaders(response);
+    assert.equal(response.body.includes("/Users/"), false, target);
+  }
+});
+
+test("authenticated media rejects symlinks, directories, unsafe modes, and oversized files with generic not-found responses", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "fluely-phone-media-safety-test-"));
+  temporaryDirectories.push(root);
+  const ids = {
+    symlink: "11111111-1111-4111-8111-111111111111",
+    directory: "22222222-2222-4222-8222-222222222222",
+    wrongMode: "33333333-3333-4333-8333-333333333333",
+    oversized: "44444444-4444-4444-8444-444444444444",
+  };
+  const targetPath = path.join(root, "target.png");
+  const symlinkPath = path.join(root, "linked.png");
+  const directoryPath = path.join(root, "directory.png");
+  const wrongModePath = path.join(root, "wrong-mode.png");
+  const oversizedPath = path.join(root, "oversized.png");
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01]);
+  await writeFile(targetPath, pngBytes, { mode: 0o600 });
+  await chmod(targetPath, 0o600);
+  await symlink(targetPath, symlinkPath);
+  await mkdir(directoryPath, { mode: 0o700 });
+  await writeFile(wrongModePath, pngBytes, { mode: 0o644 });
+  await chmod(wrongModePath, 0o644);
+  await writeFile(oversizedPath, Buffer.alloc(1), { mode: 0o600 });
+  await chmod(oversizedPath, 0o600);
+  await truncate(oversizedPath, 20 * 1024 * 1024 + 1);
+
+  const qrUrls = [];
+  const { gateway } = makeGateway({
+    portCandidates: [0],
+    qrUrls,
+    createServer: (handler) => createLoopbackServer(handler),
+    context: {
+      getManagedPaths: (requested) => {
+        const id = requested[0];
+        return id === ids.symlink ? [symlinkPath]
+          : id === ids.directory ? [directoryPath]
+            : id === ids.wrongMode ? [wrongModePath]
+              : id === ids.oversized ? [oversizedPath]
+                : [];
+      },
+    },
+  });
+  const ready = await gateway.start();
+  const port = Number(new URL(ready.origin).port);
+  const secret = new URL(qrUrls[0]).searchParams.get("secret");
+  const exchange = await request(port, "/pair?secret=" + secret);
+  const cookie = exchange.headers["set-cookie"][0].match(/^(fluely_phone_session=[^;]+)/)[1];
+
+  for (const id of Object.values(ids)) {
+    const response = await requestBuffer(port, "/api/context/" + id, { Cookie: cookie });
+    assert.equal(response.statusCode, 404, id);
+    assertSafeHeaders(response);
+    assert.equal(response.body.includes("/Users/"), false, id);
+  }
+});
+
+test("raw WebSocket upgrades reject invalid request headers before ws default handling and always close with safe headers", async () => {
+  const initialSnapshot = {
+    revision: 0,
+    conversation: {
+      sessionId: "session-ws-raw",
+      revision: 0,
+      messages: [],
+      attachments: [],
+    },
+    queue: [],
+  };
+  const qrUrls = [];
+  const { gateway } = makeGateway({
+    portCandidates: [0],
+    qrUrls,
+    createServer: (handler) => createLoopbackServer(handler),
+    projection: {
+      getSnapshot: () => structuredClone(initialSnapshot),
+      subscribe: () => () => undefined,
+    },
+  });
+  const ready = await gateway.start();
+  const port = Number(new URL(ready.origin).port);
+  const host = new URL(ready.origin).host;
+  const secret = new URL(qrUrls[0]).searchParams.get("secret");
+  const exchange = await request(port, "/pair?secret=" + secret);
+  const cookie = exchange.headers["set-cookie"][0].match(/^(fluely_phone_session=[^;]+)/)[1];
+  const validHeaders = {
+    Host: host,
+    Origin: ready.origin,
+    Cookie: cookie,
+    Connection: "Upgrade",
+    Upgrade: "websocket",
+    "Sec-WebSocket-Version": "13",
+    "Sec-WebSocket-Key": Buffer.from("the sample nonce").toString("base64"),
+  };
+  const invalidRequests = [
+    ["missing Connection", { Connection: null }],
+    ["wrong Connection token", { Connection: "keep-alive" }],
+    ["missing Upgrade", { Upgrade: null }],
+    ["wrong Upgrade token", { Upgrade: "h2c" }],
+    ["wrong WebSocket version", { "Sec-WebSocket-Version": "12" }],
+    ["malformed WebSocket key", { "Sec-WebSocket-Key": "not-base64" }],
+    ["short WebSocket key", { "Sec-WebSocket-Key": Buffer.alloc(15).toString("base64") }],
+    ["absolute-form request target", { requestTarget: "http://" + host + "/ws" }],
+  ];
+
+  for (const [name, overrides] of invalidRequests) {
+    const headers = { ...validHeaders };
+    const requestTarget = overrides.requestTarget ?? "/ws";
+    delete overrides.requestTarget;
+    for (const [key, value] of Object.entries(overrides)) {
+      if (value === null) {
+        delete headers[key];
+      } else {
+        headers[key] = value;
+      }
+    }
+    const response = parseRawResponse(await rawRequest(port, requestTarget, headers));
+    assert.equal(response.statusCode, 404, name);
+    assertRawSafeHeaders(response);
+    assert.equal(response.headers.connection, "close", name);
+    assert.equal(response.headers["sec-websocket-accept"], undefined, name);
+    assert.equal(response.body, "Not found.", name);
+  }
 });

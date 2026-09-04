@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readSecureMediaFile } from "./secure-media-file";
 
 export const SESSION_MEDIA_SCHEME = "fluely-media";
 
@@ -56,7 +56,7 @@ function parseOpaqueId(pathname: string): string | undefined {
 export function createSessionMediaHandler(
   options: SessionMediaHandlerOptions,
 ): SessionMediaHandler {
-  const readManagedFile = options.readManagedFile ?? readFile;
+  const readManagedFile = options.readManagedFile ?? readSecureMediaFile;
 
   return async (request) => {
     if (request.method !== "GET") {

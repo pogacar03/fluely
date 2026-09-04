@@ -39,6 +39,7 @@ import {
   createPhoneProjection,
   type PhoneProjectionPort,
 } from "./phone-projection";
+import { readSecureMediaFile } from "./secure-media-file";
 import { WebSocketServer, WebSocket } from "ws";
 import type { RawData } from "ws";
 
@@ -110,6 +111,7 @@ export interface PhoneGatewayOptions {
   attachments?: PhoneGatewayAttachmentSource;
   phoneAssetsDirectory?: string;
   readFile?: PhoneGatewayFileReader;
+  readMediaFile?: PhoneGatewayFileReader;
 }
 
 interface ListeningServer {
@@ -189,8 +191,60 @@ type PhoneMediaRoute =
   | { namespace: "context"; id: string }
   | { namespace: "attachments"; id: string };
 
-function parseMediaRoute(pathname: string, search: string, hash: string): PhoneMediaRoute | null {
-  if (search || hash) {
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/;
+const ENCODED_SEPARATOR_PATTERN = /%(?:2f|5c)/i;
+
+export interface RawRequestTarget {
+  path: string;
+  query: string;
+  hasQuery: boolean;
+}
+
+function hasDotSegment(pathname: string): boolean {
+  return pathname.split("/").some((segment) => segment === "." || segment === "..");
+}
+
+function hasUnsafePathEncoding(pathname: string): boolean {
+  let candidate = pathname;
+  for (let pass = 0; pass < 3; pass += 1) {
+    if (CONTROL_CHARACTER_PATTERN.test(candidate) || candidate.includes("\\") || hasDotSegment(candidate)) {
+      return true;
+    }
+    if (ENCODED_SEPARATOR_PATTERN.test(candidate)) {
+      return true;
+    }
+    if (!candidate.includes("%")) {
+      return false;
+    }
+    try {
+      candidate = decodeURIComponent(candidate);
+    } catch {
+      return true;
+    }
+  }
+  return true;
+}
+
+/** Parses a raw HTTP request-target without URL normalization or path decoding. */
+export function parseRawRequestTarget(target: unknown): RawRequestTarget | null {
+  if (typeof target !== "string" || target.length === 0 || target[0] !== "/" || target.startsWith("//")) {
+    return null;
+  }
+  if (CONTROL_CHARACTER_PATTERN.test(target) || target.includes("#")) {
+    return null;
+  }
+
+  const queryIndex = target.indexOf("?");
+  const path = queryIndex >= 0 ? target.slice(0, queryIndex) : target;
+  const query = queryIndex >= 0 ? target.slice(queryIndex + 1) : "";
+  if (!path || hasUnsafePathEncoding(path)) {
+    return null;
+  }
+  return { path, query, hasQuery: queryIndex >= 0 };
+}
+
+function parseMediaRoute(pathname: string, hasQuery: boolean): PhoneMediaRoute | null {
+  if (hasQuery) {
     return null;
   }
 
@@ -220,6 +274,43 @@ function parseMediaRoute(pathname: string, search: string, hash: string): PhoneM
   return null;
 }
 
+function parsePairingSecret(query: string, hasQuery: boolean): string | null {
+  if (!hasQuery || !query || query.includes("&")) {
+    return null;
+  }
+  const separator = query.indexOf("=");
+  if (separator <= 0 || separator === query.length - 1 || query.indexOf("=", separator + 1) >= 0) {
+    return null;
+  }
+  if (query.slice(0, separator) !== "secret") {
+    return null;
+  }
+  try {
+    const secret = decodeURIComponent(query.slice(separator + 1));
+    return secret && !CONTROL_CHARACTER_PATTERN.test(secret) && !secret.includes("\\") && !/[?&#=]/.test(secret)
+      ? secret
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function hasHeaderToken(value: string | string[] | undefined, expected: string): boolean {
+  return typeof value === "string" && value.split(",").some((token) => token.trim().toLowerCase() === expected);
+}
+
+function isWebSocketKey(value: string | string[] | undefined): boolean {
+  if (typeof value !== "string" || !/^[A-Za-z0-9+/]{22}==$/.test(value)) {
+    return false;
+  }
+  try {
+    const decoded = Buffer.from(value, "base64");
+    return decoded.byteLength === 16 && decoded.toString("base64") === value;
+  } catch {
+    return false;
+  }
+}
+
 function buildGatewayOrigin(address: string, port: number): string {
   const canonicalAddress = canonicalizeIpv4(address);
   if (!canonicalAddress || !isPrivateIpv4(canonicalAddress)) {
@@ -247,7 +338,8 @@ export class PhoneGateway {
   private readonly context: PhoneGatewayContextSource | null;
   private readonly attachments: PhoneGatewayAttachmentSource | null;
   private readonly phoneAssetsDirectory: string;
-  private readonly readManagedFile: PhoneGatewayFileReader;
+  private readonly readPhoneAsset: PhoneGatewayFileReader;
+  private readonly readMediaFile: PhoneGatewayFileReader;
   private server: GatewayHttpServer | null = null;
   private selectedAddress: string | null = null;
   private selectedPort: number | null = null;
@@ -289,7 +381,8 @@ export class PhoneGateway {
     this.context = options.context ?? null;
     this.attachments = options.attachments ?? null;
     this.phoneAssetsDirectory = options.phoneAssetsDirectory ?? PHONE_ASSET_DIRECTORY;
-    this.readManagedFile = options.readFile ?? (async (path) => new Uint8Array(await readFile(path)));
+    this.readPhoneAsset = options.readFile ?? (async (path) => new Uint8Array(await readFile(path)));
+    this.readMediaFile = options.readMediaFile ?? readSecureMediaFile;
   }
 
   public getStatus(): PhoneGatewayStatus {
@@ -685,20 +778,21 @@ export class PhoneGateway {
   }
 
   private handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer): void {
-    let url: URL;
-    try {
-      url = new URL(request.url ?? "/", "http://fluely.invalid");
-    } catch {
+    const target = parseRawRequestTarget(request.url);
+    if (!target) {
       this.rejectUpgrade(socket, 404, "Not found.");
       return;
     }
 
     if (
       request.method !== "GET" ||
-      url.pathname !== "/ws" ||
-      url.search ||
-      url.hash ||
-      !this.isAllowedRequestMetadata(request, true)
+      target.path !== "/ws" ||
+      target.hasQuery ||
+      !this.isAllowedRequestMetadata(request, true) ||
+      !hasHeaderToken(request.headers.connection, "upgrade") ||
+      !hasHeaderToken(request.headers.upgrade, "websocket") ||
+      request.headers["sec-websocket-version"] !== "13" ||
+      !isWebSocketKey(request.headers["sec-websocket-key"])
     ) {
       this.rejectUpgrade(socket, 404, "Not found.");
       return;
@@ -737,6 +831,8 @@ export class PhoneGateway {
     ].join("\r\n");
     try {
       socket.write(`${headers}${body}`);
+    } catch {
+      // The peer may have disconnected before the safe rejection was written.
     } finally {
       socket.destroy();
     }
@@ -873,12 +969,13 @@ export class PhoneGateway {
     }
 
     const host = request.headers.host;
+    const advertisedHost = this.origin.startsWith("http://") ? this.origin.slice("http://".length) : "";
     const allowedHosts = new Set([
-      new URL(this.origin).host,
+      advertisedHost,
       `127.0.0.1:${this.selectedPort}`,
       `localhost:${this.selectedPort}`,
     ]);
-    if (!host || !allowedHosts.has(host.toLowerCase())) {
+    if (typeof host !== "string" || !allowedHosts.has(host.toLowerCase())) {
       return false;
     }
 
@@ -896,16 +993,14 @@ export class PhoneGateway {
       return;
     }
 
-    let url: URL;
-    try {
-      url = new URL(request.url ?? "/", "http://fluely.invalid");
-    } catch {
+    const target = parseRawRequestTarget(request.url);
+    if (!target) {
       responseBody(response, 404, "text/plain; charset=utf-8", "Not found.");
       return;
     }
 
-    if (request.method === "GET" && url.pathname === "/pair") {
-      this.handlePairing(url, response, request.socket?.remoteAddress ?? "<unknown>");
+    if (request.method === "GET" && target.path === "/pair") {
+      this.handlePairing(target.query, target.hasQuery, response, request.socket?.remoteAddress ?? "<unknown>");
       return;
     }
 
@@ -914,14 +1009,14 @@ export class PhoneGateway {
       return;
     }
 
-    const assetName = url.pathname === "/" && !url.search && !url.hash
+    const assetName = target.path === "/" && !target.hasQuery
       ? "index.html"
-      : url.pathname === "/phone.js" && !url.search && !url.hash
+      : target.path === "/phone.js" && !target.hasQuery
         ? "phone.js"
-        : url.pathname === "/phone.css" && !url.search && !url.hash
+        : target.path === "/phone.css" && !target.hasQuery
           ? "phone.css"
           : null;
-    const mediaRoute = parseMediaRoute(url.pathname, url.search, url.hash);
+    const mediaRoute = parseMediaRoute(target.path, target.hasQuery);
     const isProtectedRoute = assetName !== null || mediaRoute !== null;
 
     if (!isProtectedRoute) {
@@ -962,7 +1057,7 @@ export class PhoneGateway {
       : assetName === "phone.js"
         ? "text/javascript; charset=utf-8"
         : "text/css; charset=utf-8";
-    void this.readManagedFile(join(this.phoneAssetsDirectory, assetName))
+    void this.readPhoneAsset(join(this.phoneAssetsDirectory, assetName))
       .then((bytes) => responseBytes(response, 200, contentType, bytes))
       .catch(() => responseBody(response, 404, "text/plain; charset=utf-8", "Not found."));
   }
@@ -981,25 +1076,25 @@ export class PhoneGateway {
       return;
     }
 
-    void this.readManagedFile(managedPath)
+    void this.readMediaFile(managedPath)
       .then((bytes) => responseBytes(response, 200, "image/png", bytes))
       .catch(() => responseBody(response, 404, "text/plain; charset=utf-8", "Not found."));
   }
 
-  private handlePairing(url: URL, response: ServerResponse, remoteAddress: string): void {
+  private handlePairing(query: string, hasQuery: boolean, response: ServerResponse, remoteAddress: string): void {
     if (!this.pairingFailures.allow(remoteAddress)) {
       responseBody(response, 429, "text/plain; charset=utf-8", "Too many pairing attempts.");
       return;
     }
 
-    const secrets = url.searchParams.getAll("secret");
-    if (secrets.length !== 1 || !secrets[0]) {
+    const secret = parsePairingSecret(query, hasQuery);
+    if (!secret) {
       this.pairingFailures.recordFailure(remoteAddress);
       responseBody(response, 401, "text/plain; charset=utf-8", "Pairing failed.");
       return;
     }
 
-    const exchange = this.pairing.exchange(secrets[0], this.now());
+    const exchange = this.pairing.exchange(secret, this.now());
     if (!exchange) {
       this.pairingFailures.recordFailure(remoteAddress);
       responseBody(response, 401, "text/plain; charset=utf-8", "Pairing failed.");

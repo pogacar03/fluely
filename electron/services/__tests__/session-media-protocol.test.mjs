@@ -18,8 +18,8 @@ test("session media serves opaque context and attachment namespaces with exact s
   try {
     const contextPath = path.join(root, "context.png");
     const attachmentPath = path.join(root, "attachment.png");
-    await writeFile(contextPath, PNG_BYTES);
-    await writeFile(attachmentPath, PNG_BYTES);
+    await writeFile(contextPath, PNG_BYTES, { mode: 0o600 });
+    await writeFile(attachmentPath, PNG_BYTES, { mode: 0o600 });
     const handler = createSessionMediaHandler({
       context: { getManagedPaths: (ids) => ids.includes(CONTEXT_ID) ? [contextPath] : [] },
       attachments: { getPath: (id) => id === ATTACHMENT_ID ? attachmentPath : undefined },

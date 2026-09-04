@@ -333,14 +333,42 @@ function nextResyncRequestId(): string {
 export interface PhoneClientController {
   getState(): PhoneClientState;
   stop(): void;
+  restart(): void;
+  retry(): void;
 }
 
-/** Starts the dependency-free browser client. It only sends B2 resync frames. */
-export function startPhoneClient(root: HTMLElement): PhoneClientController {
+export interface PhoneClientWebSocket {
+  readyState: number;
+  addEventListener(type: string, listener: (event?: { data?: unknown }) => void): void;
+  send(value: string): void;
+  close(): void;
+}
+
+export interface PhoneClientWebSocketConstructor {
+  new (url: string): PhoneClientWebSocket;
+  OPEN?: number;
+}
+
+export interface PhoneClientOptions {
+  WebSocket?: PhoneClientWebSocketConstructor;
+  fetch?: (input: string, init?: RequestInit) => Promise<{ status: number; ok?: boolean }>;
+  setTimeout?: (callback: () => void, delayMs: number) => unknown;
+  clearTimeout?: (handle: unknown) => void;
+  location?: { protocol: string; host: string };
+}
+
+/** Starts the dependency-free browser client with bounded, authenticated reconnects. */
+export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions = {}): PhoneClientController {
   let state = createPhoneClientState();
-  let socket: WebSocket | null = null;
+  const WebSocketConstructor = options.WebSocket ?? (globalThis.WebSocket as unknown as PhoneClientWebSocketConstructor);
+  const fetchImpl = options.fetch ?? (globalThis.fetch?.bind(globalThis) as PhoneClientOptions["fetch"] | undefined);
+  const setTimeoutImpl = options.setTimeout ?? ((callback, delayMs) => globalThis.setTimeout(callback, delayMs));
+  const clearTimeoutImpl = options.clearTimeout ?? ((handle) => globalThis.clearTimeout(handle as number));
+  const locationInfo = options.location ?? globalThis.location;
+  let socket: PhoneClientWebSocket | null = null;
   let stopped = false;
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconnectTimer: unknown = null;
+  let reconnectGeneration = 0;
 
   const publish = () => renderPhoneClient(root, state);
   const scheduleReconnect = () => {
@@ -348,13 +376,17 @@ export function startPhoneClient(root: HTMLElement): PhoneClientController {
     const attempt = state.reconnectAttempt;
     state = { ...state, reconnectAttempt: attempt + 1 };
     publish();
-    reconnectTimer = setTimeout(() => {
+    let handle: unknown;
+    handle = setTimeoutImpl(() => {
+      if (reconnectTimer !== handle) return;
+      clearTimeoutImpl(handle);
       reconnectTimer = null;
-      connect();
+      void reconnectAfterAuthentication(reconnectGeneration);
     }, reconnectDelayMs(attempt));
+    reconnectTimer = handle;
   };
   const sendResync = (afterRevision: number) => {
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    if (!socket || socket.readyState !== (WebSocketConstructor.OPEN ?? 1)) return;
     socket.send(JSON.stringify({
       type: "resync",
       requestId: nextResyncRequestId(),
@@ -378,13 +410,54 @@ export function startPhoneClient(root: HTMLElement): PhoneClientController {
       sendResync(applied.effect.afterRevision);
     }
   };
+  const probeAuthentication = async (): Promise<"authenticated" | "revoked" | "unavailable"> => {
+    if (!fetchImpl) {
+      return "unavailable";
+    }
+    try {
+      const response = await fetchImpl("/", {
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { Accept: "text/html" },
+      });
+      if (response.status === 401 || response.status === 403) {
+        return "revoked";
+      }
+      return "authenticated";
+    } catch {
+      return "unavailable";
+    }
+  };
+  async function reconnectAfterAuthentication(generation: number): Promise<void> {
+    if (stopped || generation !== reconnectGeneration) return;
+    const authentication = await probeAuthentication();
+    if (stopped || generation !== reconnectGeneration) return;
+    if (authentication === "revoked") {
+      state = { ...state, connection: "revoked", errorMessage: "Pairing revoked." };
+      publish();
+      return;
+    }
+    if (authentication === "unavailable") {
+      state = { ...state, connection: "error", errorMessage: "The phone companion authentication check failed." };
+      publish();
+      scheduleReconnect();
+      return;
+    }
+    connect();
+  }
   function connect() {
     if (stopped) return;
+    if (!WebSocketConstructor) {
+      state = { ...state, connection: "error", errorMessage: "The phone companion could not open a connection." };
+      publish();
+      scheduleReconnect();
+      return;
+    }
     state = { ...state, connection: "connecting", errorMessage: undefined };
     publish();
     try {
-      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-      socket = new WebSocket(`${protocol}//${location.host}/ws`);
+      const protocol = locationInfo?.protocol === "https:" ? "wss:" : "ws:";
+      socket = new WebSocketConstructor(`${protocol}//${locationInfo?.host ?? ""}/ws`);
     } catch {
       state = { ...state, connection: "error", errorMessage: "The phone companion could not open a connection." };
       publish();
@@ -398,7 +471,7 @@ export function startPhoneClient(root: HTMLElement): PhoneClientController {
       publish();
     });
     currentSocket.addEventListener("message", (event) => {
-      if (socket === currentSocket && !stopped) handleMessage(event.data);
+      if (socket === currentSocket && !stopped) handleMessage(event?.data);
     });
     currentSocket.addEventListener("error", () => {
       if (socket === currentSocket && !stopped) {
@@ -415,17 +488,41 @@ export function startPhoneClient(root: HTMLElement): PhoneClientController {
     });
   }
 
+  const restart = () => {
+    stopped = false;
+    reconnectGeneration += 1;
+    if (reconnectTimer !== null) {
+      clearTimeoutImpl(reconnectTimer);
+      reconnectTimer = null;
+    }
+    const previousSocket = socket;
+    socket = null;
+    if (previousSocket && previousSocket.readyState !== 3) {
+      try {
+        previousSocket.close();
+      } catch {
+        // A closing socket cannot prevent an explicit retry.
+      }
+    }
+    state = { ...state, connection: "connecting", reconnectAttempt: 0, errorMessage: undefined };
+    publish();
+    connect();
+  };
+
   publish();
   connect();
   return {
     getState: () => ({ ...state, ...(state.snapshot ? { snapshot: cloneProjection(state.snapshot) } : {}) }),
     stop: () => {
       stopped = true;
-      if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+      reconnectGeneration += 1;
+      if (reconnectTimer !== null) clearTimeoutImpl(reconnectTimer);
       reconnectTimer = null;
       socket?.close();
       socket = null;
     },
+    restart,
+    retry: restart,
   };
 }
 
