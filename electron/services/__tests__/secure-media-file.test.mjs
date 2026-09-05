@@ -161,6 +161,73 @@ test("secure media rejects an owner-only file reached through an intermediate di
   }
 });
 
+test("secure media rejects a managed root replaced by a symlink between inspection and open", async () => {
+  const root = await makeRoot();
+  try {
+    const managedRoot = path.join(root, "managed-root");
+    const managedBackup = path.join(root, "managed-root-original");
+    const outsideRoot = path.join(root, "outside-root");
+    await mkdir(managedRoot, { mode: 0o700 });
+    await mkdir(outsideRoot, { mode: 0o700 });
+    const managedPath = path.join(managedRoot, "safe.png");
+    const outsidePath = path.join(outsideRoot, "safe.png");
+    await makePrivateFile(managedPath, PNG_BYTES);
+    await makePrivateFile(outsidePath, new Uint8Array([...PNG_BYTES, 0xf0]));
+
+    let swapped = false;
+    const reader = createSecureMediaReader({
+      openFile: async (filePath, flags) => {
+        await rename(managedRoot, managedBackup);
+        await symlink(outsideRoot, managedRoot, "dir");
+        swapped = true;
+        return open(filePath, flags);
+      },
+    });
+
+    await assert.rejects(
+      reader(managedPath, managedRoot),
+      (error) => error instanceof Error && !error.message.includes(outsidePath),
+    );
+    assert.equal(swapped, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("secure media rejects an intermediate directory replaced by a symlink between inspection and open", async () => {
+  const root = await makeRoot();
+  try {
+    const managedRoot = path.join(root, "managed-root");
+    const nestedDirectory = path.join(managedRoot, "nested");
+    const nestedBackup = path.join(managedRoot, "nested-original");
+    const outsideRoot = path.join(root, "outside-root");
+    await mkdir(nestedDirectory, { recursive: true, mode: 0o700 });
+    await mkdir(outsideRoot, { mode: 0o700 });
+    const managedPath = path.join(nestedDirectory, "safe.png");
+    const outsidePath = path.join(outsideRoot, "safe.png");
+    await makePrivateFile(managedPath, PNG_BYTES);
+    await makePrivateFile(outsidePath, new Uint8Array([...PNG_BYTES, 0xf1]));
+
+    let swapped = false;
+    const reader = createSecureMediaReader({
+      openFile: async (filePath, flags) => {
+        await rename(nestedDirectory, nestedBackup);
+        await symlink(outsideRoot, nestedDirectory, "dir");
+        swapped = true;
+        return open(filePath, flags);
+      },
+    });
+
+    await assert.rejects(
+      reader(managedPath, managedRoot),
+      (error) => error instanceof Error && !error.message.includes(outsidePath),
+    );
+    assert.equal(swapped, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("secure media rejects a device/inode change that happens before the descriptor is opened", async () => {
   const root = await makeRoot();
   try {
