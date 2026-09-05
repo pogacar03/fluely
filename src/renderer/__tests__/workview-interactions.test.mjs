@@ -414,6 +414,32 @@ test("a failed Send images click retains the queue and a second click retries wi
   assert.equal(queueCountText(), "2/5");
 });
 
+test("a streaming canonical conversation makes the desktop composer aria-busy and disables actions", async () => {
+  await renderApp(createBackend({
+    initialAnalysisStatus: "idle",
+    conversationSnapshot: {
+      sessionId: "session-renderer-streaming",
+      revision: 1,
+      messages: [{
+        id: "message-assistant-streaming",
+        sequence: 1,
+        role: "assistant",
+        text: "Streaming",
+        attachmentIds: [],
+        status: "streaming",
+        createdAt: 100,
+      }],
+      attachments: [],
+      activeMessageId: "message-assistant-streaming",
+    },
+  }));
+
+  assert.equal(document.querySelector(".composer-actions")?.getAttribute("aria-busy"), "true");
+  assert.equal(findButton("Capture screenshot without sending").disabled, true);
+  assert.equal(findButton("Send all queued screenshots").disabled, true);
+  assert.equal(findButton("Capture screenshot and ask").disabled, true);
+});
+
 test("the actual Work view renders the canonical conversation snapshot and opaque attachment thumbnail", async () => {
   const attachmentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   await renderApp(createBackend({

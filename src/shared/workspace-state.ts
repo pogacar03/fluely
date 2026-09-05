@@ -4,6 +4,7 @@ import type {
   ScreenshotItem,
   ScreenshotState,
 } from "./ipc";
+import type { ConversationSnapshot } from "./conversation";
 
 const MIN_OPACITY = 0.35;
 const MAX_OPACITY = 1;
@@ -93,15 +94,54 @@ export interface WorkspaceActionState {
   cancelLabel: string;
 }
 
+export interface CanonicalWorkspaceBusyInput {
+  capturing?: boolean;
+  conversation?: ConversationSnapshot | null;
+  analysisStatus?: AnalysisStatus | null;
+}
+
+export interface CanonicalWorkspaceBusyState {
+  isCapturing: boolean;
+  isRunning: boolean;
+  isBusy: boolean;
+}
+
+/** Derives canonical capture/analysis activity identically for every UI projection. */
+export function getCanonicalWorkspaceBusyState({
+  capturing = false,
+  conversation,
+  analysisStatus,
+}: CanonicalWorkspaceBusyInput): CanonicalWorkspaceBusyState {
+  const activeMessage = conversation?.activeMessageId
+    ? conversation.messages.find((message) => message.id === conversation.activeMessageId)
+    : undefined;
+  const isRunning =
+    analysisStatus === "running" ||
+    activeMessage?.status === "pending" ||
+    activeMessage?.status === "streaming";
+  const isCapturing = capturing === true;
+  return {
+    isCapturing,
+    isRunning,
+    isBusy: isCapturing || isRunning,
+  };
+}
+
 /** Derives explicit screenshot action availability from canonical queue/analysis state. */
 export function getWorkspaceActionState(
   status: AnalysisStatus | null | undefined,
   queueCount: number,
   commandBusy = false,
   capturing = false,
+  conversation?: ConversationSnapshot | null,
 ): WorkspaceActionState {
-  const isRunning = status === "running";
-  const isBusy = commandBusy || isRunning || capturing;
+  const canonical = getCanonicalWorkspaceBusyState({
+    capturing,
+    conversation,
+    analysisStatus: status,
+  });
+  const isRunning = canonical.isRunning;
+  const isBusy = commandBusy || canonical.isBusy;
   return {
     isRunning,
     isBusy,

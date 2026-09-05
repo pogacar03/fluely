@@ -41,17 +41,25 @@ export const PHONE_GATEWAY_COMMAND_RATE_WINDOW_MS = 10_000;
 export const PHONE_GATEWAY_MAX_BUFFERED_AMOUNT_BYTES = 1 * 1024 * 1024;
 export const PHONE_GATEWAY_HEARTBEAT_INTERVAL_MS = 15_000;
 export const PHONE_GATEWAY_HEARTBEAT_MISSES = 2;
-export const PHONE_GATEWAY_MAX_COMMAND_LEDGER_IDS = 4_096;
-export const PHONE_GATEWAY_MAX_COMMAND_ACK_BYTES = 1_024;
+export const PHONE_GATEWAY_MAX_COMMAND_SETTLED_IDS = 4_096;
+export const PHONE_GATEWAY_MAX_COMMAND_SETTLED_RESPONSE_BYTES = 1_024;
 export const PHONE_GATEWAY_COMMAND_FINGERPRINT_BYTES = 64;
-/** Logical per-entry ledger budget: request ID + digest + bounded replay frame. */
-export const PHONE_GATEWAY_MAX_COMMAND_LEDGER_ENTRY_BYTES =
+/** Maximum serialized payload retained by one settled idempotency record. */
+export const PHONE_GATEWAY_MAX_COMMAND_SETTLED_RECORD_BYTES =
   PHONE_GATEWAY_MAX_REQUEST_ID_BYTES +
   PHONE_GATEWAY_COMMAND_FINGERPRINT_BYTES +
-  PHONE_GATEWAY_MAX_COMMAND_ACK_BYTES;
-/** The gateway retains no command snapshot/result beyond this session budget. */
-export const PHONE_GATEWAY_MAX_COMMAND_LEDGER_BYTES =
-  PHONE_GATEWAY_MAX_COMMAND_LEDGER_IDS * PHONE_GATEWAY_MAX_COMMAND_LEDGER_ENTRY_BYTES;
+  PHONE_GATEWAY_MAX_COMMAND_SETTLED_RESPONSE_BYTES;
+/** Exact retained UTF-8 payload budget across all settled records in one session. */
+export const PHONE_GATEWAY_MAX_COMMAND_SETTLED_SERIALIZED_BYTES =
+  PHONE_GATEWAY_MAX_COMMAND_SETTLED_IDS * PHONE_GATEWAY_MAX_COMMAND_SETTLED_RECORD_BYTES;
+/** The rolling command limit is also the hard number of concurrent executions. */
+export const PHONE_GATEWAY_MAX_IN_FLIGHT_COMMANDS = PHONE_GATEWAY_COMMAND_RATE_LIMIT;
+/** A parsed command cannot exceed the authenticated protocol frame that carried it. */
+export const PHONE_GATEWAY_MAX_IN_FLIGHT_COMMAND_SERIALIZED_BYTES = PHONE_GATEWAY_MAX_FRAME_BYTES;
+export const PHONE_GATEWAY_MAX_IN_FLIGHT_SERIALIZED_BYTES =
+  PHONE_GATEWAY_MAX_IN_FLIGHT_COMMANDS * PHONE_GATEWAY_MAX_IN_FLIGHT_COMMAND_SERIALIZED_BYTES;
+/** Bounds socket references retained while one idempotent execution is unresolved. */
+export const PHONE_GATEWAY_MAX_IN_FLIGHT_WAITERS_PER_COMMAND = 16;
 
 export type ServerFrame =
   | { type: "snapshot"; revision: number; payload: SessionProjectionSnapshot }

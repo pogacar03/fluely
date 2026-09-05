@@ -13,10 +13,14 @@ import {
   PHONE_GATEWAY_HEARTBEAT_MISSES,
   PHONE_GATEWAY_COMMAND_RATE_LIMIT,
   PHONE_GATEWAY_COMMAND_RATE_WINDOW_MS,
-  PHONE_GATEWAY_MAX_COMMAND_ACK_BYTES,
-  PHONE_GATEWAY_MAX_COMMAND_LEDGER_BYTES,
-  PHONE_GATEWAY_MAX_COMMAND_LEDGER_ENTRY_BYTES,
-  PHONE_GATEWAY_MAX_COMMAND_LEDGER_IDS,
+  PHONE_GATEWAY_COMMAND_FINGERPRINT_BYTES,
+  PHONE_GATEWAY_MAX_COMMAND_SETTLED_IDS,
+  PHONE_GATEWAY_MAX_COMMAND_SETTLED_RESPONSE_BYTES,
+  PHONE_GATEWAY_MAX_COMMAND_SETTLED_SERIALIZED_BYTES,
+  PHONE_GATEWAY_MAX_IN_FLIGHT_COMMANDS,
+  PHONE_GATEWAY_MAX_IN_FLIGHT_COMMAND_SERIALIZED_BYTES,
+  PHONE_GATEWAY_MAX_IN_FLIGHT_SERIALIZED_BYTES,
+  PHONE_GATEWAY_MAX_IN_FLIGHT_WAITERS_PER_COMMAND,
   parsePhoneClientFrame,
   PHONE_GATEWAY_PAIRING_TTL_MS,
   PHONE_GATEWAY_PORTS,
@@ -127,11 +131,17 @@ export interface PhoneGatewayOptions {
   readFile?: PhoneGatewayFileReader;
   readMediaFile?: PhoneGatewayFileReader;
   commandRouter?: PhoneGatewayCommandRouter;
-  onCommandError?: (error: unknown) => void;
+  onCommandError?: (diagnostic: PhoneCommandFailureDiagnostic) => void;
 }
 
 export interface PhoneGatewayCommandRouter {
   execute(command: WorkspaceCommand, source: "desktop" | "phone"): Promise<CommandResult>;
+}
+
+export interface PhoneCommandFailureDiagnostic {
+  event: "phone_command_failed";
+  commandType: WorkspaceCommand["type"];
+  code: string;
 }
 
 interface ListeningServer {
@@ -148,16 +158,26 @@ interface PhoneClient {
 }
 
 interface PhoneCommandSession {
-  ledger: Map<string, PhoneCommandLedgerEntry>;
-  ledgerBytes: number;
+  settledLedger: Map<string, PhoneCommandSettledRecord>;
+  settledSerializedBytes: number;
+  inFlight: Map<string, PhoneCommandInFlight>;
+  inFlightSerializedBytes: number;
   commandTimestamps: number[];
   revoked: boolean;
 }
 
-interface PhoneCommandLedgerEntry {
+interface PhoneCommandSettledRecord {
   fingerprint: string;
-  pending?: Promise<string>;
-  response?: string;
+  response: string;
+  serializedBytes: number;
+}
+
+interface PhoneCommandInFlight {
+  fingerprint: string;
+  response: Promise<string>;
+  commandSerializedBytes: number;
+  waiters: Map<PhoneClient, number>;
+  waiterCount: number;
 }
 
 const PHONE_SAFE_COMMAND_ERROR_MESSAGES: Readonly<Record<string, { code: string; message: string }>> = {
@@ -190,7 +210,7 @@ function fingerprintPhoneCommand(command: WorkspaceCommand): string {
 
 function serializeLedgerFrame(frame: ServerFrame): string {
   const serialized = serializePhoneServerFrame(frame);
-  if (Buffer.byteLength(serialized, "utf8") <= PHONE_GATEWAY_MAX_COMMAND_ACK_BYTES) {
+  if (Buffer.byteLength(serialized, "utf8") <= PHONE_GATEWAY_MAX_COMMAND_SETTLED_RESPONSE_BYTES) {
     return serialized;
   }
   return serializePhoneServerFrame({
@@ -200,14 +220,26 @@ function serializeLedgerFrame(frame: ServerFrame): string {
   });
 }
 
-function serializePhoneCommandError(requestId: string, error: unknown): string {
-  const code = typeof (error as { code?: unknown })?.code === "string"
-    ? (error as { code: string }).code
-    : "";
+function safePhoneCommandError(error: unknown): { code: string; message: string } {
+  let code = "";
+  try {
+    code = typeof (error as { code?: unknown })?.code === "string"
+      ? (error as { code: string }).code
+      : "";
+  } catch {
+    code = "";
+  }
   const safe = Object.prototype.hasOwnProperty.call(PHONE_SAFE_COMMAND_ERROR_MESSAGES, code)
     ? PHONE_SAFE_COMMAND_ERROR_MESSAGES[code]
     : GENERIC_PHONE_COMMAND_ERROR;
-  return serializeLedgerFrame({ type: "error", requestId, ...safe });
+  return { ...safe };
+}
+
+function serializePhoneCommandError(
+  requestId: string,
+  safeError: { code: string; message: string },
+): string {
+  return serializeLedgerFrame({ type: "error", requestId, ...safeError });
 }
 
 function serializeSessionRevoked(requestId?: string): string {
@@ -434,7 +466,7 @@ export class PhoneGateway {
   private readonly readPhoneAsset: PhoneGatewayFileReader;
   private readonly readMediaFile: PhoneGatewayFileReader;
   private readonly commandRouter: PhoneGatewayCommandRouter | null;
-  private readonly onCommandError: (error: unknown) => void;
+  private readonly onCommandError: (diagnostic: PhoneCommandFailureDiagnostic) => void;
   private server: GatewayHttpServer | null = null;
   private selectedAddress: string | null = null;
   private selectedPort: number | null = null;
@@ -481,8 +513,8 @@ export class PhoneGateway {
     this.readPhoneAsset = options.readFile ?? (async (path) => new Uint8Array(await readFile(path)));
     this.readMediaFile = options.readMediaFile ?? readSecureMediaFile;
     this.commandRouter = options.commandRouter ?? null;
-    this.onCommandError = options.onCommandError ?? ((error) => {
-      console.warn("Phone command failed", error);
+    this.onCommandError = options.onCommandError ?? ((diagnostic) => {
+      console.warn("Phone command failed.", diagnostic);
     });
   }
 
@@ -940,9 +972,9 @@ export class PhoneGateway {
 
     const session = client.commandSession;
     const fingerprint = fingerprintPhoneCommand(command);
-    const existing = session.ledger.get(command.requestId);
-    if (existing) {
-      if (existing.fingerprint !== fingerprint) {
+    const settled = session.settledLedger.get(command.requestId);
+    if (settled) {
+      if (settled.fingerprint !== fingerprint) {
         this.sendSerializedFrame(client, serializeLedgerFrame({
           type: "error",
           requestId: command.requestId,
@@ -951,19 +983,44 @@ export class PhoneGateway {
         }));
         return;
       }
-      if (existing.response) {
-        this.sendSerializedFrame(client, existing.response);
-      } else if (existing.pending) {
-        void existing.pending.then((response) => this.sendSerializedFrame(client, response));
+      this.sendSerializedFrame(client, settled.response);
+      return;
+    }
+
+    const inFlight = session.inFlight.get(command.requestId);
+    if (inFlight) {
+      if (inFlight.fingerprint !== fingerprint) {
+        this.sendSerializedFrame(client, serializeLedgerFrame({
+          type: "error",
+          requestId: command.requestId,
+          code: "DUPLICATE_REQUEST_ID",
+          message: "This request ID was already used for a different command.",
+        }));
+        return;
       }
+      if (inFlight.waiterCount >= PHONE_GATEWAY_MAX_IN_FLIGHT_WAITERS_PER_COMMAND) {
+        this.rejectRateLimitedCommand(client, command.requestId);
+        return;
+      }
+      inFlight.waiters.set(client, (inFlight.waiters.get(client) ?? 0) + 1);
+      inFlight.waiterCount += 1;
       return;
     }
 
     if (
-      session.ledger.size >= PHONE_GATEWAY_MAX_COMMAND_LEDGER_IDS ||
-      session.ledgerBytes + PHONE_GATEWAY_MAX_COMMAND_LEDGER_ENTRY_BYTES > PHONE_GATEWAY_MAX_COMMAND_LEDGER_BYTES
+      session.settledLedger.size + session.inFlight.size >= PHONE_GATEWAY_MAX_COMMAND_SETTLED_IDS
     ) {
       this.revokePhoneSession(client, command.requestId);
+      return;
+    }
+
+    const commandSerializedBytes = Buffer.byteLength(JSON.stringify(command), "utf8");
+    if (
+      commandSerializedBytes > PHONE_GATEWAY_MAX_IN_FLIGHT_COMMAND_SERIALIZED_BYTES ||
+      session.inFlight.size >= PHONE_GATEWAY_MAX_IN_FLIGHT_COMMANDS ||
+      session.inFlightSerializedBytes + commandSerializedBytes > PHONE_GATEWAY_MAX_IN_FLIGHT_SERIALIZED_BYTES
+    ) {
+      this.rejectRateLimitedCommand(client, command.requestId);
       return;
     }
 
@@ -973,19 +1030,12 @@ export class PhoneGateway {
       timestamps.shift();
     }
     if (timestamps.length >= PHONE_GATEWAY_COMMAND_RATE_LIMIT) {
-      this.sendFrame(client, {
-        type: "error",
-        requestId: command.requestId,
-        code: "RATE_LIMITED",
-        message: "Too many phone commands. Try again shortly.",
-      });
-      this.closeClient(client, 1008, "Phone command rate limit exceeded.");
+      this.rejectRateLimitedCommand(client, command.requestId);
       return;
     }
     timestamps.push(now);
-    session.ledgerBytes += PHONE_GATEWAY_MAX_COMMAND_LEDGER_ENTRY_BYTES;
 
-    const pending = Promise.resolve().then(async () => {
+    const response = Promise.resolve().then(async () => {
       if (!this.isCurrentPhoneClient(client)) {
         return serializeSessionRevoked(command.requestId);
       }
@@ -1004,32 +1054,104 @@ export class PhoneGateway {
         }
         return serializeLedgerFrame({ type: "ack", requestId: command.requestId });
       } catch (error) {
+        const safeError = safePhoneCommandError(error);
         try {
-          this.onCommandError(error);
+          this.onCommandError({
+            event: "phone_command_failed",
+            commandType: command.type,
+            code: safeError.code,
+          });
         } catch {
           // Local diagnostics must not affect the phone protocol.
         }
         return this.isCurrentPhoneClient(client)
-          ? serializePhoneCommandError(command.requestId, error)
+          ? serializePhoneCommandError(command.requestId, safeError)
           : serializeSessionRevoked(command.requestId);
       }
     });
-    const entry: PhoneCommandLedgerEntry = { fingerprint, pending };
-    session.ledger.set(command.requestId, entry);
-    void pending.then((response) => {
-      entry.response = response;
-      entry.pending = undefined;
-      this.sendSerializedFrame(client, response);
+    const entry: PhoneCommandInFlight = {
+      fingerprint,
+      response,
+      commandSerializedBytes,
+      waiters: new Map([[client, 1]]),
+      waiterCount: 1,
+    };
+    session.inFlight.set(command.requestId, entry);
+    session.inFlightSerializedBytes += commandSerializedBytes;
+    void response.then((serialized) => {
+      this.settlePhoneCommand(session, command.requestId, entry, serialized);
     });
   }
 
   private createPhoneCommandSession(): PhoneCommandSession {
     return {
-      ledger: new Map(),
-      ledgerBytes: 0,
+      settledLedger: new Map(),
+      settledSerializedBytes: 0,
+      inFlight: new Map(),
+      inFlightSerializedBytes: 0,
       commandTimestamps: [],
       revoked: false,
     };
+  }
+
+  private settlePhoneCommand(
+    session: PhoneCommandSession,
+    requestId: string,
+    entry: PhoneCommandInFlight,
+    response: string,
+  ): void {
+    if (session.inFlight.get(requestId) !== entry) {
+      return;
+    }
+    session.inFlight.delete(requestId);
+    session.inFlightSerializedBytes = Math.max(
+      0,
+      session.inFlightSerializedBytes - entry.commandSerializedBytes,
+    );
+    if (session.revoked) {
+      entry.waiters.clear();
+      return;
+    }
+
+    const serializedBytes =
+      Buffer.byteLength(requestId, "utf8") +
+      PHONE_GATEWAY_COMMAND_FINGERPRINT_BYTES +
+      Buffer.byteLength(response, "utf8");
+    if (
+      session.settledSerializedBytes + serializedBytes >
+      PHONE_GATEWAY_MAX_COMMAND_SETTLED_SERIALIZED_BYTES
+    ) {
+      const firstClient = entry.waiters.keys().next().value as PhoneClient | undefined;
+      entry.waiters.clear();
+      if (firstClient) {
+        this.revokePhoneSession(firstClient, requestId);
+      }
+      return;
+    }
+
+    const settled: PhoneCommandSettledRecord = {
+      fingerprint: entry.fingerprint,
+      response,
+      serializedBytes,
+    };
+    session.settledLedger.set(requestId, settled);
+    session.settledSerializedBytes += serializedBytes;
+    for (const [waiter, count] of entry.waiters) {
+      for (let index = 0; index < count; index += 1) {
+        this.sendSerializedFrame(waiter, response);
+      }
+    }
+    entry.waiters.clear();
+  }
+
+  private rejectRateLimitedCommand(client: PhoneClient, requestId: string): void {
+    this.sendFrame(client, {
+      type: "error",
+      requestId,
+      code: "RATE_LIMITED",
+      message: "Too many phone commands. Try again shortly.",
+    });
+    this.closeClient(client, 1008, "Phone command rate limit exceeded.");
   }
 
   private getPhoneCommandSession(sessionKey: string): PhoneCommandSession {
@@ -1053,7 +1175,7 @@ export class PhoneGateway {
 
   private rejectRevokedClient(client: PhoneClient, requestId?: string): void {
     client.revoked = true;
-    client.commandSession.revoked = true;
+    this.revokeCommandSessionState(client.commandSession);
     this.sendSerializedFrame(client, serializeSessionRevoked(requestId));
     this.closeClient(client, 1008, "Pairing revoked.");
   }
@@ -1064,19 +1186,31 @@ export class PhoneGateway {
       candidate === client || (sessionKey !== undefined && candidate.sessionKey === sessionKey));
     const session = sessionKey === undefined ? undefined : this.phoneSessions.get(sessionKey);
     client.revoked = true;
-    client.commandSession.revoked = true;
+    this.revokeCommandSessionState(client.commandSession);
     if (session) {
-      session.revoked = true;
+      this.revokeCommandSessionState(session);
     }
     for (const candidate of affected) {
       candidate.revoked = true;
-      candidate.commandSession.revoked = true;
+      this.revokeCommandSessionState(candidate.commandSession);
     }
     this.pairing.revokeAll();
     for (const candidate of affected) {
       this.sendSerializedFrame(candidate, serializeSessionRevoked(candidate === client ? requestId : undefined));
       this.closeClient(candidate, 1008, "Pairing revoked.");
     }
+  }
+
+  private revokeCommandSessionState(session: PhoneCommandSession): void {
+    session.revoked = true;
+    for (const entry of session.inFlight.values()) {
+      entry.waiters.clear();
+    }
+    session.inFlight.clear();
+    session.inFlightSerializedBytes = 0;
+    session.settledLedger.clear();
+    session.settledSerializedBytes = 0;
+    session.commandTimestamps = [];
   }
 
   private closeClient(client: PhoneClient, code: number, reason: string): void {
@@ -1115,7 +1249,6 @@ export class PhoneGateway {
         if (client.socket.readyState !== WebSocket.OPEN) {
           continue;
         }
-        client.missedHeartbeats += 1;
         if (client.missedHeartbeats >= PHONE_GATEWAY_HEARTBEAT_MISSES) {
           try {
             client.socket.terminate();
@@ -1124,6 +1257,7 @@ export class PhoneGateway {
           }
           continue;
         }
+        client.missedHeartbeats += 1;
         try {
           client.socket.ping();
         } catch {
@@ -1212,11 +1346,11 @@ export class PhoneGateway {
 
   private closePhoneClients(): void {
     for (const session of this.phoneSessions.values()) {
-      session.revoked = true;
+      this.revokeCommandSessionState(session);
     }
     for (const client of [...this.phoneClients]) {
       client.revoked = true;
-      client.commandSession.revoked = true;
+      this.revokeCommandSessionState(client.commandSession);
       try {
         client.socket.close(1001, "Phone session ended.");
         client.socket.terminate();

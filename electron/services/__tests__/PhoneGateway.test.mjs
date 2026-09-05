@@ -106,6 +106,7 @@ function makeGateway({
   phoneAssetsDirectory,
   readMediaFile,
   commandRouter,
+  onCommandError,
 } = {}) {
   const servers = [];
   const clock = now ?? (() => 10_000);
@@ -138,6 +139,7 @@ function makeGateway({
     ...(phoneAssetsDirectory ? { phoneAssetsDirectory } : {}),
     ...(readMediaFile ? { readMediaFile } : {}),
     ...(commandRouter ? { commandRouter } : {}),
+    ...(onCommandError ? { onCommandError } : {}),
   });
   gateways.push(gateway);
   return { gateway, servers };
@@ -1478,7 +1480,7 @@ test("phone commands close the session after the eleventh command in a rolling t
   assert.equal(socket.closeCalls[0].code, 1008);
 });
 
-test("phone gateway heartbeat pings every fifteen seconds and terminates after two missed heartbeats", async () => {
+test("phone gateway permits two outstanding pings, terminates on tick three, and pong resets the count", async () => {
   const timer = makeGatewayTimer();
   const projection = makeProjection({
     revision: 0,
@@ -1487,17 +1489,47 @@ test("phone gateway heartbeat pings every fifteen seconds and terminates after t
   });
   const { gateway } = makeGateway({ projection, timer, portCandidates: [0] });
   await gateway.start();
-  const socket = makeGatewaySocket();
-  gateway.acceptWebSocket(socket);
+  const staleSocket = makeGatewaySocket();
+  const resetSocket = makeGatewaySocket();
+  gateway.acceptWebSocket(staleSocket);
+  gateway.acceptWebSocket(resetSocket);
 
   const first = timer.active().find((entry) => entry.delay === 15_000);
   assert.ok(first);
   timer.fire(first);
-  assert.equal(socket.pings, 1);
+  assert.equal(staleSocket.pings, 1);
+  assert.equal(resetSocket.pings, 1);
+  assert.equal(staleSocket.terminated, false);
+  assert.equal(resetSocket.terminated, false);
+
   const second = timer.active().find((entry) => entry.delay === 15_000 && entry !== first);
   assert.ok(second);
   timer.fire(second);
-  assert.equal(socket.terminated, true);
+  assert.equal(staleSocket.pings, 2);
+  assert.equal(resetSocket.pings, 2);
+  assert.equal(staleSocket.terminated, false);
+  assert.equal(resetSocket.terminated, false);
+
+  resetSocket.emit("pong");
+  const third = timer.active().find((entry) => entry.delay === 15_000 && entry !== first && entry !== second);
+  assert.ok(third);
+  timer.fire(third);
+  assert.equal(staleSocket.terminated, true);
+  assert.equal(staleSocket.pings, 2);
+  assert.equal(resetSocket.terminated, false);
+  assert.equal(resetSocket.pings, 3);
+
+  const fourth = timer.active().find((entry) => entry.delay === 15_000 && ![first, second, third].includes(entry));
+  assert.ok(fourth);
+  timer.fire(fourth);
+  assert.equal(resetSocket.terminated, false);
+  assert.equal(resetSocket.pings, 4);
+
+  const fifth = timer.active().find((entry) => entry.delay === 15_000 && ![first, second, third, fourth].includes(entry));
+  assert.ok(fifth);
+  timer.fire(fifth);
+  assert.equal(resetSocket.terminated, true);
+  assert.equal(resetSocket.pings, 4);
 });
 
 test("phone gateway closes a client before sending when outbound backpressure exceeds one MiB", () => {
@@ -1630,7 +1662,7 @@ test("phone idempotency survives reconnect beyond the shared 512-entry deduper w
   assert.equal(JSON.parse(reconnectedSocket.sent[0]).type, "ack");
 });
 
-test("phone idempotency retains only bounded minimal acknowledgement state after completion", async () => {
+test("phone idempotency moves completion into an exactly counted minimal settled record", async () => {
   const projection = makeProjection({
     revision: 0,
     conversation: { sessionId: "session-phone-minimal-ledger", revision: 0, messages: [], attachments: [] },
@@ -1651,14 +1683,219 @@ test("phone idempotency retains only bounded minimal acknowledgement state after
   await waitForSentFrame(socket, (frame) => frame.type === "ack" && frame.requestId === "minimal-ledger-1");
 
   const session = gateway.phoneSessions.get("session-phone-minimal-ledger");
-  const entry = session.ledger.get("minimal-ledger-1");
   assert.ok(session);
+  assert.equal(session.inFlight.size, 0);
+  assert.equal(session.inFlightSerializedBytes, 0);
+  const entry = session.settledLedger.get("minimal-ledger-1");
   assert.ok(entry);
-  assert.equal(entry.pending, undefined);
-  assert.equal(entry.command, undefined);
+  assert.deepEqual(Object.keys(entry).sort(), ["fingerprint", "response", "serializedBytes"]);
   assert.equal(JSON.parse(entry.response).type, "ack");
   assert.equal("result" in JSON.parse(entry.response), false);
-  assert.equal(session.ledgerBytes, 1_216);
+  const expectedBytes = Buffer.byteLength("minimal-ledger-1", "utf8") +
+    Buffer.byteLength(entry.fingerprint, "utf8") +
+    Buffer.byteLength(entry.response, "utf8");
+  assert.equal(entry.serializedBytes, expectedBytes);
+  assert.equal(session.settledSerializedBytes, expectedBytes);
+  assert.equal(session.settledSerializedBytes < 1_216, true);
+});
+
+test("phone commands enforce a hard transient count and exact serialized-byte budget while execution is pending", async () => {
+  let now = 10_000;
+  const executions = [];
+  const commands = [];
+  const router = {
+    execute: async (command) => {
+      const execution = deferred();
+      executions.push(execution);
+      commands.push(command);
+      return execution.promise;
+    },
+  };
+  const projection = makeProjection({
+    revision: 0,
+    conversation: { sessionId: "session-phone-transient-budget", revision: 0, messages: [], attachments: [] },
+    queue: [],
+  });
+  const { gateway } = makeGateway({ projection, commandRouter: router, now: () => now });
+  const socket = makeGatewaySocket();
+  gateway.acceptWebSocket(socket, "session-phone-transient-budget");
+  socket.sent = [];
+
+  const prompt = "🚀".repeat(1_500);
+  for (let index = 0; index < 10; index += 1) {
+    const command = { type: "send", requestId: `transient-${index}`, prompt };
+    socket.emit("message", Buffer.from(JSON.stringify({ type: "command", command })));
+    await flushMicrotasks();
+    now += 10_000;
+  }
+
+  const session = gateway.phoneSessions.get("session-phone-transient-budget");
+  const expectedBytes = commands.reduce((total, command) =>
+    total + Buffer.byteLength(JSON.stringify(command), "utf8"), 0);
+  assert.equal(commands.length, 10);
+  assert.equal(session.inFlight.size, 10);
+  assert.equal(session.inFlightSerializedBytes, expectedBytes);
+  assert.equal(session.inFlightSerializedBytes <= 10 * 16 * 1_024, true);
+
+  socket.emit("message", Buffer.from(JSON.stringify({
+    type: "command",
+    command: { type: "capture", requestId: "transient-overflow" },
+  })));
+  await flushMicrotasks();
+
+  assert.equal(commands.length, 10);
+  assert.deepEqual(socket.sent.map((value) => JSON.parse(value)).at(-1), {
+    type: "error",
+    requestId: "transient-overflow",
+    code: "RATE_LIMITED",
+    message: "Too many phone commands. Try again shortly.",
+  });
+  assert.equal(socket.readyState, WebSocket.CLOSED);
+
+  for (const execution of executions) {
+    execution.resolve(commandResult());
+  }
+  await flushMicrotasks();
+});
+
+test("concurrent duplicate failures share one execution and replay the same safe error", async () => {
+  const execution = deferred();
+  let calls = 0;
+  const router = {
+    execute: async () => {
+      calls += 1;
+      return execution.promise;
+    },
+  };
+  const projection = makeProjection({
+    revision: 0,
+    conversation: { sessionId: "session-phone-concurrent-error", revision: 0, messages: [], attachments: [] },
+    queue: [],
+  });
+  const { gateway } = makeGateway({
+    projection,
+    commandRouter: router,
+    onCommandError: () => undefined,
+  });
+  const socket = makeGatewaySocket();
+  gateway.acceptWebSocket(socket, "session-phone-concurrent-error");
+  socket.sent = [];
+  const frame = Buffer.from(JSON.stringify({
+    type: "command",
+    command: { type: "send", requestId: "concurrent-error", prompt: "secret prompt" },
+  }));
+
+  socket.emit("message", frame);
+  socket.emit("message", frame);
+  await flushMicrotasks();
+  assert.equal(calls, 1);
+
+  execution.reject(Object.assign(new Error("secret provider path /Users/private/provider.json"), {
+    code: "INTERNAL_ERROR",
+  }));
+  await waitForSentFrame(socket, () => socket.sent.length === 2);
+
+  assert.equal(calls, 1);
+  assert.equal(socket.sent.length, 2);
+  assert.deepEqual(JSON.parse(socket.sent[0]), JSON.parse(socket.sent[1]));
+  assert.deepEqual(JSON.parse(socket.sent[0]), {
+    type: "error",
+    requestId: "concurrent-error",
+    code: "COMMAND_FAILED",
+    message: "Phone command failed.",
+  });
+  assert.equal(socket.readyState, WebSocket.OPEN);
+});
+
+test("concurrent duplicate success has a bounded waiter set and executes the router once", async () => {
+  const execution = deferred();
+  let calls = 0;
+  const router = {
+    execute: async () => {
+      calls += 1;
+      return execution.promise;
+    },
+  };
+  const projection = makeProjection({
+    revision: 0,
+    conversation: { sessionId: "session-phone-concurrent-success", revision: 0, messages: [], attachments: [] },
+    queue: [],
+  });
+  const { gateway } = makeGateway({ projection, commandRouter: router });
+  const sockets = Array.from({ length: 17 }, () => makeGatewaySocket());
+  for (const socket of sockets) {
+    gateway.acceptWebSocket(socket, "session-phone-concurrent-success");
+    socket.sent = [];
+  }
+  const frame = Buffer.from(JSON.stringify({
+    type: "command",
+    command: { type: "capture", requestId: "concurrent-success" },
+  }));
+
+  for (const socket of sockets) {
+    socket.emit("message", frame);
+  }
+  await flushMicrotasks();
+
+  const session = gateway.phoneSessions.get("session-phone-concurrent-success");
+  assert.equal(calls, 1);
+  assert.equal(session.inFlight.get("concurrent-success").waiters.size, 16);
+  assert.deepEqual(JSON.parse(sockets[16].sent[0]), {
+    type: "error",
+    requestId: "concurrent-success",
+    code: "RATE_LIMITED",
+    message: "Too many phone commands. Try again shortly.",
+  });
+  assert.equal(sockets[16].readyState, WebSocket.CLOSED);
+
+  execution.resolve(commandResult());
+  await Promise.all(sockets.slice(0, 16).map((socket) =>
+    waitForSentFrame(socket, (response) => response.type === "ack" && response.requestId === "concurrent-success")));
+
+  assert.equal(calls, 1);
+  for (const socket of sockets.slice(0, 16)) {
+    assert.deepEqual(JSON.parse(socket.sent[0]), {
+      type: "ack",
+      requestId: "concurrent-success",
+    });
+  }
+});
+
+test("default phone command diagnostics contain only stable safe fields", async (t) => {
+  const warnings = [];
+  t.mock.method(console, "warn", (...args) => warnings.push(args));
+  const secret = "secret prompt and /Users/private/provider.json";
+  const projection = makeProjection({
+    revision: 0,
+    conversation: { sessionId: "session-phone-safe-log", revision: 0, messages: [], attachments: [] },
+    queue: [],
+  });
+  const router = {
+    execute: async () => {
+      throw Object.assign(new Error(secret), { code: "INTERNAL_ERROR" });
+    },
+  };
+  const { gateway } = makeGateway({ projection, commandRouter: router });
+  const socket = makeGatewaySocket();
+  gateway.acceptWebSocket(socket);
+  socket.sent = [];
+
+  socket.emit("message", Buffer.from(JSON.stringify({
+    type: "command",
+    command: { type: "send", requestId: "safe-log", prompt: secret },
+  })));
+  await waitForSentFrame(socket, (frame) => frame.type === "error" && frame.requestId === "safe-log");
+
+  assert.deepEqual(warnings, [[
+    "Phone command failed.",
+    {
+      event: "phone_command_failed",
+      commandType: "send",
+      code: "COMMAND_FAILED",
+    },
+  ]]);
+  assert.equal(warnings.flat(Infinity).some((value) => String(value).includes(secret)), false);
+  assert.equal(socket.readyState, WebSocket.OPEN);
 });
 
 test("phone command rate limiting expires timestamps at the exact ten-second boundary", async () => {
@@ -1730,6 +1967,14 @@ test("phone session revokes at the hard unique-command ledger limit instead of e
     now += 10_001;
   }
   assert.equal(calls, 4096);
+  const session = gateway.phoneSessions.get("session-phone-ledger-cap");
+  assert.equal(session.settledLedger.size, 4096);
+  assert.equal(session.inFlight.size, 0);
+  assert.equal(
+    session.settledSerializedBytes,
+    [...session.settledLedger.values()].reduce((total, entry) => total + entry.serializedBytes, 0),
+  );
+  assert.equal(session.settledSerializedBytes <= 4_980_736, true);
 
   socket.emit("message", Buffer.from(JSON.stringify({
     type: "command",

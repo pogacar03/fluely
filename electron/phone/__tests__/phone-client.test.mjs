@@ -541,17 +541,20 @@ test("phone DOM controls send every workspace command, mirror canonical busy sta
     assert.equal(getButton("Send images").disabled, false);
     assert.equal(getButton("Capture").disabled, false);
     assert.equal(getButton("Cancel").disabled, true);
+    assert.equal(root.querySelector("fieldset").getAttribute("aria-busy"), "false");
 
     getButton("Capture").click();
     assert.equal(getCommand().type, "command");
     assert.equal(getCommand().command.type, "capture");
     assert.equal(getButton("Capture").disabled, true);
+    assert.equal(root.querySelector("fieldset").getAttribute("aria-busy"), "true");
     const queueBeforeAck = client.getState().snapshot.queue;
     getButton("Capture").click();
     assert.equal(instances[0].sent.length, 1);
     acknowledge();
     assert.deepEqual(client.getState().snapshot.queue, queueBeforeAck);
     assert.match(root.textContent, /Command completed/);
+    assert.equal(root.querySelector("fieldset").getAttribute("aria-busy"), "false");
 
     const prompt = root.querySelector("textarea");
     prompt.value = "Question from phone";
@@ -582,6 +585,8 @@ test("phone DOM controls send every workspace command, mirror canonical busy sta
     assert.equal(getButton("Cancel").disabled, false);
     assert.equal(getButton("Capture").disabled, true);
     assert.equal(getButton("Send images").disabled, true);
+    assert.equal(getButton("Clear conversation").disabled, true);
+    assert.equal(root.querySelector("fieldset").getAttribute("aria-busy"), "true");
     getButton("Cancel").click();
     assert.deepEqual(getCommand().command.type, "cancel");
   } finally {
@@ -652,10 +657,27 @@ test("phone controls use canonical capturing state for busy and aria-busy withou
     }) });
     const root = dom.window.document.getElementById("phone-app");
     const capture = [...root.querySelectorAll("button")].find((button) => button.textContent.includes("Capture"));
+    const clearConversation = [...root.querySelectorAll("button")]
+      .find((button) => button.textContent.includes("Clear conversation"));
     assert.equal(phoneClientModule.getPhoneActionState(client.getState()).isBusy, true);
     assert.equal(client.getState().commandPending, undefined);
     assert.equal(capture.disabled, true);
+    assert.equal(clearConversation.disabled, true);
     assert.equal(root.querySelector("fieldset").getAttribute("aria-busy"), "true");
+
+    instances[0].emit("message", { data: JSON.stringify({
+      type: "snapshot",
+      revision: 1,
+      payload: { ...controlSnapshot({ capturing: false }), revision: 1 },
+    }) });
+    const restoredCapture = [...root.querySelectorAll("button")]
+      .find((button) => button.textContent.includes("Capture"));
+    const restoredClearConversation = [...root.querySelectorAll("button")]
+      .find((button) => button.textContent.includes("Clear conversation"));
+    assert.equal(phoneClientModule.getPhoneActionState(client.getState()).isBusy, false);
+    assert.equal(restoredCapture.disabled, false);
+    assert.equal(restoredClearConversation.disabled, false);
+    assert.equal(root.querySelector("fieldset").getAttribute("aria-busy"), "false");
   } finally {
     client.stop();
     globalThis.document = previousDocument;

@@ -8,6 +8,7 @@ import type {
   ServerFrame,
 } from "../../src/shared/phone-gateway";
 import type { WorkspaceCommand } from "../../src/shared/ipc";
+import { getCanonicalWorkspaceBusyState } from "../../src/shared/workspace-state";
 
 export type PhoneConnectionState = "connecting" | "connected" | "disconnected" | "error" | "revoked";
 
@@ -265,13 +266,13 @@ export interface PhoneActionState {
 }
 
 export function getPhoneActionState(state: PhoneClientState): PhoneActionState {
-  const activeMessageId = state.snapshot?.conversation.activeMessageId;
-  const activeMessage = activeMessageId
-    ? state.snapshot?.conversation.messages.find((message) => message.id === activeMessageId)
-    : undefined;
-  const isRunning = activeMessage?.status === "pending" || activeMessage?.status === "streaming";
-  const isCapturing = state.snapshot?.capturing === true;
-  const isBusy = Boolean(state.commandPending) || isRunning || isCapturing;
+  const canonical = getCanonicalWorkspaceBusyState({
+    capturing: state.snapshot?.capturing,
+    conversation: state.snapshot?.conversation,
+  });
+  const isRunning = canonical.isRunning;
+  const isCapturing = canonical.isCapturing;
+  const isBusy = Boolean(state.commandPending) || canonical.isBusy;
   const connected = state.connection === "connected";
   const queueCount = state.snapshot?.queue.length ?? 0;
   return {
@@ -283,7 +284,7 @@ export function getPhoneActionState(state: PhoneClientState): PhoneActionState {
     canCaptureAndSend: connected && !isBusy,
     canRemove: connected && !isBusy && queueCount > 0,
     canClearQueue: connected && !isBusy && queueCount > 0,
-    canClearConversation: connected && !state.commandPending,
+    canClearConversation: connected && !isBusy,
     canCancel: connected && isRunning && !state.commandPending,
   };
 }

@@ -74,6 +74,7 @@ export function WorkView({
     queueCount,
     busy,
     screenshotState?.capturing ?? false,
+    conversation,
   );
   const disabled = actionState.isBusy;
   const actionLabel = (label: string) => actionState.isBusy ? (

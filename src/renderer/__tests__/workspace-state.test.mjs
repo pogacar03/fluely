@@ -88,6 +88,41 @@ test("getAnalysisActionState disables asks while running and enables cancel", ()
   assert.equal(workspaceState.getAnalysisActionState("completed", 1).canAskQueue, true);
 });
 
+test("canonical workspace busy state covers capture, pending, streaming, and restored idle", () => {
+  const conversation = (status) => ({
+    sessionId: "session-busy",
+    revision: 1,
+    messages: status ? [{
+      id: "assistant-busy",
+      sequence: 1,
+      role: "assistant",
+      text: "",
+      attachmentIds: [],
+      status,
+      createdAt: 1,
+    }] : [],
+    attachments: [],
+    ...(status ? { activeMessageId: "assistant-busy" } : {}),
+  });
+
+  assert.deepEqual(workspaceState.getCanonicalWorkspaceBusyState({
+    capturing: true,
+    conversation: conversation("completed"),
+  }), { isCapturing: true, isRunning: false, isBusy: true });
+  assert.deepEqual(workspaceState.getCanonicalWorkspaceBusyState({
+    capturing: false,
+    conversation: conversation("pending"),
+  }), { isCapturing: false, isRunning: true, isBusy: true });
+  assert.deepEqual(workspaceState.getCanonicalWorkspaceBusyState({
+    capturing: false,
+    conversation: conversation("streaming"),
+  }), { isCapturing: false, isRunning: true, isBusy: true });
+  assert.deepEqual(workspaceState.getCanonicalWorkspaceBusyState({
+    capturing: false,
+    conversation: conversation("completed"),
+  }), { isCapturing: false, isRunning: false, isBusy: false });
+});
+
 test("workspace action state exposes separate capture/send actions and suppresses duplicates", () => {
   assert.deepEqual(workspaceState.getWorkspaceActionState("idle", 2, false, false), {
     isRunning: false,

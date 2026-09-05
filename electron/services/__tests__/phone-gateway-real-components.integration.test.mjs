@@ -105,6 +105,15 @@ function waitFor(predicate, timeoutMs = 4_000) {
   });
 }
 
+function comparableCanonicalProjection(snapshot) {
+  return {
+    revision: snapshot.revision,
+    capturing: snapshot.capturing ?? false,
+    conversation: structuredClone(snapshot.conversation),
+    queue: snapshot.queue.map(({ previewUrl: _previewUrl, ...item }) => ({ ...item })),
+  };
+}
+
 test("real components stream canonical snapshots/events over PhoneGateway HTTP+WS and serve identical media bytes", { timeout: 15_000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "fluely-phone-real-components-"));
   const screenshotDirectory = path.join(root, "screenshots");
@@ -361,6 +370,16 @@ test("desktop and phone commands share canonical order, idempotency, cancellatio
       .find((frame) => frame.type === "command");
     return next;
   });
+  const assertDesktopPhoneConverged = async () => {
+    await waitFor(() => {
+      const phoneSnapshot = phoneClient?.getState().snapshot;
+      return phoneSnapshot && phoneSnapshot.revision === projection?.getSnapshot().revision;
+    });
+    assert.deepEqual(
+      comparableCanonicalProjection(phoneClient.getState().snapshot),
+      comparableCanonicalProjection(projection.getSnapshot()),
+    );
+  };
 
   try {
     let screenshotIndex = 0;
@@ -556,6 +575,7 @@ test("desktop and phone commands share canonical order, idempotency, cancellatio
     assert.equal(captureFrame.command.type, "capture");
     await waitFor(() => phoneClient.getState().snapshot?.queue.map((item) => item.id).join(",") === SCREENSHOT_ID);
     assert.equal(getButton(phoneRoot, "Capture").disabled, false);
+    await assertDesktopPhoneConverged();
 
     await router.execute({ type: "capture", requestId: "desktop-capture-order" }, "desktop");
     await waitFor(() => phoneClient.getState().snapshot?.queue.length === 2);
@@ -631,6 +651,7 @@ test("desktop and phone commands share canonical order, idempotency, cancellatio
       message.id === activeMessageId && message.text === "Backpressure snapshot"));
     assert.equal(phoneClient.getState().snapshot.conversation.messages.some((message) =>
       message.id === activeMessageId && message.text === "Backpressure snapshot"), true);
+    await assertDesktopPhoneConverged();
 
     phoneSockets.at(-1).close();
     await waitFor(() => phoneSockets.length >= 3 && phoneClient.getState().connection === "connected");
@@ -651,6 +672,7 @@ test("desktop and phone commands share canonical order, idempotency, cancellatio
       SCREENSHOT_ID,
       "22222222-2222-4222-8222-222222222222",
     ]);
+    await assertDesktopPhoneConverged();
 
     await gateway.regeneratePairing();
     await waitFor(() => phoneClient.getState().connection === "revoked");
