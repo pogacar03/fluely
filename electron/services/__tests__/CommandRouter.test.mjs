@@ -24,8 +24,6 @@ const temporaryDirectories = [];
 async function makeHarness({ provider, queueItems = 1 } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "fluely-router-"));
   temporaryDirectories.push(root);
-  const sourcePath = path.join(root, `${SCREENSHOT_ID}.png`);
-  await writeFile(sourcePath, PNG_BYTES);
   const items = Array.from({ length: queueItems }, (_, index) => ({
     id: index === 0 ? SCREENSHOT_ID : `22222222-2222-4222-8222-22222222222${index}`,
     capturedAt: 100 + index,
@@ -34,7 +32,12 @@ async function makeHarness({ provider, queueItems = 1 } = {}) {
     mimeType: "image/png",
     previewUrl: `fluely-media://context/${index === 0 ? SCREENSHOT_ID : `22222222-2222-4222-8222-22222222222${index}`}`,
   }));
-  const paths = new Map([[SCREENSHOT_ID, sourcePath]]);
+  const paths = new Map();
+  await Promise.all(items.map(async (item) => {
+    const sourcePath = path.join(root, `${item.id}.png`);
+    await writeFile(sourcePath, PNG_BYTES);
+    paths.set(item.id, sourcePath);
+  }));
   let queue = [...items];
   const screenshots = {
     getState: () => ({ items: queue.map((item) => ({ ...item })), capturing: false, permission: "granted" }),
@@ -149,6 +152,66 @@ test("source does not change command semantics and duplicate request IDs execute
   assert.equal(providerCalls, 1);
   assert.deepEqual(first, duplicate);
   assert.equal(harness.conversation.snapshot().messages.length, 2);
+});
+
+test("phone send uses the desktop prompt normalization and canonical attachment order without clearing the draft queue", async () => {
+  const calls = [];
+  const harness = await makeHarness({
+    queueItems: 2,
+    provider: {
+      stream: async function* (_path, options) {
+        calls.push(options);
+        yield "phone answer";
+      },
+    },
+  });
+
+  const result = await harness.router.execute({
+    type: "send",
+    requestId: "phone-empty-prompt",
+    prompt: "   \n\t",
+  }, "phone");
+  await harness.router.whenIdle();
+
+  assert.match(calls[0].prompt, /Intent: answer/);
+  assert.match(calls[0].prompt, /Question: Analyze the attached screenshots\.$/);
+  assert.equal(result.conversation.messages[0].text, "Analyze the attached screenshots.");
+  assert.deepEqual(result.conversation.messages[0].attachmentIds, [
+    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  ]);
+  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [
+    SCREENSHOT_ID,
+    "22222222-2222-4222-8222-222222222221",
+  ]);
+  assert.deepEqual(harness.conversation.snapshot().messages.map((message) => message.role), ["user", "assistant"]);
+});
+
+test("phone clear-conversation and cancel preserve the canonical draft queue", async () => {
+  let release;
+  const harness = await makeHarness({
+    provider: {
+      stream: (_path, options) => (async function* () {
+        yield "partial";
+        await new Promise((resolve) => { release = resolve; });
+        if (!options.signal.aborted) yield "late";
+      })(),
+    },
+  });
+
+  await harness.router.execute({ type: "send", requestId: "phone-cancel-send", prompt: "Question" }, "desktop");
+  const cancelPromise = harness.router.execute({ type: "cancel", requestId: "phone-cancel" }, "phone");
+  while (typeof release !== "function") {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  release();
+  await cancelPromise;
+  await harness.router.whenIdle();
+  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
+
+  await harness.router.execute({ type: "clear-conversation", requestId: "phone-clear" }, "phone");
+  assert.deepEqual(harness.conversation.snapshot().messages, []);
+  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
 });
 
 test("provider failure with zero visible delta produces an error assistant terminal state", async () => {

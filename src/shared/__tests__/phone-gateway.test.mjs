@@ -40,7 +40,7 @@ test("B2 accepts only exact typed resync and ping client frames and serializes s
   });
 
   for (const invalid of [
-    { type: "command", command: { type: "capture", requestId: "b3" } },
+    { type: "command", command: { type: "unsupported", requestId: "b3" } },
     { type: "ping", at: 123, requestId: "unexpected" },
     { type: "resync", requestId: "", afterRevision: 7 },
     { type: "resync", requestId: "phone-resync-1", afterRevision: -1 },
@@ -54,4 +54,78 @@ test("B2 accepts only exact typed resync and ping client frames and serializes s
     type: "pong",
     at: 123,
   }), JSON.stringify({ type: "pong", at: 123 }));
+});
+
+test("B3 accepts every exact workspace command frame and preserves blank prompts for the router", () => {
+  const commands = [
+    { type: "capture", requestId: "phone-capture-1" },
+    { type: "send", requestId: "phone-send-1", prompt: "  " },
+    { type: "capture-and-send", requestId: "phone-capture-send-1", prompt: "Question" },
+    {
+      type: "remove",
+      requestId: "phone-remove-1",
+      screenshotId: "11111111-1111-4111-8111-111111111111",
+    },
+    { type: "clear-queue", requestId: "phone-clear-queue-1" },
+    { type: "clear-conversation", requestId: "phone-clear-conversation-1" },
+    { type: "cancel", requestId: "phone-cancel-1" },
+  ];
+
+  for (const command of commands) {
+    assert.deepEqual(
+      phoneGateway.parsePhoneClientFrame(JSON.stringify({ type: "command", command })),
+      { type: "command", command },
+      command.type,
+    );
+  }
+});
+
+test("B3 rejects unknown command fields and types, invalid IDs, and prompt lengths", () => {
+  const validRemove = {
+    type: "command",
+    command: {
+      type: "remove",
+      requestId: "phone-remove-2",
+      screenshotId: "11111111-1111-4111-8111-111111111111",
+    },
+  };
+  const invalidFrames = [
+    { ...validRemove, extra: true },
+    { type: "command", command: { ...validRemove.command, extra: true } },
+    { type: "command", command: { type: "unknown", requestId: "phone-unknown" } },
+    { type: "command", command: { type: "capture", requestId: "" } },
+    { type: "command", command: { type: "capture", requestId: " leading" } },
+    { type: "command", command: { type: "capture", requestId: "trailing " } },
+    { type: "command", command: { type: "capture", requestId: 1 } },
+    { type: "command", command: { type: "remove", requestId: "phone-remove-3", screenshotId: "not-an-id" } },
+    { type: "command", command: { type: "send", requestId: "phone-send-2" } },
+    { type: "command", command: { type: "send", requestId: "phone-send-3", prompt: 1 } },
+    { type: "command", command: { type: "send", requestId: "phone-send-4", prompt: "x".repeat(3001) } },
+  ];
+
+  for (const invalid of invalidFrames) {
+    assert.equal(phoneGateway.parsePhoneClientFrame(JSON.stringify(invalid)), null, JSON.stringify(invalid));
+  }
+
+  assert.deepEqual(
+    phoneGateway.parsePhoneClientFrame(JSON.stringify({
+      type: "command",
+      command: { type: "capture", requestId: "🙂".repeat(32) },
+    })),
+    { type: "command", command: { type: "capture", requestId: "🙂".repeat(32) } },
+  );
+  assert.equal(phoneGateway.parsePhoneClientFrame(JSON.stringify({
+    type: "command",
+    command: { type: "capture", requestId: "🙂".repeat(33) },
+  })), null);
+});
+
+test("B3 rejects oversize and malformed UTF-8 frames at the protocol boundary", () => {
+  const oversized = JSON.stringify({
+    type: "command",
+    command: { type: "capture", requestId: "x", padding: "x".repeat(16 * 1024) },
+  });
+  assert.ok(new TextEncoder().encode(oversized).byteLength > 16 * 1024);
+  assert.equal(phoneGateway.parsePhoneClientFrame(oversized), null);
+  assert.equal(phoneGateway.parsePhoneClientFrame(new Uint8Array([0xff, 0xfe])), null);
 });

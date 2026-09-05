@@ -7,6 +7,11 @@ import type { Socket } from "node:net";
 import * as QRCode from "qrcode";
 import {
   PHONE_GATEWAY_MAX_FRAME_BYTES,
+  PHONE_GATEWAY_MAX_BUFFERED_AMOUNT_BYTES,
+  PHONE_GATEWAY_HEARTBEAT_INTERVAL_MS,
+  PHONE_GATEWAY_HEARTBEAT_MISSES,
+  PHONE_GATEWAY_COMMAND_RATE_LIMIT,
+  PHONE_GATEWAY_COMMAND_RATE_WINDOW_MS,
   parsePhoneClientFrame,
   PHONE_GATEWAY_PAIRING_TTL_MS,
   PHONE_GATEWAY_PORTS,
@@ -16,9 +21,12 @@ import {
   type PhoneGatewayStatus,
 } from "../../src/shared/phone-gateway";
 import type {
+  CommandResult,
   SessionProjectionEvent,
   SessionProjectionPort,
 } from "../../src/shared/conversation";
+import type { WorkspaceCommand } from "../../src/shared/ipc";
+import { createRequestIdDeduper, DuplicateRequestIdError } from "../../src/shared/context-queue";
 import {
   canonicalizeIpv4,
   isPrivateIpv4,
@@ -114,6 +122,11 @@ export interface PhoneGatewayOptions {
   phoneAssetsDirectory?: string;
   readFile?: PhoneGatewayFileReader;
   readMediaFile?: PhoneGatewayFileReader;
+  commandRouter?: PhoneGatewayCommandRouter;
+}
+
+export interface PhoneGatewayCommandRouter {
+  execute(command: WorkspaceCommand, source: "desktop" | "phone"): Promise<CommandResult>;
 }
 
 interface ListeningServer {
@@ -123,6 +136,14 @@ interface ListeningServer {
 
 interface PhoneClient {
   socket: WebSocket;
+  sessionKey?: string;
+  commandSession: PhoneCommandSession;
+  missedHeartbeats: number;
+}
+
+interface PhoneCommandSession {
+  requestDeduper: ReturnType<typeof createRequestIdDeduper<ServerFrame>>;
+  commandTimestamps: number[];
 }
 
 function isAddressInUse(error: unknown): boolean {
@@ -339,6 +360,7 @@ export class PhoneGateway {
   private readonly phoneAssetsDirectory: string;
   private readonly readPhoneAsset: PhoneGatewayFileReader;
   private readonly readMediaFile: PhoneGatewayFileReader;
+  private readonly commandRouter: PhoneGatewayCommandRouter | null;
   private server: GatewayHttpServer | null = null;
   private selectedAddress: string | null = null;
   private selectedPort: number | null = null;
@@ -355,6 +377,8 @@ export class PhoneGateway {
   private webSocketServer: WebSocketServer | null = null;
   private removeProjectionSubscription: (() => void) | null = null;
   private readonly phoneClients = new Set<PhoneClient>();
+  private readonly phoneSessions = new Map<string, PhoneCommandSession>();
+  private heartbeatTimer: unknown = null;
   private lastBroadcastRevision = 0;
 
   public constructor(options: PhoneGatewayOptions = {}) {
@@ -382,6 +406,7 @@ export class PhoneGateway {
     this.phoneAssetsDirectory = options.phoneAssetsDirectory ?? PHONE_ASSET_DIRECTORY;
     this.readPhoneAsset = options.readFile ?? (async (path) => new Uint8Array(await readFile(path)));
     this.readMediaFile = options.readMediaFile ?? readSecureMediaFile;
+    this.commandRouter = options.commandRouter ?? null;
   }
 
   public getStatus(): PhoneGatewayStatus {
@@ -661,7 +686,10 @@ export class PhoneGateway {
       // Protocol errors are reported to the affected socket when possible;
       // they must never expose ws internals to the phone or main process.
     });
-    webSocketServer.on("connection", (socket) => this.acceptWebSocket(socket));
+    webSocketServer.on("connection", (socket, request) => {
+      const sessionKey = parseCookies(request.headers.cookie).get(SESSION_COOKIE);
+      this.acceptWebSocket(socket, sessionKey);
+    });
     this.webSocketServer = webSocketServer;
   }
 
@@ -705,8 +733,15 @@ export class PhoneGateway {
     if (client.socket.readyState !== WebSocket.OPEN) {
       return;
     }
+    if (client.socket.bufferedAmount > PHONE_GATEWAY_MAX_BUFFERED_AMOUNT_BYTES) {
+      this.closeForBackpressure(client);
+      return;
+    }
     try {
       client.socket.send(serializePhoneServerFrame(frame));
+      if (client.socket.bufferedAmount > PHONE_GATEWAY_MAX_BUFFERED_AMOUNT_BYTES) {
+        this.closeForBackpressure(client);
+      }
     } catch {
       try {
         client.socket.terminate();
@@ -716,19 +751,33 @@ export class PhoneGateway {
     }
   }
 
-  private acceptWebSocket(socket: WebSocket): void {
+  private acceptWebSocket(socket: WebSocket, sessionKey?: string): void {
     if (!this.projection) {
       socket.close(1011, "Phone projection unavailable.");
       return;
     }
 
-    const client: PhoneClient = { socket };
+    const client: PhoneClient = {
+      socket,
+      ...(sessionKey ? { sessionKey } : {}),
+      commandSession: sessionKey ? this.getPhoneCommandSession(sessionKey) : this.createPhoneCommandSession(),
+      missedHeartbeats: 0,
+    };
     this.phoneClients.add(client);
+    if (this.heartbeatTimer === null) {
+      this.scheduleHeartbeat();
+    }
     const remove = () => {
       this.phoneClients.delete(client);
+      if (this.phoneClients.size === 0) {
+        this.clearHeartbeatTimer();
+      }
     };
     socket.once("close", remove);
     socket.once("error", remove);
+    socket.on("pong", () => {
+      client.missedHeartbeats = 0;
+    });
     socket.on("message", (data: RawData) => this.handleClientFrame(client, data));
     const snapshot = this.projection.getSnapshot();
     this.sendFrame(client, {
@@ -757,6 +806,7 @@ export class PhoneGateway {
         code: "INVALID_FRAME",
         message: "Invalid phone frame.",
       });
+      this.closeClient(client, 1008, "Invalid phone frame.");
       return;
     }
 
@@ -768,12 +818,176 @@ export class PhoneGateway {
     if (!this.projection) {
       return;
     }
-    const snapshot = this.projection.getSnapshot();
-    this.sendFrame(client, {
-      type: "snapshot",
-      revision: snapshot.revision,
-      payload: snapshot,
-    });
+    if (frame.type === "resync") {
+      const snapshot = this.projection.getSnapshot();
+      this.sendFrame(client, {
+        type: "snapshot",
+        revision: snapshot.revision,
+        payload: snapshot,
+      });
+      return;
+    }
+
+    if (frame.type === "command") {
+      this.handleCommandFrame(client, frame.command);
+    }
+  }
+
+  private handleCommandFrame(client: PhoneClient, command: WorkspaceCommand): void {
+    const now = this.now();
+    const timestamps = client.commandSession.commandTimestamps;
+    while (timestamps.length > 0 && now - timestamps[0] >= PHONE_GATEWAY_COMMAND_RATE_WINDOW_MS) {
+      timestamps.shift();
+    }
+    if (timestamps.length >= PHONE_GATEWAY_COMMAND_RATE_LIMIT) {
+      this.sendFrame(client, {
+        type: "error",
+        requestId: command.requestId,
+        code: "RATE_LIMITED",
+        message: "Too many phone commands. Try again shortly.",
+      });
+      this.closeClient(client, 1008, "Phone command rate limit exceeded.");
+      return;
+    }
+    timestamps.push(now);
+
+    const fingerprint = JSON.stringify(command);
+    const framePromise = client.commandSession.requestDeduper.run(
+      command.requestId,
+      fingerprint,
+      async () => {
+        if (!this.commandRouter) {
+          return {
+            type: "error",
+            requestId: command.requestId,
+            code: "COMMAND_UNAVAILABLE",
+            message: "Phone commands are not available yet.",
+          } satisfies ServerFrame;
+        }
+        try {
+          const result = await this.commandRouter.execute(command, "phone");
+          return { type: "ack", requestId: command.requestId, result } satisfies ServerFrame;
+        } catch (error) {
+          return {
+            type: "error",
+            requestId: command.requestId,
+            code: typeof (error as { code?: unknown })?.code === "string"
+              ? (error as { code: string }).code
+              : "COMMAND_FAILED",
+            message: error instanceof Error && error.message
+              ? error.message
+              : "Fluely could not complete that phone command.",
+          } satisfies ServerFrame;
+        }
+      },
+    );
+    void framePromise.then(
+      (frame) => this.sendFrame(client, frame),
+      (error) => {
+        if (error instanceof DuplicateRequestIdError) {
+          this.sendFrame(client, {
+            type: "error",
+            requestId: command.requestId,
+            code: "DUPLICATE_REQUEST_ID",
+            message: "This request ID was already used for a different command.",
+          });
+          return;
+        }
+        this.sendFrame(client, {
+          type: "error",
+          requestId: command.requestId,
+          code: "COMMAND_FAILED",
+          message: "Fluely could not complete that phone command.",
+        });
+      },
+    );
+  }
+
+  private createPhoneCommandSession(): PhoneCommandSession {
+    return {
+      requestDeduper: createRequestIdDeduper<ServerFrame>(),
+      commandTimestamps: [],
+    };
+  }
+
+  private getPhoneCommandSession(sessionKey: string): PhoneCommandSession {
+    const existing = this.phoneSessions.get(sessionKey);
+    if (existing) {
+      return existing;
+    }
+    const created = this.createPhoneCommandSession();
+    this.phoneSessions.set(sessionKey, created);
+    return created;
+  }
+
+  private closeClient(client: PhoneClient, code: number, reason: string): void {
+    try {
+      client.socket.close(code, reason);
+    } catch {
+      try {
+        client.socket.terminate();
+      } catch {
+        // The peer may already be disconnected.
+      }
+    }
+  }
+
+  private closeForBackpressure(client: PhoneClient): void {
+    try {
+      client.socket.close(1009, "Phone connection backpressure limit exceeded.");
+    } catch {
+      // The peer may already be closing.
+    }
+    try {
+      client.socket.terminate();
+    } catch {
+      // The peer may already be disconnected.
+    }
+  }
+
+  private scheduleHeartbeat(): void {
+    this.clearHeartbeatTimer();
+    const heartbeat = () => {
+      this.heartbeatTimer = null;
+      if (!this.webSocketServer) {
+        return;
+      }
+      for (const client of [...this.phoneClients]) {
+        if (client.socket.readyState !== WebSocket.OPEN) {
+          continue;
+        }
+        client.missedHeartbeats += 1;
+        if (client.missedHeartbeats >= PHONE_GATEWAY_HEARTBEAT_MISSES) {
+          try {
+            client.socket.terminate();
+          } catch {
+            // The peer may already be disconnected.
+          }
+          continue;
+        }
+        try {
+          client.socket.ping();
+        } catch {
+          try {
+            client.socket.terminate();
+          } catch {
+            // The peer may already be disconnected.
+          }
+        }
+      }
+      if (this.phoneClients.size > 0) {
+        this.heartbeatTimer = this.timer.setTimeout(heartbeat, PHONE_GATEWAY_HEARTBEAT_INTERVAL_MS);
+      }
+    };
+    this.heartbeatTimer = this.timer.setTimeout(heartbeat, PHONE_GATEWAY_HEARTBEAT_INTERVAL_MS);
+  }
+
+  private clearHeartbeatTimer(): void {
+    if (this.heartbeatTimer === null) {
+      return;
+    }
+    this.timer.clearTimeout(this.heartbeatTimer);
+    this.heartbeatTimer = null;
   }
 
   private handleUpgrade(request: IncomingMessage, socket: Socket, head: Buffer): void {
@@ -847,10 +1061,12 @@ export class PhoneGateway {
       }
     }
     this.phoneClients.clear();
+    this.phoneSessions.clear();
   }
 
   private async closeServer(): Promise<void> {
     this.invalidatePairingWork();
+    this.clearHeartbeatTimer();
     this.closePhoneClients();
     const webSocketServer = this.webSocketServer;
     this.webSocketServer = null;

@@ -237,6 +237,7 @@ function notifyPhoneGatewayStatus(status: PhoneGatewayStatus): void {
 function getPhoneGatewayLifecycle(settings: SettingsService): PhoneGatewayLifecycle {
   if (!phoneGatewayLifecycle) {
     phoneGateway = new PhoneGateway({
+      commandRouter: getCommandRouter(settings),
       projection: getSessionProjectionStore(),
       context: {
         getManagedPaths: (ids) => getScreenshotService().getManagedPaths(ids),

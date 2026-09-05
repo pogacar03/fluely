@@ -7,6 +7,7 @@ import type {
 import type {
   ServerFrame,
 } from "../../src/shared/phone-gateway";
+import type { WorkspaceCommand } from "../../src/shared/ipc";
 
 export type PhoneConnectionState = "connecting" | "connected" | "disconnected" | "error" | "revoked";
 
@@ -16,6 +17,9 @@ export interface PhoneClientState {
   resyncPending: boolean;
   reconnectAttempt: number;
   errorMessage?: string;
+  commandPending?: { requestId: string; type: WorkspaceCommand["type"] };
+  commandMessage?: string;
+  commandError?: boolean;
 }
 
 export type PhoneClientEffect = { type: "resync"; afterRevision: number } | null;
@@ -174,8 +178,28 @@ export function applyPhoneServerFrame(
   }
 
   if (frame.type === "error") {
-    state.connection = frame.code === "SESSION_REVOKED" ? "revoked" : "error";
-    state.errorMessage = frame.message;
+    if (frame.code === "SESSION_REVOKED") {
+      state.connection = "revoked";
+      state.errorMessage = frame.message;
+    } else if (frame.requestId) {
+      if (state.commandPending?.requestId === frame.requestId) {
+        delete state.commandPending;
+      }
+      state.commandMessage = frame.message;
+      state.commandError = true;
+    } else {
+      state.connection = "error";
+      state.errorMessage = frame.message;
+    }
+    return { state, effect: null };
+  }
+
+  if (frame.type === "ack") {
+    if (state.commandPending?.requestId === frame.requestId) {
+      delete state.commandPending;
+      state.commandMessage = "Command completed.";
+      state.commandError = false;
+    }
   }
   return { state, effect: null };
 }
@@ -216,7 +240,56 @@ function appendText(parent: HTMLElement, tag: string, text: string, className?: 
   return element;
 }
 
-function renderPhoneClient(root: HTMLElement, state: PhoneClientState): void {
+export type PhoneCommandInput =
+  | { type: "capture" }
+  | { type: "remove"; screenshotId: string }
+  | { type: "clear-queue" }
+  | { type: "clear-conversation" }
+  | { type: "send"; prompt: string }
+  | { type: "capture-and-send"; prompt: string }
+  | { type: "cancel" };
+
+export interface PhoneActionState {
+  isRunning: boolean;
+  isBusy: boolean;
+  canCapture: boolean;
+  canSendImages: boolean;
+  canCaptureAndSend: boolean;
+  canRemove: boolean;
+  canClearQueue: boolean;
+  canClearConversation: boolean;
+  canCancel: boolean;
+}
+
+export function getPhoneActionState(state: PhoneClientState): PhoneActionState {
+  const activeMessageId = state.snapshot?.conversation.activeMessageId;
+  const activeMessage = activeMessageId
+    ? state.snapshot?.conversation.messages.find((message) => message.id === activeMessageId)
+    : undefined;
+  const isRunning = activeMessage?.status === "pending" || activeMessage?.status === "streaming";
+  const isBusy = Boolean(state.commandPending) || isRunning;
+  const connected = state.connection === "connected";
+  const queueCount = state.snapshot?.queue.length ?? 0;
+  return {
+    isRunning,
+    isBusy,
+    canCapture: connected && !isBusy,
+    canSendImages: connected && !isBusy && queueCount > 0,
+    canCaptureAndSend: connected && !isBusy,
+    canRemove: connected && !isBusy && queueCount > 0,
+    canClearQueue: connected && !isBusy && queueCount > 0,
+    canClearConversation: connected && !state.commandPending,
+    canCancel: connected && isRunning && !state.commandPending,
+  };
+}
+
+function renderPhoneClient(
+  root: HTMLElement,
+  state: PhoneClientState,
+  promptValue: string,
+  onPromptChange: (value: string) => void,
+  onCommand: (command: PhoneCommandInput) => boolean,
+): void {
   root.replaceChildren();
   const shell = document.createElement("main");
   shell.className = "phone-shell";
@@ -246,12 +319,24 @@ function renderPhoneClient(root: HTMLElement, state: PhoneClientState): void {
     const queueList = document.createElement("div");
     queueList.className = "phone-thumbnail-row";
     for (const item of queue) {
+      const itemContainer = document.createElement("div");
+      itemContainer.className = "phone-queue-item";
       const image = document.createElement("img");
       image.src = phoneImageUrl("context", item.id);
       image.alt = `Queued screenshot, ${item.width} by ${item.height}`;
       image.width = 160;
       image.height = Math.max(1, Math.round(160 * item.height / item.width));
-      queueList.append(image);
+      itemContainer.append(image);
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Remove";
+      remove.setAttribute("aria-label", `Remove screenshot ${item.id}`);
+      remove.disabled = !getPhoneActionState(state).canRemove;
+      remove.addEventListener("click", () => {
+        onCommand({ type: "remove", screenshotId: item.id });
+      });
+      itemContainer.append(remove);
+      queueList.append(itemContainer);
     }
     queueSection.append(queueList);
   }
@@ -305,19 +390,48 @@ function renderPhoneClient(root: HTMLElement, state: PhoneClientState): void {
   const controls = document.createElement("section");
   controls.className = "phone-card phone-controls";
   appendText(controls, "h2", "Phone controls");
-  appendText(controls, "p", "This first companion slice is read-only. Changes continue to be made on the computer.", "phone-empty");
+  appendText(controls, "p", "Control the shared workspace from this phone.", "phone-empty");
+  if (state.commandMessage) {
+    appendText(controls, "p", state.commandMessage, state.commandError ? "phone-error" : "phone-command-status");
+  }
+  const actionState = getPhoneActionState(state);
   const fieldset = document.createElement("fieldset");
-  fieldset.disabled = true;
+  fieldset.disabled = state.connection !== "connected";
+  fieldset.setAttribute("aria-busy", String(Boolean(state.commandPending)));
   const prompt = document.createElement("textarea");
   prompt.rows = 3;
+  prompt.value = promptValue;
+  prompt.maxLength = 3000;
   prompt.placeholder = "Ask Fluely about your screenshots";
+  prompt.disabled = state.connection !== "connected" || actionState.isBusy;
+  prompt.addEventListener("input", () => onPromptChange(prompt.value));
   fieldset.append(prompt);
-  for (const label of ["Send", "Capture computer screen", "Clear conversation"]) {
+  const addCommandButton = (
+    label: string,
+    command: PhoneCommandInput,
+    disabled: boolean,
+  ) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = label;
+    const loading = state.commandPending?.type === command.type;
+    button.textContent = loading ? `${label}…` : label;
+    button.disabled = disabled || Boolean(state.commandPending && !loading);
+    button.setAttribute("aria-busy", String(loading));
+    button.addEventListener("click", () => {
+      const nextCommand = command.type === "send" || command.type === "capture-and-send"
+        ? { ...command, prompt: prompt.value }
+        : command;
+      onCommand(nextCommand);
+    });
     fieldset.append(button);
-  }
+    return button;
+  };
+  addCommandButton("Capture", { type: "capture" }, !actionState.canCapture);
+  addCommandButton("Send images", { type: "send", prompt: promptValue }, !actionState.canSendImages);
+  addCommandButton("Capture & ask", { type: "capture-and-send", prompt: promptValue }, !actionState.canCaptureAndSend);
+  addCommandButton("Clear queue", { type: "clear-queue" }, !actionState.canClearQueue);
+  addCommandButton("Clear conversation", { type: "clear-conversation" }, !actionState.canClearConversation);
+  addCommandButton("Cancel", { type: "cancel" }, !actionState.canCancel);
   controls.append(fieldset);
   shell.append(controls);
   root.append(shell);
@@ -330,8 +444,20 @@ function nextResyncRequestId(): string {
   return `phone-resync-${random}`;
 }
 
+function createPhoneCommandRequestIdFactory(): (type: WorkspaceCommand["type"]) => string {
+  const random = typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  let sequence = 0;
+  return (type) => {
+    sequence += 1;
+    return `phone-command-${random}-${type}-${sequence}`;
+  };
+}
+
 export interface PhoneClientController {
   getState(): PhoneClientState;
+  sendCommand(command: PhoneCommandInput): boolean;
   stop(): void;
   restart(): void;
   retry(): void;
@@ -363,6 +489,7 @@ const DEFAULT_FETCH_TIMEOUT_MS = 5_000;
 /** Starts the dependency-free browser client with bounded, authenticated reconnects. */
 export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions = {}): PhoneClientController {
   let state = createPhoneClientState();
+  let promptValue = "";
   const WebSocketConstructor = options.WebSocket ?? (globalThis.WebSocket as unknown as PhoneClientWebSocketConstructor);
   const fetchImpl = options.fetch ?? (globalThis.fetch?.bind(globalThis) as PhoneClientOptions["fetch"] | undefined);
   const setTimeoutImpl = options.setTimeout ?? ((callback, delayMs) => globalThis.setTimeout(callback, delayMs));
@@ -375,8 +502,11 @@ export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions 
   let stopped = false;
   let reconnectTimer: unknown = null;
   let reconnectGeneration = 0;
+  const nextCommandRequestId = createPhoneCommandRequestIdFactory();
 
-  const publish = () => renderPhoneClient(root, state);
+  const publish = () => renderPhoneClient(root, state, promptValue, (value) => {
+    promptValue = value;
+  }, sendCommand);
   const scheduleReconnect = () => {
     if (stopped || reconnectTimer !== null) return;
     const attempt = state.reconnectAttempt;
@@ -399,6 +529,30 @@ export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions 
       afterRevision,
     }));
   };
+  function sendCommand(command: PhoneCommandInput): boolean {
+    if (!socket || socket.readyState !== (WebSocketConstructor.OPEN ?? 1) || state.commandPending) {
+      return false;
+    }
+    const requestId = nextCommandRequestId(command.type);
+    const fullCommand = { ...command, requestId } as WorkspaceCommand;
+    state = {
+      ...state,
+      commandPending: { requestId, type: command.type },
+      commandMessage: undefined,
+      commandError: false,
+    };
+    publish();
+    try {
+      socket.send(JSON.stringify({ type: "command", command: fullCommand }));
+      return true;
+    } catch {
+      delete state.commandPending;
+      state.commandMessage = "The phone companion could not send that command.";
+      state.commandError = true;
+      publish();
+      return false;
+    }
+  }
   const handleMessage = (data: unknown) => {
     let frame: ServerFrame;
     try {
@@ -444,7 +598,7 @@ export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions 
     const authentication = await probeAuthentication();
     if (stopped || generation !== reconnectGeneration) return;
     if (authentication === "revoked") {
-      state = { ...state, connection: "revoked", errorMessage: "Pairing revoked." };
+      state = { ...state, connection: "revoked", errorMessage: "Pairing revoked.", commandPending: undefined };
       publish();
       return;
     }
@@ -464,13 +618,13 @@ export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions 
       scheduleReconnect();
       return;
     }
-    state = { ...state, connection: "connecting", errorMessage: undefined };
+    state = { ...state, connection: "connecting", errorMessage: undefined, commandPending: undefined };
     publish();
     try {
       const protocol = locationInfo?.protocol === "https:" ? "wss:" : "ws:";
       socket = new WebSocketConstructor(`${protocol}//${locationInfo?.host ?? ""}/ws`);
     } catch {
-      state = { ...state, connection: "error", errorMessage: "The phone companion could not open a connection." };
+      state = { ...state, connection: "error", errorMessage: "The phone companion could not open a connection.", commandPending: undefined };
       publish();
       scheduleReconnect();
       return;
@@ -494,7 +648,7 @@ export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions 
       if (socket !== currentSocket || stopped) return;
       socket = null;
       if (state.connection === "revoked") return;
-      state = { ...state, connection: "disconnected" };
+      state = { ...state, connection: "disconnected", commandPending: undefined };
       publish();
       scheduleReconnect();
     });
@@ -516,7 +670,7 @@ export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions 
         // A closing socket cannot prevent an explicit retry.
       }
     }
-    state = { ...state, connection: "connecting", reconnectAttempt: 0, errorMessage: undefined };
+    state = { ...state, connection: "connecting", reconnectAttempt: 0, errorMessage: undefined, commandPending: undefined };
     publish();
     connect();
   };
@@ -525,6 +679,7 @@ export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions 
   connect();
   return {
     getState: () => ({ ...state, ...(state.snapshot ? { snapshot: cloneProjection(state.snapshot) } : {}) }),
+    sendCommand,
     stop: () => {
       stopped = true;
       reconnectGeneration += 1;

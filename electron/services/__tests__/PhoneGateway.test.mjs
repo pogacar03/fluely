@@ -105,6 +105,7 @@ function makeGateway({
   attachments,
   phoneAssetsDirectory,
   readMediaFile,
+  commandRouter,
 } = {}) {
   const servers = [];
   const clock = now ?? (() => 10_000);
@@ -136,6 +137,7 @@ function makeGateway({
     ...(attachments ? { attachments } : {}),
     ...(phoneAssetsDirectory ? { phoneAssetsDirectory } : {}),
     ...(readMediaFile ? { readMediaFile } : {}),
+    ...(commandRouter ? { commandRouter } : {}),
   });
   gateways.push(gateway);
   return { gateway, servers };
@@ -427,6 +429,90 @@ function makeProjection(initialSnapshot) {
       }
     },
   };
+}
+
+function makeGatewayTimer() {
+  const entries = [];
+  return {
+    entries,
+    setTimeout(callback, delay) {
+      const entry = { callback, delay, cleared: false };
+      entries.push(entry);
+      return entry;
+    },
+    clearTimeout(entry) {
+      if (entry) entry.cleared = true;
+    },
+    fire(entry) {
+      entry.callback();
+    },
+    active() {
+      return entries.filter((entry) => !entry.cleared);
+    },
+  };
+}
+
+function makeGatewaySocket({ bufferedAmount = 0 } = {}) {
+  const listeners = new Map();
+  const socket = {
+    readyState: WebSocket.OPEN,
+    bufferedAmount,
+    sent: [],
+    pings: 0,
+    closeCalls: [],
+    terminated: false,
+    on(event, listener) {
+      const current = listeners.get(event) ?? [];
+      current.push(listener);
+      listeners.set(event, current);
+      return socket;
+    },
+    once(event, listener) {
+      const wrapped = (...args) => {
+        socket.removeListener(event, wrapped);
+        listener(...args);
+      };
+      return socket.on(event, wrapped);
+    },
+    removeListener(event, listener) {
+      listeners.set(event, (listeners.get(event) ?? []).filter((candidate) => candidate !== listener));
+      return socket;
+    },
+    emit(event, ...args) {
+      for (const listener of [...(listeners.get(event) ?? [])]) {
+        listener(...args);
+      }
+    },
+    send(value) {
+      socket.sent.push(String(value));
+    },
+    ping() {
+      socket.pings += 1;
+    },
+    close(code, reason) {
+      socket.closeCalls.push({ code, reason });
+      socket.readyState = WebSocket.CLOSED;
+      socket.emit("close");
+    },
+    terminate() {
+      socket.terminated = true;
+      socket.readyState = WebSocket.CLOSED;
+      socket.emit("close");
+    },
+  };
+  return socket;
+}
+
+function commandResult() {
+  return {
+    queue: { items: [], capturing: false, permission: "granted" },
+    conversation: { sessionId: "session-phone-command", revision: 0, messages: [], attachments: [] },
+  };
+}
+
+async function flushMicrotasks() {
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 function invokeHandler(gateway, requestPath, {
@@ -1280,14 +1366,14 @@ test("authenticated WebSocket sends an immediate snapshot, ordered events, ping/
     assert.equal(resyncFrame.payload.conversation.messages[0].text, "Streaming");
     assert.equal(projection.getSnapshotReadCount(), readsBeforeResync + 1);
 
-    socket.send(JSON.stringify({ type: "command", command: { type: "capture", requestId: "b3" } }));
+    socket.send(JSON.stringify({ type: "command", command: { type: "unsupported", requestId: "b3" } }));
     const invalidFrame = await waitForObservedMessage(socket);
     assert.deepEqual(invalidFrame, {
       type: "error",
       code: "INVALID_FRAME",
       message: "Invalid phone frame.",
     });
-    assert.equal(socket.readyState, WebSocket.OPEN);
+    assert.notEqual(socket.readyState, WebSocket.OPEN);
 
     await closeSocket(socket);
     const reconnected = await connect(wsUrl, { headers: { Cookie: cookieHeader }, origin: ready.origin });
@@ -1306,6 +1392,143 @@ test("authenticated WebSocket sends an immediate snapshot, ordered events, ping/
       origin: ready.origin,
     }), "rejected");
   });
+});
+
+test("phone commands enter the canonical router with source phone and replay one cached acknowledgement", async () => {
+  const projection = makeProjection({
+    revision: 0,
+    conversation: { sessionId: "session-phone-command", revision: 0, messages: [], attachments: [] },
+    queue: [],
+  });
+  const calls = [];
+  const router = {
+    execute: async (command, source) => {
+      calls.push({ command, source });
+      return commandResult();
+    },
+  };
+  const { gateway } = makeGateway({ projection, commandRouter: router });
+  const socket = makeGatewaySocket();
+  gateway.acceptWebSocket(socket);
+  socket.sent = [];
+
+  const command = { type: "capture", requestId: "phone-idempotent-1" };
+  const frame = JSON.stringify({ type: "command", command });
+  socket.emit("message", Buffer.from(frame));
+  await flushMicrotasks();
+  socket.emit("message", Buffer.from(frame));
+  await flushMicrotasks();
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], { command, source: "phone" });
+  assert.equal(socket.sent.length, 2);
+  assert.deepEqual(JSON.parse(socket.sent[0]), JSON.parse(socket.sent[1]));
+  assert.equal(JSON.parse(socket.sent[0]).type, "ack");
+});
+
+test("phone commands close the session after the eleventh command in a rolling ten-second window", async () => {
+  const projection = makeProjection({
+    revision: 0,
+    conversation: { sessionId: "session-phone-rate", revision: 0, messages: [], attachments: [] },
+    queue: [],
+  });
+  const router = { execute: async () => commandResult() };
+  const { gateway } = makeGateway({ projection, commandRouter: router });
+  const socket = makeGatewaySocket();
+  gateway.acceptWebSocket(socket);
+  socket.sent = [];
+
+  for (let index = 0; index < 10; index += 1) {
+    socket.emit("message", Buffer.from(JSON.stringify({
+      type: "command",
+      command: { type: "capture", requestId: `phone-rate-${index}` },
+    })));
+    await flushMicrotasks();
+  }
+  assert.equal(socket.terminated, false);
+
+  socket.emit("message", Buffer.from(JSON.stringify({
+    type: "command",
+    command: { type: "capture", requestId: "phone-rate-10" },
+  })));
+  await flushMicrotasks();
+
+  const error = socket.sent.map((value) => JSON.parse(value)).find((frame) => frame.type === "error");
+  assert.deepEqual(error, {
+    type: "error",
+    requestId: "phone-rate-10",
+    code: "RATE_LIMITED",
+    message: "Too many phone commands. Try again shortly.",
+  });
+  assert.equal(socket.readyState, WebSocket.CLOSED);
+  assert.equal(socket.closeCalls[0].code, 1008);
+});
+
+test("phone gateway heartbeat pings every fifteen seconds and terminates after two missed heartbeats", async () => {
+  const timer = makeGatewayTimer();
+  const projection = makeProjection({
+    revision: 0,
+    conversation: { sessionId: "session-phone-heartbeat", revision: 0, messages: [], attachments: [] },
+    queue: [],
+  });
+  const { gateway } = makeGateway({ projection, timer, portCandidates: [0] });
+  await gateway.start();
+  const socket = makeGatewaySocket();
+  gateway.acceptWebSocket(socket);
+
+  const first = timer.active().find((entry) => entry.delay === 15_000);
+  assert.ok(first);
+  timer.fire(first);
+  assert.equal(socket.pings, 1);
+  const second = timer.active().find((entry) => entry.delay === 15_000 && entry !== first);
+  assert.ok(second);
+  timer.fire(second);
+  assert.equal(socket.terminated, true);
+});
+
+test("phone gateway closes a client before sending when outbound backpressure exceeds one MiB", () => {
+  const projection = makeProjection({
+    revision: 0,
+    conversation: { sessionId: "session-phone-backpressure", revision: 0, messages: [], attachments: [] },
+    queue: [],
+  });
+  const { gateway } = makeGateway({ projection });
+  const socket = makeGatewaySocket({ bufferedAmount: 1_048_577 });
+  gateway.acceptWebSocket(socket);
+
+  assert.equal(socket.terminated, true);
+  assert.equal(socket.sent.length, 0);
+});
+
+test("disconnecting during an active phone command does not cancel or invent an acknowledgement", async () => {
+  let release;
+  let calls = 0;
+  const router = {
+    execute: async () => {
+      calls += 1;
+      return new Promise((resolve) => { release = resolve; });
+    },
+  };
+  const projection = makeProjection({
+    revision: 0,
+    conversation: { sessionId: "session-phone-disconnect", revision: 0, messages: [], attachments: [] },
+    queue: [],
+  });
+  const { gateway } = makeGateway({ projection, commandRouter: router });
+  const socket = makeGatewaySocket();
+  gateway.acceptWebSocket(socket);
+  socket.sent = [];
+  socket.emit("message", Buffer.from(JSON.stringify({
+    type: "command",
+    command: { type: "capture", requestId: "phone-disconnect-1" },
+  })));
+  await flushMicrotasks();
+  assert.equal(calls, 1);
+  socket.emit("close");
+  release(commandResult());
+  await flushMicrotasks();
+
+  assert.deepEqual(socket.sent, []);
 });
 
 test("raw HTTP request targets are matched before URL normalization and reject traversal, encoded separators, and query confusion", async () => {

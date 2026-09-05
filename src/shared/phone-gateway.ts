@@ -3,6 +3,7 @@ import type {
   ConversationEvent,
   SessionProjectionSnapshot,
 } from "./conversation";
+import type { WorkspaceCommand } from "./ipc";
 
 export interface PhoneGatewaySettings {
   enabled: boolean;
@@ -35,6 +36,12 @@ export const PHONE_GATEWAY_PORTS = [
 
 export const PHONE_GATEWAY_MAX_FRAME_BYTES = 16 * 1024;
 export const PHONE_GATEWAY_MAX_REQUEST_ID_BYTES = 128;
+export const PHONE_GATEWAY_MAX_PROMPT_LENGTH = 3000;
+export const PHONE_GATEWAY_COMMAND_RATE_LIMIT = 10;
+export const PHONE_GATEWAY_COMMAND_RATE_WINDOW_MS = 10_000;
+export const PHONE_GATEWAY_MAX_BUFFERED_AMOUNT_BYTES = 1 * 1024 * 1024;
+export const PHONE_GATEWAY_HEARTBEAT_INTERVAL_MS = 15_000;
+export const PHONE_GATEWAY_HEARTBEAT_MISSES = 2;
 
 export type ServerFrame =
   | { type: "snapshot"; revision: number; payload: SessionProjectionSnapshot }
@@ -43,9 +50,15 @@ export type ServerFrame =
   | { type: "error"; requestId?: string; code: string; message: string }
   | { type: "pong"; at: number };
 
+export type PhoneCommandFrame = {
+  type: "command";
+  command: WorkspaceCommand;
+};
+
 export type ClientFrame =
   | { type: "resync"; requestId: string; afterRevision: number }
-  | { type: "ping"; at: number };
+  | { type: "ping"; at: number }
+  | PhoneCommandFrame;
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const expected = new Set(keys);
@@ -54,8 +67,49 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
 }
 
 function isRequestId(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 &&
+  return typeof value === "string" && value.length > 0 && value === value.trim() &&
     new TextEncoder().encode(value).byteLength <= PHONE_GATEWAY_MAX_REQUEST_ID_BYTES;
+}
+
+const SCREENSHOT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isScreenshotId(value: unknown): value is string {
+  return typeof value === "string" && SCREENSHOT_ID_PATTERN.test(value);
+}
+
+function isPrompt(value: unknown): value is string {
+  return typeof value === "string" && value.length <= PHONE_GATEWAY_MAX_PROMPT_LENGTH;
+}
+
+function parseWorkspaceCommand(value: unknown): WorkspaceCommand | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const command = value as Record<string, unknown>;
+  if (!isRequestId(command.requestId) || typeof command.type !== "string") {
+    return null;
+  }
+
+  switch (command.type) {
+    case "capture":
+    case "clear-queue":
+    case "clear-conversation":
+    case "cancel":
+      return hasExactKeys(command, ["type", "requestId"])
+        ? { type: command.type, requestId: command.requestId }
+        : null;
+    case "remove":
+      return hasExactKeys(command, ["type", "requestId", "screenshotId"]) && isScreenshotId(command.screenshotId)
+        ? { type: "remove", requestId: command.requestId, screenshotId: command.screenshotId }
+        : null;
+    case "send":
+    case "capture-and-send":
+      return hasExactKeys(command, ["type", "requestId", "prompt"]) && isPrompt(command.prompt)
+        ? { type: command.type, requestId: command.requestId, prompt: command.prompt }
+        : null;
+    default:
+      return null;
+  }
 }
 
 function isRevision(value: unknown): value is number {
@@ -66,7 +120,7 @@ function isTimestamp(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
-/** Parses only the B2 read-only client frame union; B3 commands are intentionally rejected. */
+/** Parses the exact phone client frame union at the authenticated gateway boundary. */
 export function parsePhoneClientFrame(input: string | Uint8Array): ClientFrame | null {
   let text: string;
   try {
@@ -79,7 +133,7 @@ export function parsePhoneClientFrame(input: string | Uint8Array): ClientFrame |
       if (input.byteLength > PHONE_GATEWAY_MAX_FRAME_BYTES) {
         return null;
       }
-      text = new TextDecoder().decode(input);
+      text = new TextDecoder("utf-8", { fatal: true }).decode(input);
     }
     const value = JSON.parse(text) as unknown;
     if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -100,6 +154,10 @@ export function parsePhoneClientFrame(input: string | Uint8Array): ClientFrame |
         requestId: frame.requestId,
         afterRevision: frame.afterRevision,
       };
+    }
+    if (frame.type === "command" && hasExactKeys(frame, ["type", "command"])) {
+      const command = parseWorkspaceCommand(frame.command);
+      return command ? { type: "command", command } : null;
     }
     return null;
   } catch {

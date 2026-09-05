@@ -462,3 +462,168 @@ test("phone client keeps SESSION_REVOKED locked through websocket error and clos
     dom.window.close();
   }
 });
+
+function controlSnapshot({ queued = true, running = false } = {}) {
+  const assistant = {
+    id: "assistant-1",
+    sequence: 2,
+    role: "assistant",
+    text: running ? "partial" : "answer",
+    attachmentIds: [],
+    status: running ? "streaming" : "completed",
+    createdAt: 2,
+  };
+  return {
+    revision: 0,
+    conversation: {
+      sessionId: "session-phone-controls",
+      revision: 0,
+      messages: running ? [
+        {
+          id: "user-1",
+          sequence: 1,
+          role: "user",
+          text: "Question",
+          attachmentIds: [],
+          status: "completed",
+          createdAt: 1,
+        },
+        assistant,
+      ] : [],
+      attachments: [],
+      ...(running ? { activeMessageId: assistant.id } : {}),
+    },
+    queue: queued ? [{
+      id: CONTEXT_ID,
+      capturedAt: 100,
+      width: 1920,
+      height: 1080,
+      mimeType: "image/png",
+      previewUrl: `/api/context/${CONTEXT_ID}`,
+    }] : [],
+  };
+}
+
+test("phone DOM controls send every workspace command, mirror canonical busy state, and keep ack state out of the conversation", () => {
+  const dom = new JSDOM("<div id=\"phone-app\"></div>", { url: "http://phone.test/" });
+  const previousDocument = globalThis.document;
+  globalThis.document = dom.window.document;
+  const timer = makeFakeTimer();
+  const { FakeSocket, instances } = makeFakeSocketClass();
+  const client = phoneClientModule.startPhoneClient(dom.window.document.getElementById("phone-app"), {
+    WebSocket: FakeSocket,
+    fetch: async () => ({ status: 200, ok: true }),
+    setTimeout: timer.setTimeout,
+    clearTimeout: timer.clearTimeout,
+    location: { protocol: "http:", host: "phone.test" },
+  });
+
+  try {
+    instances[0].open();
+    instances[0].emit("message", { data: JSON.stringify({ type: "snapshot", revision: 0, payload: controlSnapshot() }) });
+    const root = dom.window.document.getElementById("phone-app");
+    const getButton = (name) => [...root.querySelectorAll("button")].find((button) => button.textContent.includes(name) || button.getAttribute("aria-label")?.includes(name));
+    const getCommand = () => JSON.parse(instances[0].sent.at(-1));
+    const acknowledge = () => {
+      const command = getCommand().command;
+      instances[0].emit("message", {
+        data: JSON.stringify({ type: "ack", requestId: command.requestId, result: {
+          queue: { items: [], capturing: false, permission: "granted" },
+          conversation: controlSnapshot().conversation,
+        } }),
+      });
+    };
+
+    for (const label of ["Capture", "Send images", "Capture & ask", "Remove", "Clear queue", "Clear conversation", "Cancel"]) {
+      assert.ok(getButton(label), label);
+    }
+    assert.equal(getButton("Send images").disabled, false);
+    assert.equal(getButton("Capture").disabled, false);
+    assert.equal(getButton("Cancel").disabled, true);
+
+    getButton("Capture").click();
+    assert.equal(getCommand().type, "command");
+    assert.equal(getCommand().command.type, "capture");
+    assert.equal(getButton("Capture").disabled, true);
+    const queueBeforeAck = client.getState().snapshot.queue;
+    getButton("Capture").click();
+    assert.equal(instances[0].sent.length, 1);
+    acknowledge();
+    assert.deepEqual(client.getState().snapshot.queue, queueBeforeAck);
+    assert.match(root.textContent, /Command completed/);
+
+    const prompt = root.querySelector("textarea");
+    prompt.value = "Question from phone";
+    prompt.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    getButton("Send images").click();
+    assert.deepEqual(getCommand().command.type, "send");
+    assert.equal(getCommand().command.prompt, "Question from phone");
+    acknowledge();
+
+    getButton("Capture & ask").click();
+    assert.deepEqual(getCommand().command.type, "capture-and-send");
+    acknowledge();
+
+    getButton("Remove").click();
+    assert.deepEqual(getCommand().command.type, "remove");
+    assert.equal(getCommand().command.screenshotId, CONTEXT_ID);
+    acknowledge();
+
+    getButton("Clear queue").click();
+    assert.deepEqual(getCommand().command.type, "clear-queue");
+    acknowledge();
+
+    getButton("Clear conversation").click();
+    assert.deepEqual(getCommand().command.type, "clear-conversation");
+    acknowledge();
+
+    instances[0].emit("message", { data: JSON.stringify({ type: "snapshot", revision: 1, payload: controlSnapshot({ running: true }) }) });
+    assert.equal(getButton("Cancel").disabled, false);
+    assert.equal(getButton("Capture").disabled, true);
+    assert.equal(getButton("Send images").disabled, true);
+    getButton("Cancel").click();
+    assert.deepEqual(getCommand().command.type, "cancel");
+  } finally {
+    client.stop();
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
+test("phone command errors clear only command loading and never invent messages or queue entries", () => {
+  const dom = new JSDOM("<div id=\"phone-app\"></div>", { url: "http://phone.test/" });
+  const previousDocument = globalThis.document;
+  globalThis.document = dom.window.document;
+  const timer = makeFakeTimer();
+  const { FakeSocket, instances } = makeFakeSocketClass();
+  const client = phoneClientModule.startPhoneClient(dom.window.document.getElementById("phone-app"), {
+    WebSocket: FakeSocket,
+    fetch: async () => ({ status: 200, ok: true }),
+    setTimeout: timer.setTimeout,
+    clearTimeout: timer.clearTimeout,
+    location: { protocol: "http:", host: "phone.test" },
+  });
+
+  try {
+    instances[0].open();
+    instances[0].emit("message", { data: JSON.stringify({ type: "snapshot", revision: 0, payload: controlSnapshot() }) });
+    const root = dom.window.document.getElementById("phone-app");
+    const capture = [...root.querySelectorAll("button")].find((button) => button.textContent.includes("Capture"));
+    capture.click();
+    const command = JSON.parse(instances[0].sent.at(-1)).command;
+    instances[0].emit("message", { data: JSON.stringify({
+      type: "error",
+      requestId: command.requestId,
+      code: "SCREEN_CAPTURE_FAILED",
+      message: "Capture failed.",
+    }) });
+    assert.equal(client.getState().commandPending, undefined);
+    assert.equal(client.getState().snapshot.queue.length, 1);
+    assert.equal(client.getState().snapshot.conversation.messages.length, 0);
+    assert.match(root.textContent, /Capture failed/);
+  } finally {
+    client.stop();
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
