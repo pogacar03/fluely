@@ -179,6 +179,81 @@ test("built phone bundle renders untrusted projection text as text and keeps med
   }
 });
 
+test("built phone bundle renders the initial canonical snapshot and applies an incremental event in the DOM", async () => {
+  const { dom, instances } = await loadPhoneBundle({
+    fetchImpl: async () => ({ status: 200, ok: true }),
+  });
+  try {
+    instances[0].open();
+    instances[0].emit("message", { data: JSON.stringify(snapshotWithUntrustedText("initial user text")) });
+    const root = dom.window.document.getElementById("phone-app");
+    assert.equal(root.querySelectorAll(".phone-message").length, 1);
+    assert.equal(root.querySelector(".phone-message-text")?.textContent, "initial user text");
+    assert.equal(root.querySelector("img[src^=\"/api/context/\"]")?.getAttribute("src"), "/api/context/" + CONTEXT_ID);
+    assert.equal(root.querySelector("img[src^=\"/api/attachments/\"]")?.getAttribute("src"), "/api/attachments/" + ATTACHMENT_ID);
+
+    instances[0].emit("message", {
+      data: JSON.stringify({
+        type: "event",
+        revision: 2,
+        payload: {
+          type: "message-updated",
+          revision: 2,
+          activeMessageId: null,
+          message: {
+            id: "message-1",
+            sequence: 1,
+            role: "user",
+            text: "incremental user text",
+            attachmentIds: [ATTACHMENT_ID],
+            status: "completed",
+            createdAt: 1,
+          },
+        },
+      }),
+    });
+    assert.equal(root.querySelector(".phone-message-text")?.textContent, "incremental user text");
+  } finally {
+    instances[0]?.close();
+    dom.window.close();
+  }
+});
+
+test("built phone bundle clears and resets rendered conversation on the canonical cleared event", async () => {
+  const { dom, instances } = await loadPhoneBundle({
+    fetchImpl: async () => ({ status: 200, ok: true }),
+  });
+  try {
+    instances[0].open();
+    instances[0].emit("message", { data: JSON.stringify(snapshotWithUntrustedText("remove me")) });
+    const root = dom.window.document.getElementById("phone-app");
+    assert.equal(root.querySelectorAll(".phone-message").length, 1);
+
+    instances[0].emit("message", {
+      data: JSON.stringify({
+        type: "event",
+        revision: 2,
+        payload: {
+          type: "cleared",
+          revision: 2,
+          activeMessageId: null,
+          snapshot: {
+            sessionId: "session-bundle",
+            revision: 2,
+            messages: [],
+            attachments: [],
+          },
+        },
+      }),
+    });
+    assert.equal(root.querySelectorAll(".phone-message").length, 0);
+    assert.equal(root.textContent.includes("Sent screenshots and answers will appear here."), true);
+  } finally {
+    instances[0]?.close();
+    dom.window.close();
+  }
+});
+
 test("built phone bundle marks a revoked cookie and does not open another socket after a 401 probe", async () => {
   const fetchCalls = [];
   const { dom, timer, instances } = await loadPhoneBundle({

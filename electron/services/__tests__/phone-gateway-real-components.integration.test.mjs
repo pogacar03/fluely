@@ -164,8 +164,14 @@ test("real screenshot, attachment, projection, and gateway components preserve o
       },
       portCandidates: [0],
       projection,
-      context: { getManagedPaths: (ids) => screenshots.getManagedPaths(ids) },
-      attachments: { getPath: (id) => attachments.getPath(id) },
+      context: {
+        getManagedPaths: (ids) => screenshots.getManagedPaths(ids),
+        getManagedRoot: () => screenshots.getManagedRoot(),
+      },
+      attachments: {
+        getPath: (id) => attachments.getPath(id),
+        getManagedRoot: () => attachments.directory,
+      },
       qrCode: { toDataURL: async (url) => { qrUrls.push(url); return "data:qr"; } },
     });
     const ready = await gateway.start();

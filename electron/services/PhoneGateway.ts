@@ -82,13 +82,15 @@ export interface PhoneGatewayQrCodeAdapter {
 
 export interface PhoneGatewayContextSource {
   getManagedPaths(ids: readonly string[]): string[];
+  getManagedRoot?: () => string;
 }
 
 export interface PhoneGatewayAttachmentSource {
   getPath(id: string): string | undefined;
+  getManagedRoot?: () => string;
 }
 
-export type PhoneGatewayFileReader = (path: string) => Promise<Uint8Array>;
+export type PhoneGatewayFileReader = (path: string, managedRoot?: string) => Promise<Uint8Array>;
 
 export interface PhoneGatewayTimer {
   setTimeout(callback: () => void, delayMs: number): unknown;
@@ -193,6 +195,8 @@ type PhoneMediaRoute =
 
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/;
 const ENCODED_SEPARATOR_PATTERN = /%(?:2f|5c)/i;
+const INVALID_PERCENT_ENCODING_PATTERN = /%(?![0-9a-f]{2})/i;
+const ENCODED_UNSAFE_BYTE_PATTERN = /%(?:25)*(?:00|0[1-9a-f]|1[0-9a-f]|2e|2f|5c|7f)/i;
 
 export interface RawRequestTarget {
   path: string;
@@ -205,24 +209,12 @@ function hasDotSegment(pathname: string): boolean {
 }
 
 function hasUnsafePathEncoding(pathname: string): boolean {
-  let candidate = pathname;
-  for (let pass = 0; pass < 3; pass += 1) {
-    if (CONTROL_CHARACTER_PATTERN.test(candidate) || candidate.includes("\\") || hasDotSegment(candidate)) {
-      return true;
-    }
-    if (ENCODED_SEPARATOR_PATTERN.test(candidate)) {
-      return true;
-    }
-    if (!candidate.includes("%")) {
-      return false;
-    }
-    try {
-      candidate = decodeURIComponent(candidate);
-    } catch {
-      return true;
-    }
-  }
-  return true;
+  return CONTROL_CHARACTER_PATTERN.test(pathname) ||
+    pathname.includes("\\") ||
+    hasDotSegment(pathname) ||
+    ENCODED_SEPARATOR_PATTERN.test(pathname) ||
+    INVALID_PERCENT_ENCODING_PATTERN.test(pathname) ||
+    ENCODED_UNSAFE_BYTE_PATTERN.test(pathname);
 }
 
 /** Parses a raw HTTP request-target without URL normalization or path decoding. */
@@ -297,6 +289,13 @@ function parsePairingSecret(query: string, hasQuery: boolean): string | null {
 
 function hasHeaderToken(value: string | string[] | undefined, expected: string): boolean {
   return typeof value === "string" && value.split(",").some((token) => token.trim().toLowerCase() === expected);
+}
+
+function isWebSocketRequestAttempt(request: IncomingMessage): boolean {
+  return request.headers.upgrade !== undefined ||
+    request.headers["sec-websocket-version"] !== undefined ||
+    request.headers["sec-websocket-key"] !== undefined ||
+    hasHeaderToken(request.headers.connection, "upgrade");
 }
 
 function isWebSocketKey(value: string | string[] | undefined): boolean {
@@ -987,6 +986,9 @@ export class PhoneGateway {
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
       response.setHeader(name, value);
     }
+    if (isWebSocketRequestAttempt(request)) {
+      response.setHeader("Connection", "close");
+    }
 
     if (!this.isAllowedRequestMetadata(request)) {
       responseBody(response, 404, "text/plain; charset=utf-8", "Not found.");
@@ -1064,19 +1066,25 @@ export class PhoneGateway {
 
   private serveMedia(route: PhoneMediaRoute, response: ServerResponse): void {
     let managedPath: string | undefined;
+    let managedRoot: string | undefined;
     try {
-      managedPath = route.namespace === "context"
-        ? this.context?.getManagedPaths([route.id])[0]
-        : this.attachments?.getPath(route.id);
+      if (route.namespace === "context") {
+        managedPath = this.context?.getManagedPaths([route.id])[0];
+        managedRoot = this.context?.getManagedRoot?.();
+      } else {
+        managedPath = this.attachments?.getPath(route.id);
+        managedRoot = this.attachments?.getManagedRoot?.();
+      }
     } catch {
       managedPath = undefined;
+      managedRoot = undefined;
     }
     if (!managedPath) {
       responseBody(response, 404, "text/plain; charset=utf-8", "Not found.");
       return;
     }
 
-    void this.readMediaFile(managedPath)
+    void this.readMediaFile(managedPath, managedRoot)
       .then((bytes) => responseBytes(response, 200, "image/png", bytes))
       .catch(() => responseBody(response, 404, "text/plain; charset=utf-8", "Not found."));
   }

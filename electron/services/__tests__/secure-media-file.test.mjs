@@ -48,10 +48,10 @@ test("secure media reads only owner-only regular files through O_NOFOLLOW and re
     await makePrivateFile(oversizedPath, new Uint8Array(1));
     await (await import("node:fs/promises")).truncate(oversizedPath, MAX_SECURE_MEDIA_BYTES + 1);
 
-    assert.deepEqual(new Uint8Array(await readSecureMediaFile(safePath)), PNG_BYTES);
+    assert.deepEqual(new Uint8Array(await readSecureMediaFile(safePath, root)), PNG_BYTES);
     for (const unsafePath of [symlinkPath, directoryPath, wrongModePath, oversizedPath]) {
       await assert.rejects(
-        readSecureMediaFile(unsafePath),
+        readSecureMediaFile(unsafePath, root),
         (error) => error instanceof Error &&
           !error.message.includes(unsafePath) &&
           !error.message.includes("ENOENT"),
@@ -96,11 +96,66 @@ test("secure media keeps reading the opened inode when its pathname is swapped a
       },
     });
 
-    assert.deepEqual(new Uint8Array(await reader(racePath)), originalBytes);
+    assert.deepEqual(new Uint8Array(await reader(racePath, root)), originalBytes);
     assert.equal(openFlags & constants.O_RDONLY, constants.O_RDONLY);
+    assert.equal(openFlags & (constants.O_WRONLY | constants.O_RDWR), 0);
     assert.equal(openFlags & constants.O_NOFOLLOW, constants.O_NOFOLLOW);
     assert.equal(closed, true);
     assert.deepEqual(new Uint8Array(await readFile(racePath)), replacementBytes);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("secure media fails closed when the owner or no-follow primitive is unavailable", async () => {
+  const root = await makeRoot();
+  try {
+    const safePath = path.join(root, "safe.png");
+    await makePrivateFile(safePath);
+    let openCalls = 0;
+    const openFile = async (filePath, flags) => {
+      openCalls += 1;
+      return open(filePath, flags);
+    };
+
+    await assert.rejects(
+      createSecureMediaReader({
+        openFile,
+        getUid: () => undefined,
+        noFollowFlag: constants.O_NOFOLLOW,
+      })(safePath, root),
+      (error) => error instanceof Error && !error.message.includes(safePath),
+    );
+    await assert.rejects(
+      createSecureMediaReader({
+        openFile,
+        getUid: () => process.getuid?.(),
+        noFollowFlag: null,
+      })(safePath, root),
+      (error) => error instanceof Error && !error.message.includes(safePath),
+    );
+    assert.equal(openCalls, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("secure media rejects an owner-only file reached through an intermediate directory symlink", async () => {
+  const root = await makeRoot();
+  try {
+    const managedRoot = path.join(root, "managed");
+    const outsideRoot = path.join(root, "outside");
+    await mkdir(managedRoot, { mode: 0o700 });
+    await mkdir(outsideRoot, { mode: 0o700 });
+    const outsidePath = path.join(outsideRoot, "secret.png");
+    await makePrivateFile(outsidePath, new Uint8Array([...PNG_BYTES, 0xf0]));
+    const linkedDirectory = path.join(managedRoot, "nested");
+    await symlink(outsideRoot, linkedDirectory, "dir");
+
+    await assert.rejects(
+      readSecureMediaFile(path.join(linkedDirectory, "secret.png"), managedRoot),
+      (error) => error instanceof Error && !error.message.includes(outsidePath),
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -131,7 +186,7 @@ test("secure media rejects a device/inode change that happens before the descrip
     });
 
     await assert.rejects(
-      reader(racePath),
+      reader(racePath, root),
       (error) => error instanceof Error && !error.message.includes(racePath),
     );
     assert.equal(closed, true);

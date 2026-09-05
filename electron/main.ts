@@ -240,9 +240,11 @@ function getPhoneGatewayLifecycle(settings: SettingsService): PhoneGatewayLifecy
       projection: getSessionProjectionStore(),
       context: {
         getManagedPaths: (ids) => getScreenshotService().getManagedPaths(ids),
+        getManagedRoot: () => getScreenshotService().getManagedRoot(),
       },
       attachments: {
         getPath: (id) => getAttachmentStore().getPath(id),
+        getManagedRoot: () => getAttachmentStore().directory,
       },
     });
     phoneGatewayLifecycle = createPhoneGatewayLifecycle({
@@ -323,9 +325,11 @@ function registerContextMediaProtocol(): void {
   protocol.handle(SESSION_MEDIA_SCHEME, createSessionMediaHandler({
     context: {
       getManagedPaths: (ids) => getScreenshotService().getManagedPaths(ids),
+      getManagedRoot: () => getScreenshotService().getManagedRoot(),
     },
     attachments: {
       getPath: (id) => getAttachmentStore().getPath(id),
+      getManagedRoot: () => getAttachmentStore().directory,
     },
   }));
   contextMediaProtocolRegistered = true;

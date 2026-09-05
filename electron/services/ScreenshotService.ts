@@ -242,6 +242,10 @@ export class ScreenshotService {
       .map((id) => join(this.directory, `${id}.png`));
   }
 
+  public getManagedRoot(): string {
+    return this.directory;
+  }
+
   public capture(): Promise<ContextScreenshot> {
     if (this.capturing) {
       return Promise.reject(captureInProgress());

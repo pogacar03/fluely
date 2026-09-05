@@ -6,9 +6,10 @@ const SCREENSHOT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-
 
 export interface ContextMediaPathSource {
   getManagedPaths(ids: readonly string[]): string[];
+  getManagedRoot?: () => string;
 }
 
-export type ContextMediaReader = (path: string) => Promise<Uint8Array>;
+export type ContextMediaReader = (path: string, managedRoot?: string) => Promise<Uint8Array>;
 export type ContextMediaHandler = (request: Request) => Promise<Response>;
 
 function notFoundContextMedia(): Response {
@@ -55,13 +56,20 @@ export function createContextMediaHandler(
       return notFoundContextMedia();
     }
 
-    const managedPath = pathSource.getManagedPaths([screenshotId])[0];
+    let managedPath: string | undefined;
+    let managedRoot: string | undefined;
+    try {
+      managedPath = pathSource.getManagedPaths([screenshotId])[0];
+      managedRoot = pathSource.getManagedRoot?.();
+    } catch {
+      return notFoundContextMedia();
+    }
     if (!managedPath) {
       return notFoundContextMedia();
     }
 
     try {
-      const image = await readManagedFile(managedPath);
+      const image = await readManagedFile(managedPath, managedRoot);
       const body = new ArrayBuffer(image.byteLength);
       new Uint8Array(body).set(image);
       return new Response(body, {

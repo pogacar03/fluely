@@ -270,7 +270,7 @@ export class AttachmentStore {
       return undefined;
     }
     try {
-      return await readSecureMediaFile(managedPath);
+      return await readSecureMediaFile(managedPath, this.directory);
     } catch {
       return undefined;
     }

@@ -104,6 +104,7 @@ function makeGateway({
   context,
   attachments,
   phoneAssetsDirectory,
+  readMediaFile,
 } = {}) {
   const servers = [];
   const clock = now ?? (() => 10_000);
@@ -134,6 +135,7 @@ function makeGateway({
     ...(context ? { context } : {}),
     ...(attachments ? { attachments } : {}),
     ...(phoneAssetsDirectory ? { phoneAssetsDirectory } : {}),
+    ...(readMediaFile ? { readMediaFile } : {}),
   });
   gateways.push(gateway);
   return { gateway, servers };
@@ -231,6 +233,19 @@ function rawRequest(port, requestTarget, headers = {}) {
     const socket = connectNet({ host: "127.0.0.1", port });
     const chunks = [];
     let settled = false;
+    const maybeFinishResponse = () => {
+      const raw = Buffer.concat(chunks);
+      const separator = raw.indexOf(Buffer.from("\r\n\r\n"));
+      if (separator < 0) return;
+      const headerText = raw.subarray(0, separator).toString("latin1");
+      const length = /(?:^|\r\n)content-length:\s*(\d+)/i.exec(headerText)?.[1];
+      if (length === undefined) return;
+      const bodyLength = Number(length);
+      if (Number.isSafeInteger(bodyLength) && raw.byteLength >= separator + 4 + bodyLength) {
+        finish();
+        socket.destroy();
+      }
+    };
     const finish = (error) => {
       if (settled) return;
       settled = true;
@@ -240,7 +255,10 @@ function rawRequest(port, requestTarget, headers = {}) {
         resolve(Buffer.concat(chunks).toString("latin1"));
       }
     };
-    socket.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    socket.on("data", (chunk) => {
+      chunks.push(Buffer.from(chunk));
+      maybeFinishResponse();
+    });
     socket.once("error", (error) => finish(error));
     socket.once("close", () => finish());
     socket.setTimeout(2_000, () => {
@@ -258,7 +276,11 @@ function rawRequest(port, requestTarget, headers = {}) {
         "",
         "",
       ];
-      socket.end(lines.join("\r\n"));
+      // Keep the client readable until the async application handler has written
+      // its response. Half-closing here makes Node close the request before an
+      // async media read can finish, which tests the transport rather than the
+      // gateway's raw-target boundary.
+      socket.write(lines.join("\r\n"));
     });
   });
 }
@@ -343,6 +365,44 @@ test("raw request target parser accepts only strict origin-form paths without am
     } else {
       assert.equal(parsed, null, target);
     }
+  }
+});
+
+test("authenticated media routing decodes a percent-encoded business ID only once", async () => {
+  const contextId = "11111111-1111-4111-8111-111111111111";
+  const qrUrls = [];
+  const requestedIds = [];
+  const { gateway } = makeGateway({
+    portCandidates: [0],
+    qrUrls,
+    context: {
+      getManagedPaths: (ids) => {
+        requestedIds.push([...ids]);
+        return ["/managed/context.png"];
+      },
+    },
+    readMediaFile: async () => Buffer.from("png"),
+  });
+  await gateway.start();
+  const secret = new URL(qrUrls[0]).searchParams.get("secret");
+  const exchanged = await invokeHandler(gateway, `/pair?secret=${secret}`);
+  assert.equal(exchanged.statusCode, 302);
+
+  const originalDecodeURIComponent = globalThis.decodeURIComponent;
+  let decodeCount = 0;
+  globalThis.decodeURIComponent = (value) => {
+    decodeCount += 1;
+    return originalDecodeURIComponent(value);
+  };
+  try {
+    const response = await invokeHandler(gateway, "/api/context/%31" + contextId.slice(1), {
+      headers: { cookie: exchanged.headers["set-cookie"] },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(requestedIds, [[contextId]]);
+    assert.equal(decodeCount, 1);
+  } finally {
+    globalThis.decodeURIComponent = originalDecodeURIComponent;
   }
 });
 
@@ -459,6 +519,80 @@ test("invalid WebSocket handshakes are rejected before ws handling with safe hea
     assert.equal(socket.destroyed, true, invalid.label);
   }
   assert.equal(handleUpgradeCalls, 0);
+});
+
+test("illegal WebSocket methods are rejected with the same safe closed handshake", async () => {
+  const { gateway } = makeGateway({ portCandidates: [0] });
+  const ready = await gateway.start();
+  const port = Number(new URL(ready.origin).port);
+  const baseRequest = {
+    url: "/ws",
+    headers: {
+      host: `192.168.50.8:${port}`,
+      origin: ready.origin,
+      connection: "Upgrade",
+      upgrade: "websocket",
+      "sec-websocket-version": "13",
+      "sec-websocket-key": Buffer.alloc(16, 7).toString("base64"),
+    },
+  };
+
+  for (const method of ["POST", "PUT", "HEAD", "get", "PATCH"]) {
+    const socket = makeUpgradeSocket();
+    gateway.handleUpgrade({ ...baseRequest, method }, socket, Buffer.alloc(0));
+    const response = parseRawResponse(socket.writes.join(""));
+    assert.equal(response.statusCode, 404, method);
+    assertRawSafeHeaders(response);
+    assert.equal(response.headers.connection, "close", method);
+    assert.equal(socket.destroyed, true, method);
+  }
+});
+
+test("HTTP and WebSocket application boundaries reject the same unsafe target matrix with safe failures", async () => {
+  const { gateway } = makeGateway({ portCandidates: [0] });
+  const ready = await gateway.start();
+  const port = Number(new URL(ready.origin).port);
+  const host = `192.168.50.8:${port}`;
+  const targets = [
+    "/api/context/../context/11111111-1111-4111-8111-111111111111",
+    "/api/context/%2e%2e/context/11111111-1111-4111-8111-111111111111",
+    "/api/context/%252e%252e/context/11111111-1111-4111-8111-111111111111",
+    "/api/context/11111111-1111-4111-8111-111111111111%2f..%2f11111111-1111-4111-8111-111111111111",
+    "/api/context/11111111-1111-4111-8111-111111111111%252f..%252f11111111-1111-4111-8111-111111111111",
+    "/api/context/11111111-1111-4111-8111-111111111111%5c..%5c11111111-1111-4111-8111-111111111111",
+    "/api/context/11111111-1111-4111-8111-111111111111%255c..%255c11111111-1111-4111-8111-111111111111",
+    "/api/context/11111111-1111-4111-8111-111111111111?cache=1",
+    "/api/context/\t11111111-1111-4111-8111-111111111111",
+    "/api/context/\u000011111111-1111-4111-8111-111111111111",
+    "/api/context/\u007f11111111-1111-4111-8111-111111111111",
+  ];
+
+  for (const target of targets) {
+    const response = await invokeHandler(gateway, target);
+    assert.equal(response.statusCode, 404, `HTTP ${JSON.stringify(target)}`);
+    assertSafeHeaders(response);
+  }
+
+  for (const target of targets) {
+    const socket = makeUpgradeSocket();
+    gateway.handleUpgrade({
+      method: "GET",
+      url: target,
+      headers: {
+        host,
+        origin: ready.origin,
+        connection: "Upgrade",
+        upgrade: "websocket",
+        "sec-websocket-version": "13",
+        "sec-websocket-key": Buffer.alloc(16, 8).toString("base64"),
+      },
+    }, socket, Buffer.alloc(0));
+    const response = parseRawResponse(socket.writes.join(""));
+    assert.equal(response.statusCode, 404, `WS ${JSON.stringify(target)}`);
+    assertRawSafeHeaders(response);
+    assert.equal(response.headers.connection, "close", `WS ${JSON.stringify(target)}`);
+    assert.equal(socket.destroyed, true, `WS ${JSON.stringify(target)}`);
+  }
 });
 
 function deferred() {
@@ -867,8 +1001,14 @@ test("authenticated phone assets and media routes return exact bytes and generic
     portCandidates: [0],
     qrUrls: qrCalls,
     createServer: (handler) => createLoopbackServer(handler),
-    context: { getManagedPaths: (ids) => ids[0] === contextId ? [contextPath] : [] },
-    attachments: { getPath: (id) => id === attachmentId ? attachmentPath : undefined },
+    context: {
+      getManagedPaths: (ids) => ids[0] === contextId ? [contextPath] : [],
+      getManagedRoot: () => root,
+    },
+    attachments: {
+      getPath: (id) => id === attachmentId ? attachmentPath : undefined,
+      getManagedRoot: () => root,
+    },
     projection: {
       getSnapshot: () => ({ revision: 0, conversation: {
         sessionId: "session-phone",
@@ -1181,7 +1321,10 @@ test("raw HTTP request targets are matched before URL normalization and reject t
     portCandidates: [0],
     qrUrls,
     createServer: (handler) => createLoopbackServer(handler),
-    context: { getManagedPaths: (ids) => ids[0] === contextId ? [contextPath] : [] },
+    context: {
+      getManagedPaths: (ids) => ids[0] === contextId ? [contextPath] : [],
+      getManagedRoot: () => root,
+    },
   });
   const ready = await gateway.start();
   const port = Number(new URL(ready.origin).port);
@@ -1260,6 +1403,7 @@ test("authenticated media rejects symlinks, directories, unsafe modes, and overs
               : id === ids.oversized ? [oversizedPath]
                 : [];
       },
+      getManagedRoot: () => root,
     },
   });
   const ready = await gateway.start();

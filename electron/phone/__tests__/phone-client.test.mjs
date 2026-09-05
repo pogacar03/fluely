@@ -258,14 +258,12 @@ test("phone client probes same-origin authentication before reconnecting and sto
     timer.fire(timer.active()[0]);
     await flushMicrotasks();
 
-    assert.deepEqual(fetchCalls, [{
-      input: "/",
-      init: {
-        credentials: "same-origin",
-        cache: "no-store",
-        headers: { Accept: "text/html" },
-      },
-    }]);
+    assert.equal(fetchCalls.length, 1);
+    assert.equal(fetchCalls[0].input, "/");
+    assert.equal(fetchCalls[0].init.credentials, "same-origin");
+    assert.equal(fetchCalls[0].init.cache, "no-store");
+    assert.deepEqual(fetchCalls[0].init.headers, { Accept: "text/html" });
+    assert.equal(fetchCalls[0].init.signal instanceof AbortSignal, true);
     assert.equal(client.getState().connection, "revoked");
     assert.equal(instances.length, 1);
     assert.equal(timer.active().length, 0);
@@ -350,6 +348,112 @@ test("phone client treats a forbidden authentication probe as a permanent revoca
     assert.equal(client.getState().connection, "revoked");
     assert.equal(instances.length, 1);
     assert.equal(timer.active().length, 0);
+  } finally {
+    client.stop();
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
+test("phone client treats non-2xx non-revocation probe responses as transient and never opens WebSocket", async () => {
+  const dom = new JSDOM("<div id=\"phone-app\"></div>", { url: "http://phone.test/" });
+  const previousDocument = globalThis.document;
+  globalThis.document = dom.window.document;
+  const timer = makeFakeTimer();
+  const { FakeSocket, instances } = makeFakeSocketClass();
+  const client = phoneClientModule.startPhoneClient(dom.window.document.getElementById("phone-app"), {
+    WebSocket: FakeSocket,
+    fetch: async () => ({ status: 503, ok: false }),
+    setTimeout: timer.setTimeout,
+    clearTimeout: timer.clearTimeout,
+    location: { protocol: "http:", host: "phone.test" },
+  });
+
+  try {
+    instances[0].open();
+    instances[0].close();
+    timer.fire(timer.active()[0]);
+    await flushMicrotasks();
+    assert.equal(instances.length, 1);
+    assert.equal(client.getState().connection, "error");
+    assert.deepEqual(timer.active().map((entry) => entry.delay), [500]);
+  } finally {
+    client.stop();
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
+test("phone client aborts a pending authentication probe and continues bounded backoff", async () => {
+  const dom = new JSDOM("<div id=\"phone-app\"></div>", { url: "http://phone.test/" });
+  const previousDocument = globalThis.document;
+  globalThis.document = dom.window.document;
+  const timer = makeFakeTimer();
+  const { FakeSocket, instances } = makeFakeSocketClass();
+  let probeSignal;
+  const client = phoneClientModule.startPhoneClient(dom.window.document.getElementById("phone-app"), {
+    WebSocket: FakeSocket,
+    fetch: async (_input, init) => {
+      probeSignal = init.signal;
+      await new Promise((resolve, reject) => {
+        init.signal.addEventListener("abort", () => reject(new Error("probe aborted")), { once: true });
+        void resolve;
+      });
+      return { status: 200, ok: true };
+    },
+    fetchTimeoutMs: 1_000,
+    setTimeout: timer.setTimeout,
+    clearTimeout: timer.clearTimeout,
+    location: { protocol: "http:", host: "phone.test" },
+  });
+
+  try {
+    instances[0].open();
+    instances[0].close();
+    timer.fire(timer.active()[0]);
+    await flushMicrotasks();
+    assert.equal(probeSignal instanceof AbortSignal, true);
+    const timeoutEntry = timer.active().find((entry) => entry.delay === 1_000);
+    assert.ok(timeoutEntry);
+    timer.fire(timeoutEntry);
+    await flushMicrotasks();
+    assert.equal(client.getState().connection, "error");
+    assert.deepEqual(timer.active().map((entry) => entry.delay), [500]);
+    assert.equal(instances.length, 1);
+  } finally {
+    client.stop();
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
+test("phone client keeps SESSION_REVOKED locked through the close event until an explicit restart", () => {
+  const dom = new JSDOM("<div id=\"phone-app\"></div>", { url: "http://phone.test/" });
+  const previousDocument = globalThis.document;
+  globalThis.document = dom.window.document;
+  const timer = makeFakeTimer();
+  const { FakeSocket, instances } = makeFakeSocketClass();
+  const client = phoneClientModule.startPhoneClient(dom.window.document.getElementById("phone-app"), {
+    WebSocket: FakeSocket,
+    fetch: async () => ({ status: 200, ok: true }),
+    setTimeout: timer.setTimeout,
+    clearTimeout: timer.clearTimeout,
+    location: { protocol: "http:", host: "phone.test" },
+  });
+
+  try {
+    instances[0].open();
+    instances[0].emit("message", {
+      data: JSON.stringify({ type: "error", code: "SESSION_REVOKED", message: "Pairing revoked." }),
+    });
+    assert.equal(client.getState().connection, "revoked");
+    instances[0].close();
+    assert.equal(client.getState().connection, "revoked");
+    assert.equal(timer.active().length, 0);
+
+    client.restart();
+    assert.equal(instances.length, 2);
+    assert.equal(client.getState().connection, "connecting");
   } finally {
     client.stop();
     globalThis.document = previousDocument;

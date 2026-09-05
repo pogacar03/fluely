@@ -352,10 +352,13 @@ export interface PhoneClientWebSocketConstructor {
 export interface PhoneClientOptions {
   WebSocket?: PhoneClientWebSocketConstructor;
   fetch?: (input: string, init?: RequestInit) => Promise<{ status: number; ok?: boolean }>;
+  fetchTimeoutMs?: number;
   setTimeout?: (callback: () => void, delayMs: number) => unknown;
   clearTimeout?: (handle: unknown) => void;
   location?: { protocol: string; host: string };
 }
+
+const DEFAULT_FETCH_TIMEOUT_MS = 5_000;
 
 /** Starts the dependency-free browser client with bounded, authenticated reconnects. */
 export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions = {}): PhoneClientController {
@@ -364,6 +367,9 @@ export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions 
   const fetchImpl = options.fetch ?? (globalThis.fetch?.bind(globalThis) as PhoneClientOptions["fetch"] | undefined);
   const setTimeoutImpl = options.setTimeout ?? ((callback, delayMs) => globalThis.setTimeout(callback, delayMs));
   const clearTimeoutImpl = options.clearTimeout ?? ((handle) => globalThis.clearTimeout(handle as number));
+  const fetchTimeoutMs = Number.isFinite(options.fetchTimeoutMs) && (options.fetchTimeoutMs ?? 0) > 0
+    ? Math.floor(options.fetchTimeoutMs as number)
+    : DEFAULT_FETCH_TIMEOUT_MS;
   const locationInfo = options.location ?? globalThis.location;
   let socket: PhoneClientWebSocket | null = null;
   let stopped = false;
@@ -411,21 +417,26 @@ export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions 
     }
   };
   const probeAuthentication = async (): Promise<"authenticated" | "revoked" | "unavailable"> => {
-    if (!fetchImpl) {
+    if (!fetchImpl || typeof AbortController !== "function") {
       return "unavailable";
     }
+    const controller = new AbortController();
+    const timeoutHandle = setTimeoutImpl(() => controller.abort(), fetchTimeoutMs);
     try {
       const response = await fetchImpl("/", {
         credentials: "same-origin",
         cache: "no-store",
         headers: { Accept: "text/html" },
+        signal: controller.signal,
       });
       if (response.status === 401 || response.status === 403) {
         return "revoked";
       }
-      return "authenticated";
+      return response.status >= 200 && response.status < 300 ? "authenticated" : "unavailable";
     } catch {
       return "unavailable";
+    } finally {
+      clearTimeoutImpl(timeoutHandle);
     }
   };
   async function reconnectAfterAuthentication(generation: number): Promise<void> {
@@ -482,6 +493,7 @@ export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions 
     currentSocket.addEventListener("close", () => {
       if (socket !== currentSocket || stopped) return;
       socket = null;
+      if (state.connection === "revoked") return;
       state = { ...state, connection: "disconnected" };
       publish();
       scheduleReconnect();

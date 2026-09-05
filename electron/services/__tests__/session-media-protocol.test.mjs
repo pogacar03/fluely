@@ -21,8 +21,14 @@ test("session media serves opaque context and attachment namespaces with exact s
     await writeFile(contextPath, PNG_BYTES, { mode: 0o600 });
     await writeFile(attachmentPath, PNG_BYTES, { mode: 0o600 });
     const handler = createSessionMediaHandler({
-      context: { getManagedPaths: (ids) => ids.includes(CONTEXT_ID) ? [contextPath] : [] },
-      attachments: { getPath: (id) => id === ATTACHMENT_ID ? attachmentPath : undefined },
+      context: {
+        getManagedPaths: (ids) => ids.includes(CONTEXT_ID) ? [contextPath] : [],
+        getManagedRoot: () => root,
+      },
+      attachments: {
+        getPath: (id) => id === ATTACHMENT_ID ? attachmentPath : undefined,
+        getManagedRoot: () => root,
+      },
     });
 
     const contextResponse = await handler(new Request(`fluely-media://context/${CONTEXT_ID}`));

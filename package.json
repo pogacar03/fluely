@@ -9,11 +9,12 @@
   "scripts": {
     "clean": "rimraf dist dist-electron release",
     "build:renderer": "vite build",
-    "build:electron": "tsc -p electron/tsconfig.json && node scripts/build-phone.mjs",
-    "build": "npm run clean && npm run build:renderer && npm run build:electron",
+    "build:electron": "tsc -p electron/tsconfig.json",
+    "build:phone": "node scripts/build-phone.mjs",
+    "build": "npm run clean && npm run build:renderer && npm run build:electron && npm run build:phone",
     "dev": "npm run build && electron .",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p electron/tsconfig.json --noEmit",
-    "test": "npm run build:electron && node --test",
+    "test": "npm run build:electron && npm run build:phone && node --test",
     "package:dir": "npm run build && electron-builder --dir",
     "smoke:packaged": "node scripts/smoke-packaged.mjs"
   },

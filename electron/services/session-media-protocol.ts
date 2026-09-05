@@ -8,13 +8,15 @@ const OPAQUE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
 
 export interface SessionContextMediaSource {
   getManagedPaths(ids: readonly string[]): string[];
+  getManagedRoot?: () => string;
 }
 
 export interface SessionAttachmentMediaSource {
   getPath(id: string): string | undefined;
+  getManagedRoot?: () => string;
 }
 
-export type SessionMediaReader = (path: string) => Promise<Uint8Array>;
+export type SessionMediaReader = (path: string, managedRoot?: string) => Promise<Uint8Array>;
 export type SessionMediaHandler = (request: Request) => Promise<Response>;
 
 export interface SessionMediaHandlerOptions {
@@ -88,11 +90,14 @@ export function createSessionMediaHandler(
     }
 
     let managedPath: string | undefined;
+    let managedRoot: string | undefined;
     try {
       if (url.hostname === CONTEXT_MEDIA_HOST) {
         managedPath = options.context.getManagedPaths([id])[0];
+        managedRoot = options.context.getManagedRoot?.();
       } else {
         managedPath = options.attachments.getPath(id);
+        managedRoot = options.attachments.getManagedRoot?.();
       }
     } catch {
       return notFound();
@@ -103,7 +108,7 @@ export function createSessionMediaHandler(
     }
 
     try {
-      const image = await readManagedFile(managedPath);
+      const image = await readManagedFile(managedPath, managedRoot);
       const body = new ArrayBuffer(image.byteLength);
       new Uint8Array(body).set(image);
       return new Response(body, {
