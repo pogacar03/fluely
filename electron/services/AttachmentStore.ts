@@ -137,6 +137,10 @@ export class AttachmentStore {
     return this.getPath(id);
   }
 
+  public getManagedRoot(): string {
+    return this.directory;
+  }
+
   public getMetadata(id: string): ConversationAttachment | undefined {
     const metadata = isAttachmentId(id) ? this.attachments.get(id) : undefined;
     return metadata ? cloneMetadata(metadata) : undefined;
