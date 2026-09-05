@@ -485,7 +485,7 @@ export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions 
       if (socket === currentSocket && !stopped) handleMessage(event?.data);
     });
     currentSocket.addEventListener("error", () => {
-      if (socket === currentSocket && !stopped) {
+      if (socket === currentSocket && !stopped && state.connection !== "revoked") {
         state = { ...state, connection: "error", errorMessage: "The phone companion connection failed." };
         publish();
       }

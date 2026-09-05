@@ -97,7 +97,6 @@ test("secure media keeps reading the opened inode when its pathname is swapped a
     });
 
     assert.deepEqual(new Uint8Array(await reader(racePath, root)), originalBytes);
-    assert.equal(openFlags & constants.O_RDONLY, constants.O_RDONLY);
     assert.equal(openFlags & (constants.O_WRONLY | constants.O_RDWR), 0);
     assert.equal(openFlags & constants.O_NOFOLLOW, constants.O_NOFOLLOW);
     assert.equal(closed, true);

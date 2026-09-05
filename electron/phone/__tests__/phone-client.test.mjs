@@ -427,7 +427,7 @@ test("phone client aborts a pending authentication probe and continues bounded b
   }
 });
 
-test("phone client keeps SESSION_REVOKED locked through the close event until an explicit restart", () => {
+test("phone client keeps SESSION_REVOKED locked through websocket error and close until an explicit restart", () => {
   const dom = new JSDOM("<div id=\"phone-app\"></div>", { url: "http://phone.test/" });
   const previousDocument = globalThis.document;
   globalThis.document = dom.window.document;
@@ -446,6 +446,8 @@ test("phone client keeps SESSION_REVOKED locked through the close event until an
     instances[0].emit("message", {
       data: JSON.stringify({ type: "error", code: "SESSION_REVOKED", message: "Pairing revoked." }),
     });
+    assert.equal(client.getState().connection, "revoked");
+    instances[0].emit("error");
     assert.equal(client.getState().connection, "revoked");
     instances[0].close();
     assert.equal(client.getState().connection, "revoked");
