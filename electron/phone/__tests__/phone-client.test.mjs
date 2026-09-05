@@ -443,10 +443,13 @@ test("phone client keeps SESSION_REVOKED locked through websocket error and clos
 
   try {
     instances[0].open();
+    assert.equal(client.sendCommand({ type: "capture" }), true);
+    assert.ok(client.getState().commandPending);
     instances[0].emit("message", {
       data: JSON.stringify({ type: "error", code: "SESSION_REVOKED", message: "Pairing revoked." }),
     });
     assert.equal(client.getState().connection, "revoked");
+    assert.equal(client.getState().commandPending, undefined);
     instances[0].emit("error");
     assert.equal(client.getState().connection, "revoked");
     instances[0].close();
@@ -463,7 +466,7 @@ test("phone client keeps SESSION_REVOKED locked through websocket error and clos
   }
 });
 
-function controlSnapshot({ queued = true, running = false } = {}) {
+function controlSnapshot({ queued = true, running = false, capturing = false } = {}) {
   const assistant = {
     id: "assistant-1",
     sequence: 2,
@@ -475,6 +478,7 @@ function controlSnapshot({ queued = true, running = false } = {}) {
   };
   return {
     revision: 0,
+    capturing,
     conversation: {
       sessionId: "session-phone-controls",
       revision: 0,
@@ -527,10 +531,7 @@ test("phone DOM controls send every workspace command, mirror canonical busy sta
     const acknowledge = () => {
       const command = getCommand().command;
       instances[0].emit("message", {
-        data: JSON.stringify({ type: "ack", requestId: command.requestId, result: {
-          queue: { items: [], capturing: false, permission: "granted" },
-          conversation: controlSnapshot().conversation,
-        } }),
+        data: JSON.stringify({ type: "ack", requestId: command.requestId }),
       });
     };
 
@@ -621,6 +622,40 @@ test("phone command errors clear only command loading and never invent messages 
     assert.equal(client.getState().snapshot.queue.length, 1);
     assert.equal(client.getState().snapshot.conversation.messages.length, 0);
     assert.match(root.textContent, /Capture failed/);
+  } finally {
+    client.stop();
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
+test("phone controls use canonical capturing state for busy and aria-busy without local optimistic state", () => {
+  const dom = new JSDOM("<div id=\"phone-app\"></div>", { url: "http://phone.test/" });
+  const previousDocument = globalThis.document;
+  globalThis.document = dom.window.document;
+  const timer = makeFakeTimer();
+  const { FakeSocket, instances } = makeFakeSocketClass();
+  const client = phoneClientModule.startPhoneClient(dom.window.document.getElementById("phone-app"), {
+    WebSocket: FakeSocket,
+    fetch: async () => ({ status: 200, ok: true }),
+    setTimeout: timer.setTimeout,
+    clearTimeout: timer.clearTimeout,
+    location: { protocol: "http:", host: "phone.test" },
+  });
+
+  try {
+    instances[0].open();
+    instances[0].emit("message", { data: JSON.stringify({
+      type: "snapshot",
+      revision: 0,
+      payload: controlSnapshot({ capturing: true }),
+    }) });
+    const root = dom.window.document.getElementById("phone-app");
+    const capture = [...root.querySelectorAll("button")].find((button) => button.textContent.includes("Capture"));
+    assert.equal(phoneClientModule.getPhoneActionState(client.getState()).isBusy, true);
+    assert.equal(client.getState().commandPending, undefined);
+    assert.equal(capture.disabled, true);
+    assert.equal(root.querySelector("fieldset").getAttribute("aria-busy"), "true");
   } finally {
     client.stop();
     globalThis.document = previousDocument;

@@ -1,4 +1,5 @@
 import { createServer as createHttpServer } from "node:http";
+import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { networkInterfaces } from "node:os";
@@ -12,6 +13,10 @@ import {
   PHONE_GATEWAY_HEARTBEAT_MISSES,
   PHONE_GATEWAY_COMMAND_RATE_LIMIT,
   PHONE_GATEWAY_COMMAND_RATE_WINDOW_MS,
+  PHONE_GATEWAY_MAX_COMMAND_ACK_BYTES,
+  PHONE_GATEWAY_MAX_COMMAND_LEDGER_BYTES,
+  PHONE_GATEWAY_MAX_COMMAND_LEDGER_ENTRY_BYTES,
+  PHONE_GATEWAY_MAX_COMMAND_LEDGER_IDS,
   parsePhoneClientFrame,
   PHONE_GATEWAY_PAIRING_TTL_MS,
   PHONE_GATEWAY_PORTS,
@@ -26,7 +31,6 @@ import type {
   SessionProjectionPort,
 } from "../../src/shared/conversation";
 import type { WorkspaceCommand } from "../../src/shared/ipc";
-import { createRequestIdDeduper, DuplicateRequestIdError } from "../../src/shared/context-queue";
 import {
   canonicalizeIpv4,
   isPrivateIpv4,
@@ -123,6 +127,7 @@ export interface PhoneGatewayOptions {
   readFile?: PhoneGatewayFileReader;
   readMediaFile?: PhoneGatewayFileReader;
   commandRouter?: PhoneGatewayCommandRouter;
+  onCommandError?: (error: unknown) => void;
 }
 
 export interface PhoneGatewayCommandRouter {
@@ -139,11 +144,79 @@ interface PhoneClient {
   sessionKey?: string;
   commandSession: PhoneCommandSession;
   missedHeartbeats: number;
+  revoked: boolean;
 }
 
 interface PhoneCommandSession {
-  requestDeduper: ReturnType<typeof createRequestIdDeduper<ServerFrame>>;
+  ledger: Map<string, PhoneCommandLedgerEntry>;
+  ledgerBytes: number;
   commandTimestamps: number[];
+  revoked: boolean;
+}
+
+interface PhoneCommandLedgerEntry {
+  fingerprint: string;
+  pending?: Promise<string>;
+  response?: string;
+}
+
+const PHONE_SAFE_COMMAND_ERROR_MESSAGES: Readonly<Record<string, { code: string; message: string }>> = {
+  ANALYSIS_IN_PROGRESS: {
+    code: "ANALYSIS_IN_PROGRESS",
+    message: "An analysis is already running.",
+  },
+  ANALYSIS_FAILED: {
+    code: "ANALYSIS_FAILED",
+    message: "Analysis failed.",
+  },
+  SCREENSHOT_NOT_FOUND: {
+    code: "SCREENSHOT_NOT_FOUND",
+    message: "No queued screenshots are available.",
+  },
+  COMMAND_UNAVAILABLE: {
+    code: "COMMAND_UNAVAILABLE",
+    message: "Phone commands are not available yet.",
+  },
+};
+
+const GENERIC_PHONE_COMMAND_ERROR = {
+  code: "COMMAND_FAILED",
+  message: "Phone command failed.",
+} as const;
+
+function fingerprintPhoneCommand(command: WorkspaceCommand): string {
+  return createHash("sha256").update(JSON.stringify(command), "utf8").digest("hex");
+}
+
+function serializeLedgerFrame(frame: ServerFrame): string {
+  const serialized = serializePhoneServerFrame(frame);
+  if (Buffer.byteLength(serialized, "utf8") <= PHONE_GATEWAY_MAX_COMMAND_ACK_BYTES) {
+    return serialized;
+  }
+  return serializePhoneServerFrame({
+    type: "error",
+    requestId: frame.type === "ack" || frame.type === "error" ? frame.requestId : undefined,
+    ...GENERIC_PHONE_COMMAND_ERROR,
+  });
+}
+
+function serializePhoneCommandError(requestId: string, error: unknown): string {
+  const code = typeof (error as { code?: unknown })?.code === "string"
+    ? (error as { code: string }).code
+    : "";
+  const safe = Object.prototype.hasOwnProperty.call(PHONE_SAFE_COMMAND_ERROR_MESSAGES, code)
+    ? PHONE_SAFE_COMMAND_ERROR_MESSAGES[code]
+    : GENERIC_PHONE_COMMAND_ERROR;
+  return serializeLedgerFrame({ type: "error", requestId, ...safe });
+}
+
+function serializeSessionRevoked(requestId?: string): string {
+  return serializeLedgerFrame({
+    type: "error",
+    ...(requestId ? { requestId } : {}),
+    code: "SESSION_REVOKED",
+    message: "Pairing revoked.",
+  });
 }
 
 function isAddressInUse(error: unknown): boolean {
@@ -361,6 +434,7 @@ export class PhoneGateway {
   private readonly readPhoneAsset: PhoneGatewayFileReader;
   private readonly readMediaFile: PhoneGatewayFileReader;
   private readonly commandRouter: PhoneGatewayCommandRouter | null;
+  private readonly onCommandError: (error: unknown) => void;
   private server: GatewayHttpServer | null = null;
   private selectedAddress: string | null = null;
   private selectedPort: number | null = null;
@@ -407,6 +481,9 @@ export class PhoneGateway {
     this.readPhoneAsset = options.readFile ?? (async (path) => new Uint8Array(await readFile(path)));
     this.readMediaFile = options.readMediaFile ?? readSecureMediaFile;
     this.commandRouter = options.commandRouter ?? null;
+    this.onCommandError = options.onCommandError ?? ((error) => {
+      console.warn("Phone command failed", error);
+    });
   }
 
   public getStatus(): PhoneGatewayStatus {
@@ -730,6 +807,13 @@ export class PhoneGateway {
   }
 
   private sendFrame(client: PhoneClient, frame: ServerFrame): void {
+    if (!this.isCurrentPhoneClient(client)) {
+      return;
+    }
+    this.sendSerializedFrame(client, serializePhoneServerFrame(frame));
+  }
+
+  private sendSerializedFrame(client: PhoneClient, serialized: string): void {
     if (client.socket.readyState !== WebSocket.OPEN) {
       return;
     }
@@ -738,7 +822,7 @@ export class PhoneGateway {
       return;
     }
     try {
-      client.socket.send(serializePhoneServerFrame(frame));
+      client.socket.send(serialized);
       if (client.socket.bufferedAmount > PHONE_GATEWAY_MAX_BUFFERED_AMOUNT_BYTES) {
         this.closeForBackpressure(client);
       }
@@ -762,7 +846,12 @@ export class PhoneGateway {
       ...(sessionKey ? { sessionKey } : {}),
       commandSession: sessionKey ? this.getPhoneCommandSession(sessionKey) : this.createPhoneCommandSession(),
       missedHeartbeats: 0,
+      revoked: false,
     };
+    if (!this.isCurrentPhoneClient(client)) {
+      socket.close(1008, "Pairing revoked.");
+      return;
+    }
     this.phoneClients.add(client);
     if (this.heartbeatTimer === null) {
       this.scheduleHeartbeat();
@@ -788,6 +877,11 @@ export class PhoneGateway {
   }
 
   private handleClientFrame(client: PhoneClient, data: RawData): void {
+    if (!this.isCurrentPhoneClient(client)) {
+      this.rejectRevokedClient(client);
+      return;
+    }
+
     let bytes: Uint8Array;
     if (typeof data === "string") {
       bytes = new TextEncoder().encode(data);
@@ -807,6 +901,11 @@ export class PhoneGateway {
         message: "Invalid phone frame.",
       });
       this.closeClient(client, 1008, "Invalid phone frame.");
+      return;
+    }
+
+    if (!this.isCurrentPhoneClient(client)) {
+      this.rejectRevokedClient(client);
       return;
     }
 
@@ -834,8 +933,42 @@ export class PhoneGateway {
   }
 
   private handleCommandFrame(client: PhoneClient, command: WorkspaceCommand): void {
+    if (!this.isCurrentPhoneClient(client)) {
+      this.rejectRevokedClient(client, command.requestId);
+      return;
+    }
+
+    const session = client.commandSession;
+    const fingerprint = fingerprintPhoneCommand(command);
+    const existing = session.ledger.get(command.requestId);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        this.sendSerializedFrame(client, serializeLedgerFrame({
+          type: "error",
+          requestId: command.requestId,
+          code: "DUPLICATE_REQUEST_ID",
+          message: "This request ID was already used for a different command.",
+        }));
+        return;
+      }
+      if (existing.response) {
+        this.sendSerializedFrame(client, existing.response);
+      } else if (existing.pending) {
+        void existing.pending.then((response) => this.sendSerializedFrame(client, response));
+      }
+      return;
+    }
+
+    if (
+      session.ledger.size >= PHONE_GATEWAY_MAX_COMMAND_LEDGER_IDS ||
+      session.ledgerBytes + PHONE_GATEWAY_MAX_COMMAND_LEDGER_ENTRY_BYTES > PHONE_GATEWAY_MAX_COMMAND_LEDGER_BYTES
+    ) {
+      this.revokePhoneSession(client, command.requestId);
+      return;
+    }
+
     const now = this.now();
-    const timestamps = client.commandSession.commandTimestamps;
+    const timestamps = session.commandTimestamps;
     while (timestamps.length > 0 && now - timestamps[0] >= PHONE_GATEWAY_COMMAND_RATE_WINDOW_MS) {
       timestamps.shift();
     }
@@ -850,63 +983,52 @@ export class PhoneGateway {
       return;
     }
     timestamps.push(now);
+    session.ledgerBytes += PHONE_GATEWAY_MAX_COMMAND_LEDGER_ENTRY_BYTES;
 
-    const fingerprint = JSON.stringify(command);
-    const framePromise = client.commandSession.requestDeduper.run(
-      command.requestId,
-      fingerprint,
-      async () => {
-        if (!this.commandRouter) {
-          return {
-            type: "error",
-            requestId: command.requestId,
-            code: "COMMAND_UNAVAILABLE",
-            message: "Phone commands are not available yet.",
-          } satisfies ServerFrame;
-        }
-        try {
-          const result = await this.commandRouter.execute(command, "phone");
-          return { type: "ack", requestId: command.requestId, result } satisfies ServerFrame;
-        } catch (error) {
-          return {
-            type: "error",
-            requestId: command.requestId,
-            code: typeof (error as { code?: unknown })?.code === "string"
-              ? (error as { code: string }).code
-              : "COMMAND_FAILED",
-            message: error instanceof Error && error.message
-              ? error.message
-              : "Fluely could not complete that phone command.",
-          } satisfies ServerFrame;
-        }
-      },
-    );
-    void framePromise.then(
-      (frame) => this.sendFrame(client, frame),
-      (error) => {
-        if (error instanceof DuplicateRequestIdError) {
-          this.sendFrame(client, {
-            type: "error",
-            requestId: command.requestId,
-            code: "DUPLICATE_REQUEST_ID",
-            message: "This request ID was already used for a different command.",
-          });
-          return;
-        }
-        this.sendFrame(client, {
+    const pending = Promise.resolve().then(async () => {
+      if (!this.isCurrentPhoneClient(client)) {
+        return serializeSessionRevoked(command.requestId);
+      }
+      if (!this.commandRouter) {
+        return serializeLedgerFrame({
           type: "error",
           requestId: command.requestId,
-          code: "COMMAND_FAILED",
-          message: "Fluely could not complete that phone command.",
+          code: "COMMAND_UNAVAILABLE",
+          message: "Phone commands are not available yet.",
         });
-      },
-    );
+      }
+      try {
+        await this.commandRouter.execute(command, "phone");
+        if (!this.isCurrentPhoneClient(client)) {
+          return serializeSessionRevoked(command.requestId);
+        }
+        return serializeLedgerFrame({ type: "ack", requestId: command.requestId });
+      } catch (error) {
+        try {
+          this.onCommandError(error);
+        } catch {
+          // Local diagnostics must not affect the phone protocol.
+        }
+        return this.isCurrentPhoneClient(client)
+          ? serializePhoneCommandError(command.requestId, error)
+          : serializeSessionRevoked(command.requestId);
+      }
+    });
+    const entry: PhoneCommandLedgerEntry = { fingerprint, pending };
+    session.ledger.set(command.requestId, entry);
+    void pending.then((response) => {
+      entry.response = response;
+      entry.pending = undefined;
+      this.sendSerializedFrame(client, response);
+    });
   }
 
   private createPhoneCommandSession(): PhoneCommandSession {
     return {
-      requestDeduper: createRequestIdDeduper<ServerFrame>(),
+      ledger: new Map(),
+      ledgerBytes: 0,
       commandTimestamps: [],
+      revoked: false,
     };
   }
 
@@ -918,6 +1040,43 @@ export class PhoneGateway {
     const created = this.createPhoneCommandSession();
     this.phoneSessions.set(sessionKey, created);
     return created;
+  }
+
+  private isCurrentPhoneClient(client: PhoneClient): boolean {
+    if (client.revoked || client.commandSession.revoked) {
+      return false;
+    }
+    // Direct in-process test sockets do not have an issued pairing. Every
+    // network client has an origin and therefore must authenticate here too.
+    return !client.sessionKey || this.origin === null || this.pairing.authenticate(client.sessionKey);
+  }
+
+  private rejectRevokedClient(client: PhoneClient, requestId?: string): void {
+    client.revoked = true;
+    client.commandSession.revoked = true;
+    this.sendSerializedFrame(client, serializeSessionRevoked(requestId));
+    this.closeClient(client, 1008, "Pairing revoked.");
+  }
+
+  private revokePhoneSession(client: PhoneClient, requestId: string): void {
+    const sessionKey = client.sessionKey;
+    const affected = [...this.phoneClients].filter((candidate) =>
+      candidate === client || (sessionKey !== undefined && candidate.sessionKey === sessionKey));
+    const session = sessionKey === undefined ? undefined : this.phoneSessions.get(sessionKey);
+    client.revoked = true;
+    client.commandSession.revoked = true;
+    if (session) {
+      session.revoked = true;
+    }
+    for (const candidate of affected) {
+      candidate.revoked = true;
+      candidate.commandSession.revoked = true;
+    }
+    this.pairing.revokeAll();
+    for (const candidate of affected) {
+      this.sendSerializedFrame(candidate, serializeSessionRevoked(candidate === client ? requestId : undefined));
+      this.closeClient(candidate, 1008, "Pairing revoked.");
+    }
   }
 
   private closeClient(client: PhoneClient, code: number, reason: string): void {
@@ -1052,7 +1211,12 @@ export class PhoneGateway {
   }
 
   private closePhoneClients(): void {
+    for (const session of this.phoneSessions.values()) {
+      session.revoked = true;
+    }
     for (const client of [...this.phoneClients]) {
+      client.revoked = true;
+      client.commandSession.revoked = true;
       try {
         client.socket.close(1001, "Phone session ended.");
         client.socket.terminate();

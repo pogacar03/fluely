@@ -58,6 +58,29 @@ function requestOnce(port, requestPath, headers = {}) {
   });
 }
 
+function expectRejectedWebSocket(port, cookieHeader, origin) {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket("ws://127.0.0.1:" + port + "/ws", {
+      headers: { Cookie: cookieHeader },
+      origin,
+    });
+    let settled = false;
+    const finish = (value, error) => {
+      if (settled) return;
+      settled = true;
+      try { socket.close(); } catch { /* The handshake already ended. */ }
+      if (error) reject(error);
+      else resolve(value);
+    };
+    socket.once("unexpected-response", (_request, response) => {
+      response.resume();
+      finish(response.statusCode);
+    });
+    socket.once("open", () => finish(undefined, new Error("Expected the old phone session to be rejected.")));
+    socket.once("error", (error) => finish(undefined, error));
+  });
+}
+
 function waitFor(predicate, timeoutMs = 4_000) {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
@@ -328,6 +351,7 @@ test("desktop and phone commands share canonical order, idempotency, cancellatio
   let phoneClient;
   let dom;
   const phoneSockets = [];
+  const phoneRouterCalls = [];
   let releaseStream;
 
   const getButton = (rootElement, label) => [...rootElement.querySelectorAll("button")]
@@ -419,6 +443,15 @@ test("desktop and phone commands share canonical order, idempotency, cancellatio
       conversation,
       analysis,
     });
+    const phoneRouter = {
+      execute: async (command, source) => {
+        phoneRouterCalls.push({ command, source });
+        if (command.requestId === "integration-safe-error") {
+          throw Object.assign(new Error("provider /Users/yu/private/session.json"), { code: "INTERNAL_ERROR" });
+        }
+        return router.execute(command, source);
+      },
+    };
     projection = new SessionProjectionStore({
       conversation,
       queue: {
@@ -435,7 +468,7 @@ test("desktop and phone commands share canonical order, idempotency, cancellatio
       networkInterfaces: () => ({ en0: [{ address: "192.168.50.8", family: "IPv4", internal: false }] }),
       portCandidates: [0],
       projection,
-      commandRouter: router,
+      commandRouter: phoneRouter,
       context: {
         getManagedPaths: (ids) => screenshots.getManagedPaths(ids),
         getManagedRoot: () => screenshots.getManagedRoot(),
@@ -544,6 +577,8 @@ test("desktop and phone commands share canonical order, idempotency, cancellatio
     await waitFor(() => phoneClient.getState().snapshot?.conversation.messages.some((message) =>
       message.role === "assistant" && message.status === "streaming"));
     const streamingRevision = phoneClient.getState().snapshot.revision;
+    const activeMessageId = phoneClient.getState().snapshot.conversation.activeMessageId;
+    assert.ok(activeMessageId);
     const userMessage = phoneClient.getState().snapshot.conversation.messages.find((message) => message.role === "user");
     assert.deepEqual(userMessage.attachmentIds, [ATTACHMENT_ID, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]);
     assert.deepEqual(phoneClient.getState().snapshot.queue.map((item) => item.id), [
@@ -551,14 +586,54 @@ test("desktop and phone commands share canonical order, idempotency, cancellatio
       "22222222-2222-4222-8222-222222222222",
     ]);
 
+    await waitFor(() => phoneSockets[0].received.some((frame) =>
+      frame.type === "ack" && frame.requestId === sendFrame.command.requestId));
+    const ackCountBeforeDuplicate = phoneSockets[0].received
+      .filter((frame) => frame.type === "ack" && frame.requestId === sendFrame.command.requestId).length;
+    const routerCallCountBeforeDuplicate = phoneRouterCalls.length;
     const duplicate = JSON.stringify({ type: "command", command: sendFrame.command });
     phoneSockets[0].send(duplicate);
     await waitFor(() => phoneSockets[0].received
-      .filter((frame) => frame.type === "ack" && frame.requestId === sendFrame.command.requestId).length >= 1);
+      .filter((frame) => frame.type === "ack" && frame.requestId === sendFrame.command.requestId).length >= ackCountBeforeDuplicate + 1);
+    const duplicateAcks = phoneSockets[0].received
+      .filter((frame) => frame.type === "ack" && frame.requestId === sendFrame.command.requestId);
+    assert.equal(duplicateAcks.length, ackCountBeforeDuplicate + 1);
+    assert.deepEqual(duplicateAcks.at(-1), duplicateAcks.at(-2));
+    assert.equal(phoneRouterCalls.length, routerCallCountBeforeDuplicate);
+    assert.equal(phoneRouterCalls.filter(({ command }) => command.requestId === sendFrame.command.requestId).length, 1);
     assert.equal(phoneClient.getState().snapshot.revision >= streamingRevision, true);
 
-    phoneSockets[0].close();
+    const errorSocket = phoneSockets.at(-1);
+    errorSocket.send(JSON.stringify({
+      type: "command",
+      command: { type: "capture", requestId: "integration-safe-error" },
+    }));
+    await waitFor(() => errorSocket.received.find((frame) =>
+      frame.type === "error" && frame.requestId === "integration-safe-error"));
+    const safeError = errorSocket.received.find((frame) => frame.requestId === "integration-safe-error");
+    assert.deepEqual(safeError, {
+      type: "error",
+      requestId: "integration-safe-error",
+      code: "COMMAND_FAILED",
+      message: "Phone command failed.",
+    });
+    assert.equal(errorSocket.readyState, WebSocket.OPEN);
+
+    const serverClient = [...gateway.phoneClients].at(-1);
+    assert.ok(serverClient);
+    Object.defineProperty(serverClient.socket, "bufferedAmount", {
+      configurable: true,
+      value: 1_048_577,
+    });
+    conversation.updateAssistant(activeMessageId, "Backpressure snapshot", "streaming");
     await waitFor(() => phoneSockets.length >= 2 && phoneClient.getState().connection === "connected");
+    await waitFor(() => phoneClient.getState().snapshot?.conversation.messages.some((message) =>
+      message.id === activeMessageId && message.text === "Backpressure snapshot"));
+    assert.equal(phoneClient.getState().snapshot.conversation.messages.some((message) =>
+      message.id === activeMessageId && message.text === "Backpressure snapshot"), true);
+
+    phoneSockets.at(-1).close();
+    await waitFor(() => phoneSockets.length >= 3 && phoneClient.getState().connection === "connected");
     await waitFor(() => phoneClient.getState().snapshot?.conversation.messages.some((message) =>
       message.role === "assistant" && message.status === "streaming"));
 
@@ -579,6 +654,9 @@ test("desktop and phone commands share canonical order, idempotency, cancellatio
 
     await gateway.regeneratePairing();
     await waitFor(() => phoneClient.getState().connection === "revoked");
+    const oldHttp = await requestOnce(port, "/", { Host: advertisedHost, Cookie: cookieHeader });
+    assert.equal(oldHttp.statusCode, 401);
+    assert.equal(await expectRejectedWebSocket(port, cookieHeader, ready.origin), 401);
   } finally {
     if (releaseStream) releaseStream();
     phoneClient?.stop();

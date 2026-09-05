@@ -52,6 +52,7 @@ function cloneProjection(snapshot: SessionProjectionSnapshot): SessionProjection
     revision: snapshot.revision,
     conversation: cloneConversation(snapshot.conversation),
     queue: snapshot.queue.map((item) => ({ ...item })),
+    ...(typeof snapshot.capturing === "boolean" ? { capturing: snapshot.capturing } : {}),
   };
 }
 
@@ -181,6 +182,7 @@ export function applyPhoneServerFrame(
     if (frame.code === "SESSION_REVOKED") {
       state.connection = "revoked";
       state.errorMessage = frame.message;
+      state.commandPending = undefined;
     } else if (frame.requestId) {
       if (state.commandPending?.requestId === frame.requestId) {
         delete state.commandPending;
@@ -251,6 +253,7 @@ export type PhoneCommandInput =
 
 export interface PhoneActionState {
   isRunning: boolean;
+  isCapturing: boolean;
   isBusy: boolean;
   canCapture: boolean;
   canSendImages: boolean;
@@ -267,11 +270,13 @@ export function getPhoneActionState(state: PhoneClientState): PhoneActionState {
     ? state.snapshot?.conversation.messages.find((message) => message.id === activeMessageId)
     : undefined;
   const isRunning = activeMessage?.status === "pending" || activeMessage?.status === "streaming";
-  const isBusy = Boolean(state.commandPending) || isRunning;
+  const isCapturing = state.snapshot?.capturing === true;
+  const isBusy = Boolean(state.commandPending) || isRunning || isCapturing;
   const connected = state.connection === "connected";
   const queueCount = state.snapshot?.queue.length ?? 0;
   return {
     isRunning,
+    isCapturing,
     isBusy,
     canCapture: connected && !isBusy,
     canSendImages: connected && !isBusy && queueCount > 0,
@@ -397,7 +402,7 @@ function renderPhoneClient(
   const actionState = getPhoneActionState(state);
   const fieldset = document.createElement("fieldset");
   fieldset.disabled = state.connection !== "connected";
-  fieldset.setAttribute("aria-busy", String(Boolean(state.commandPending)));
+  fieldset.setAttribute("aria-busy", String(actionState.isBusy));
   const prompt = document.createElement("textarea");
   prompt.rows = 3;
   prompt.value = promptValue;
@@ -413,7 +418,8 @@ function renderPhoneClient(
   ) => {
     const button = document.createElement("button");
     button.type = "button";
-    const loading = state.commandPending?.type === command.type;
+    const loading = state.commandPending?.type === command.type ||
+      (command.type === "capture" && actionState.isCapturing);
     button.textContent = loading ? `${label}…` : label;
     button.disabled = disabled || Boolean(state.commandPending && !loading);
     button.setAttribute("aria-busy", String(loading));

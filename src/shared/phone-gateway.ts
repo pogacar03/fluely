@@ -1,5 +1,4 @@
 import type {
-  CommandResult,
   ConversationEvent,
   SessionProjectionSnapshot,
 } from "./conversation";
@@ -42,11 +41,22 @@ export const PHONE_GATEWAY_COMMAND_RATE_WINDOW_MS = 10_000;
 export const PHONE_GATEWAY_MAX_BUFFERED_AMOUNT_BYTES = 1 * 1024 * 1024;
 export const PHONE_GATEWAY_HEARTBEAT_INTERVAL_MS = 15_000;
 export const PHONE_GATEWAY_HEARTBEAT_MISSES = 2;
+export const PHONE_GATEWAY_MAX_COMMAND_LEDGER_IDS = 4_096;
+export const PHONE_GATEWAY_MAX_COMMAND_ACK_BYTES = 1_024;
+export const PHONE_GATEWAY_COMMAND_FINGERPRINT_BYTES = 64;
+/** Logical per-entry ledger budget: request ID + digest + bounded replay frame. */
+export const PHONE_GATEWAY_MAX_COMMAND_LEDGER_ENTRY_BYTES =
+  PHONE_GATEWAY_MAX_REQUEST_ID_BYTES +
+  PHONE_GATEWAY_COMMAND_FINGERPRINT_BYTES +
+  PHONE_GATEWAY_MAX_COMMAND_ACK_BYTES;
+/** The gateway retains no command snapshot/result beyond this session budget. */
+export const PHONE_GATEWAY_MAX_COMMAND_LEDGER_BYTES =
+  PHONE_GATEWAY_MAX_COMMAND_LEDGER_IDS * PHONE_GATEWAY_MAX_COMMAND_LEDGER_ENTRY_BYTES;
 
 export type ServerFrame =
   | { type: "snapshot"; revision: number; payload: SessionProjectionSnapshot }
   | { type: "event"; revision: number; payload: ConversationEvent }
-  | { type: "ack"; requestId: string; result: CommandResult }
+  | { type: "ack"; requestId: string }
   | { type: "error"; requestId?: string; code: string; message: string }
   | { type: "pong"; at: number };
 

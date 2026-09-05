@@ -50,6 +50,7 @@ export interface SessionProjectionSnapshot {
   revision: number;
   conversation: ConversationSnapshot;
   queue: ContextScreenshot[];
+  capturing?: boolean;
 }
 
 export interface ConversationPort {
@@ -67,6 +68,7 @@ export type SessionProjectionEvent =
     type: "queue-changed";
     revision: number;
     queue: ContextScreenshot[];
+    capturing?: boolean;
   };
 
 export type SessionProjectionEventListener = (event: SessionProjectionEvent) => void;
@@ -156,6 +158,7 @@ export function cloneSessionProjectionSnapshot(snapshot: SessionProjectionSnapsh
     revision: snapshot.revision,
     conversation: cloneConversationSnapshot(snapshot.conversation),
     queue: cloneProjectionQueue(snapshot.queue),
+    ...(typeof snapshot.capturing === "boolean" ? { capturing: snapshot.capturing } : {}),
   };
 }
 
@@ -172,6 +175,7 @@ export function cloneSessionProjectionEvent(event: SessionProjectionEvent): Sess
     type: "queue-changed",
     revision: event.revision,
     queue: cloneProjectionQueue(event.queue),
+    ...(typeof event.capturing === "boolean" ? { capturing: event.capturing } : {}),
   };
 }
 
@@ -221,6 +225,9 @@ export function applySessionProjectionEvent(
     snapshot.conversation = conversation.snapshot;
   } else {
     snapshot.queue = cloneProjectionQueue(event.queue);
+    if (typeof event.capturing === "boolean") {
+      snapshot.capturing = event.capturing;
+    }
   }
   snapshot.revision = event.revision;
   return { status: "applied", snapshot };

@@ -33,10 +33,12 @@ export class SessionProjectionStore implements SessionProjectionPort {
   public constructor(options: SessionProjectionStoreOptions) {
     this.conversation = options.conversation;
     const initialConversation = options.conversation.snapshot();
+    const initialQueue = options.queue.getState();
     this.state = cloneSessionProjectionSnapshot({
       revision: initialConversation.revision,
       conversation: initialConversation,
-      queue: options.queue.getState().items,
+      queue: initialQueue.items,
+      capturing: initialQueue.capturing,
     });
     this.removeConversationListener = options.conversation.subscribe((event) => this.handleConversationEvent(event));
     this.removeQueueListener = options.queue.onStateChanged((state) => this.handleQueueState(state));
@@ -85,6 +87,7 @@ export class SessionProjectionStore implements SessionProjectionPort {
       revision,
       conversation,
       queue: this.state.queue.map((item) => ({ ...item })),
+      ...(typeof this.state.capturing === "boolean" ? { capturing: this.state.capturing } : {}),
     };
     this.emit({ type: "conversation", revision, event });
   }
@@ -98,14 +101,20 @@ export class SessionProjectionStore implements SessionProjectionPort {
       revision: this.state.revision,
       conversation: this.state.conversation,
       queue: nextState.items,
+      capturing: nextState.capturing,
     });
-    if (sameQueue(this.state.queue, next.queue)) {
+    if (sameQueue(this.state.queue, next.queue) && this.state.capturing === next.capturing) {
       return;
     }
 
     const revision = this.state.revision + 1;
-    this.state = { revision, conversation: this.state.conversation, queue: next.queue };
-    this.emit({ type: "queue-changed", revision, queue: next.queue });
+    this.state = {
+      revision,
+      conversation: this.state.conversation,
+      queue: next.queue,
+      capturing: next.capturing,
+    };
+    this.emit({ type: "queue-changed", revision, queue: next.queue, capturing: next.capturing });
   }
 
   private emit(event: SessionProjectionEvent): void {

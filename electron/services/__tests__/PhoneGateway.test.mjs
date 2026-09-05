@@ -515,6 +515,20 @@ async function flushMicrotasks() {
   await Promise.resolve();
 }
 
+async function waitForSentFrame(socket, predicate, timeoutMs = 2_000, startIndex = 0) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const frame = socket.sent.slice(startIndex).map((value) => JSON.parse(value)).find(predicate);
+    if (frame) {
+      return frame;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error("Timed out waiting for the expected phone gateway frame.");
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
 function invokeHandler(gateway, requestPath, {
   method = "GET",
   remoteAddress = "192.168.50.20",
@@ -1529,6 +1543,263 @@ test("disconnecting during an active phone command does not cancel or invent an 
   await flushMicrotasks();
 
   assert.deepEqual(socket.sent, []);
+});
+
+test("a revoked pairing cannot dispatch a command that was already queued before replacement", async () => {
+  const projection = makeProjection({
+    revision: 0,
+    conversation: { sessionId: "session-phone-revoke-race", revision: 0, messages: [], attachments: [] },
+    queue: [],
+  });
+  const calls = [];
+  const router = {
+    execute: async (command, source) => {
+      calls.push({ command, source });
+      return commandResult();
+    },
+  };
+  const qrUrls = [];
+  const { gateway } = makeGateway({ projection, commandRouter: router, qrUrls, portCandidates: [0] });
+  const ready = await gateway.start();
+  const secret = new URL(qrUrls[0]).searchParams.get("secret");
+  const exchanged = await invokeHandler(gateway, `/pair?secret=${secret}`);
+  const cookieHeader = exchanged.headers["set-cookie"];
+  const sessionKey = cookieHeader.match(/^fluely_phone_session=([^;]+)/)[1];
+  const socket = makeGatewaySocket();
+  gateway.acceptWebSocket(socket, sessionKey);
+  socket.sent = [];
+
+  socket.emit("message", Buffer.from(JSON.stringify({
+    type: "command",
+    command: { type: "capture", requestId: "phone-revoke-race" },
+  })));
+  await gateway.regeneratePairing();
+  await flushMicrotasks();
+
+  socket.emit("message", Buffer.from(JSON.stringify({
+    type: "command",
+    command: { type: "capture", requestId: "phone-revoke-after" },
+  })));
+  await flushMicrotasks();
+  assert.deepEqual(calls, []);
+  assert.equal(socket.readyState, WebSocket.CLOSED);
+  void ready;
+});
+
+test("phone idempotency survives reconnect beyond the shared 512-entry deduper window", async () => {
+  let now = 10_000;
+  const calls = [];
+  const projection = makeProjection({
+    revision: 0,
+    conversation: { sessionId: "session-phone-ledger", revision: 0, messages: [], attachments: [] },
+    queue: [],
+  });
+  const router = {
+    execute: async (command, source) => {
+      calls.push({ command, source });
+      return commandResult();
+    },
+  };
+  const { gateway } = makeGateway({ projection, commandRouter: router, now: () => now });
+  const firstSocket = makeGatewaySocket();
+  gateway.acceptWebSocket(firstSocket, "session-phone-ledger");
+  firstSocket.sent = [];
+
+  for (let index = 0; index < 513; index += 1) {
+    const startIndex = firstSocket.sent.length;
+    firstSocket.emit("message", Buffer.from(JSON.stringify({
+      type: "command",
+      command: { type: "capture", requestId: `ledger-${index}` },
+    })));
+    await waitForSentFrame(firstSocket, (frame) => frame.type === "ack" && frame.requestId === `ledger-${index}`, 2_000, startIndex);
+    now += 10_001;
+  }
+  assert.equal(calls.length, 513);
+
+  firstSocket.emit("close");
+  const reconnectedSocket = makeGatewaySocket();
+  gateway.acceptWebSocket(reconnectedSocket, "session-phone-ledger");
+  reconnectedSocket.sent = [];
+  reconnectedSocket.emit("message", Buffer.from(JSON.stringify({
+    type: "command",
+    command: { type: "capture", requestId: "ledger-0" },
+  })));
+  await waitForSentFrame(reconnectedSocket, (frame) => frame.type === "ack" && frame.requestId === "ledger-0", 2_000, 0);
+
+  assert.equal(calls.length, 513);
+  assert.equal(JSON.parse(reconnectedSocket.sent[0]).type, "ack");
+});
+
+test("phone idempotency retains only bounded minimal acknowledgement state after completion", async () => {
+  const projection = makeProjection({
+    revision: 0,
+    conversation: { sessionId: "session-phone-minimal-ledger", revision: 0, messages: [], attachments: [] },
+    queue: [],
+  });
+  const router = {
+    execute: async () => commandResult(),
+  };
+  const { gateway } = makeGateway({ projection, commandRouter: router });
+  const socket = makeGatewaySocket();
+  gateway.acceptWebSocket(socket, "session-phone-minimal-ledger");
+  socket.sent = [];
+
+  socket.emit("message", Buffer.from(JSON.stringify({
+    type: "command",
+    command: { type: "capture", requestId: "minimal-ledger-1" },
+  })));
+  await waitForSentFrame(socket, (frame) => frame.type === "ack" && frame.requestId === "minimal-ledger-1");
+
+  const session = gateway.phoneSessions.get("session-phone-minimal-ledger");
+  const entry = session.ledger.get("minimal-ledger-1");
+  assert.ok(session);
+  assert.ok(entry);
+  assert.equal(entry.pending, undefined);
+  assert.equal(entry.command, undefined);
+  assert.equal(JSON.parse(entry.response).type, "ack");
+  assert.equal("result" in JSON.parse(entry.response), false);
+  assert.equal(session.ledgerBytes, 1_216);
+});
+
+test("phone command rate limiting expires timestamps at the exact ten-second boundary", async () => {
+  let now = 10_000;
+  let calls = 0;
+  const projection = makeProjection({
+    revision: 0,
+    conversation: { sessionId: "session-phone-rate-boundary", revision: 0, messages: [], attachments: [] },
+    queue: [],
+  });
+  const router = {
+    execute: async () => {
+      calls += 1;
+      return commandResult();
+    },
+  };
+  const { gateway } = makeGateway({ projection, commandRouter: router, now: () => now });
+  const socket = makeGatewaySocket();
+  gateway.acceptWebSocket(socket);
+  socket.sent = [];
+
+  for (let index = 0; index < 10; index += 1) {
+    const requestId = `rate-boundary-${index}`;
+    const startIndex = socket.sent.length;
+    socket.emit("message", Buffer.from(JSON.stringify({
+      type: "command",
+      command: { type: "capture", requestId },
+    })));
+    await waitForSentFrame(socket, (frame) => frame.type === "ack" && frame.requestId === requestId, 2_000, startIndex);
+  }
+
+  now += 10_000;
+  socket.emit("message", Buffer.from(JSON.stringify({
+    type: "command",
+    command: { type: "capture", requestId: "rate-boundary-10" },
+  })));
+  await waitForSentFrame(socket, (frame) => frame.type === "ack" && frame.requestId === "rate-boundary-10");
+
+  assert.equal(calls, 11);
+  assert.equal(socket.readyState, WebSocket.OPEN);
+});
+
+test("phone session revokes at the hard unique-command ledger limit instead of evicting IDs", async () => {
+  let now = 10_000;
+  let calls = 0;
+  const projection = makeProjection({
+    revision: 0,
+    conversation: { sessionId: "session-phone-ledger-cap", revision: 0, messages: [], attachments: [] },
+    queue: [],
+  });
+  const router = {
+    execute: async () => {
+      calls += 1;
+      return commandResult();
+    },
+  };
+  const { gateway } = makeGateway({ projection, commandRouter: router, now: () => now });
+  const socket = makeGatewaySocket();
+  gateway.acceptWebSocket(socket, "session-phone-ledger-cap");
+  socket.sent = [];
+
+  for (let index = 0; index < 4096; index += 1) {
+    const startIndex = socket.sent.length;
+    socket.emit("message", Buffer.from(JSON.stringify({
+      type: "command",
+      command: { type: "capture", requestId: `ledger-cap-${index}` },
+    })));
+    await waitForSentFrame(socket, (frame) => frame.type === "ack" && frame.requestId === `ledger-cap-${index}`, 2_000, startIndex);
+    now += 10_001;
+  }
+  assert.equal(calls, 4096);
+
+  socket.emit("message", Buffer.from(JSON.stringify({
+    type: "command",
+    command: { type: "capture", requestId: "ledger-cap-4096" },
+  })));
+  await waitForSentFrame(socket, (frame) => frame.type === "error" && frame.requestId === "ledger-cap-4096", 2_000, socket.sent.length - 1);
+
+  const error = socket.sent.map((value) => JSON.parse(value)).at(-1);
+  assert.deepEqual(error, {
+    type: "error",
+    requestId: "ledger-cap-4096",
+    code: "SESSION_REVOKED",
+    message: "Pairing revoked.",
+  });
+  assert.equal(calls, 4096);
+  assert.equal(socket.readyState, WebSocket.CLOSED);
+});
+
+test("phone command failures use a fixed safe error and keep the authenticated connection open", async () => {
+  const projection = makeProjection({
+    revision: 0,
+    conversation: { sessionId: "session-phone-error", revision: 0, messages: [], attachments: [] },
+    queue: [],
+  });
+  const router = {
+    execute: async (command) => {
+      throw Object.assign(new Error("provider /Users/yu/private/session.json"), {
+        code: command.requestId === "phone-safe-error-prototype" ? "__proto__" : "INTERNAL_ERROR",
+      });
+    },
+  };
+  const { gateway } = makeGateway({ projection, commandRouter: router });
+  const socket = makeGatewaySocket();
+  gateway.acceptWebSocket(socket);
+  socket.sent = [];
+
+  socket.emit("message", Buffer.from(JSON.stringify({
+    type: "command",
+    command: { type: "send", requestId: "phone-safe-error-1", prompt: "Question" },
+  })));
+  await waitForSentFrame(socket, (frame) => frame.type === "error" && frame.requestId === "phone-safe-error-1", 2_000, 0);
+
+  assert.deepEqual(JSON.parse(socket.sent[0]), {
+    type: "error",
+    requestId: "phone-safe-error-1",
+    code: "COMMAND_FAILED",
+    message: "Phone command failed.",
+  });
+  assert.equal(socket.readyState, WebSocket.OPEN);
+
+  socket.emit("message", Buffer.from(JSON.stringify({
+    type: "command",
+    command: { type: "send", requestId: "phone-safe-error-2", prompt: "Question" },
+  })));
+  await waitForSentFrame(socket, (frame) => frame.type === "error" && frame.requestId === "phone-safe-error-2", 2_000, 1);
+  assert.equal(socket.readyState, WebSocket.OPEN);
+  assert.equal(JSON.parse(socket.sent[1]).message, "Phone command failed.");
+
+  socket.emit("message", Buffer.from(JSON.stringify({
+    type: "command",
+    command: { type: "send", requestId: "phone-safe-error-prototype", prompt: "Question" },
+  })));
+  await waitForSentFrame(socket, (frame) => frame.type === "error" && frame.requestId === "phone-safe-error-prototype", 2_000, 2);
+  assert.deepEqual(JSON.parse(socket.sent[2]), {
+    type: "error",
+    requestId: "phone-safe-error-prototype",
+    code: "COMMAND_FAILED",
+    message: "Phone command failed.",
+  });
+  assert.equal(socket.readyState, WebSocket.OPEN);
 });
 
 test("raw HTTP request targets are matched before URL normalization and reject traversal, encoded separators, and query confusion", async () => {

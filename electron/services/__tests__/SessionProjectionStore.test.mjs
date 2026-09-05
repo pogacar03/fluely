@@ -30,16 +30,16 @@ const SECOND_SCREENSHOT = {
 };
 
 function createQueueSource() {
-  let state = { items: [] };
+  let state = { items: [], capturing: false };
   const listeners = new Set();
   return {
-    getState: () => ({ items: state.items.map((item) => ({ ...item })) }),
+    getState: () => ({ items: state.items.map((item) => ({ ...item })), capturing: state.capturing }),
     onStateChanged(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    publish(items) {
-      state = { items: items.map((item) => ({ ...item })) };
+    publish(items, capturing = state.capturing) {
+      state = { items: items.map((item) => ({ ...item })), capturing };
       for (const listener of listeners) {
         listener(this.getState());
       }
@@ -110,6 +110,32 @@ test("unchanged queue state does not create a false queue event and five queued 
   assert.equal(port.getSnapshot().queue.length, 5);
   assert.deepEqual(events.map((event) => event.type), ["queue-changed"]);
   assert.equal(events[0].queue.length, 5);
+});
+
+test("session projection carries canonical capturing transitions even when the queue is unchanged", () => {
+  const conversation = createConversation();
+  const queue = createQueueSource();
+  const port = new SessionProjectionStore({ conversation, queue });
+  const events = [];
+  port.subscribe((event) => events.push(event));
+
+  queue.publish([], true);
+  assert.equal(port.getSnapshot().capturing, true);
+  assert.deepEqual(events[0], {
+    type: "queue-changed",
+    revision: 1,
+    queue: [],
+    capturing: true,
+  });
+
+  queue.publish([], false);
+  assert.equal(port.getSnapshot().capturing, false);
+  assert.deepEqual(events[1], {
+    type: "queue-changed",
+    revision: 2,
+    queue: [],
+    capturing: false,
+  });
 });
 
 test("a reconnecting consumer detects a projection revision gap and replaces it from a fresh snapshot", () => {
