@@ -34,10 +34,10 @@ Fluely is currently in active early development. The first release is being deli
 | Milestone | Focus | Status |
 | --- | --- | --- |
 | 1 | Electron foundation, secure IPC, settings, shortcuts, capture privacy, screenshot queue | Complete locally |
-| 2 | Vision requests, streaming answers | Planned |
-| 3 | Shared conversation context and phone mirror | Planned |
+| 2 | Vision requests, streaming answers | Complete locally |
+| 3 | Shared conversation context and phone mirror | Complete locally; physical LAN acceptance pending |
 | 4 | Microphone input, VAD, pluggable STT | Planned |
-| 5 | Packaging, performance, and release validation | Planned |
+| 5 | Packaging, performance, and release validation | Automated local gate complete; signing pending |
 
 The product contract and acceptance criteria are intentionally kept separate from implementation details. As the project evolves, this README will remain the product-level map; the code and tests will carry the operational truth.
 
@@ -78,7 +78,7 @@ The renderer does not get filesystem, shell, or secret access. Provider adapters
 | --- | --- | --- |
 | Show / hide | `⌘ B` | Changes visibility only |
 | Capture screenshot | `⌘ ⇧ 8` | Adds a screenshot to the queue |
-| Analyze queue | `⌘ Enter` | Sends queued screenshots and the current question |
+| Send images | `⌘ Enter` | Sends queued screenshots and the current question |
 | Capture and analyze | `⌘ ⇧ Enter` | Captures first, then starts analysis |
 | Cancel / clear | `⌘ R` | Cancels the request and clears the queue |
 
@@ -111,12 +111,20 @@ Fluely favors platform primitives and small dependencies. Native image handling 
 - `nodeIntegration: false`
 - `sandbox: true` unless a documented platform constraint requires an exception
 - Provider keys stored outside ordinary settings JSON when platform-secure storage is available
-- Phone mirror bound to `127.0.0.1` by default
+- Phone companion disabled by default; when explicitly enabled it binds to the trusted LAN only
 - Random pairing token for phone sessions
 - No arbitrary client-supplied file paths
 - Strict content security policy and `Cache-Control: no-store` for local phone pages
 
 Fluely is not a security product. Please review the threat model before exposing the phone mirror to a LAN or using it with sensitive material.
+
+## Phone companion on a trusted LAN
+
+The optional phone companion is enabled from Settings with **Start phone companion on LAN**. Fluely shows a one-time QR code and text URL; scan it from a phone on the same local network, then keep the phone page open. Only one phone is paired at a time. Re-pairing a replacement phone, disabling the companion, quitting, or restarting invalidates the previous phone session.
+
+The first LAN slice uses HTTP and WebSocket without TLS. Use it only on a trusted private network; anyone who can observe that network may observe the companion traffic. Pairing codes expire after two minutes, are single-use, and are never retained across restart. Restarting Fluely intentionally starts a new empty session: queued screenshots, conversation messages, attachments, capture/streaming state, and transient phone command state are cleared.
+
+Desktop and phone project one canonical session. **Capture** adds a computer screenshot to the shared draft queue, **Send images** sends the queue without capturing or clearing it, **Capture & ask** performs both actions, and **Cancel**, **Clear queue**, **Clear conversation**, and **Remove** remain explicit controls. The desktop Settings and Work views are two mutually exclusive views in one window; Settings starts the workspace and Work returns to Settings.
 
 ## Development
 
