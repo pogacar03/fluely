@@ -206,11 +206,29 @@ test("extractText reads completed agent messages and exposes completed item erro
 });
 
 test("validateExecutable returns a resolved executable without throwing", async () => {
-  const executable = await makeExecutable('printf "codex-cli test-version\\n"');
+  const executable = await makeExecutable("exit 0");
+  const child = makeFakeProcess();
+  let spawnCall;
+  const service = new CodexCliService({
+    spawn: (candidate, args, options) => {
+      spawnCall = { candidate, args, options };
+      queueMicrotask(() => {
+        child.stdout.write("codex-cli test-version\\n");
+        child.emit("close", 0, null);
+      });
+      return child;
+    },
+  });
 
-  const result = await CodexCliService.validateExecutable(executable, 500);
+  const result = await service.validateExecutable(executable, 500);
 
   assert.deepEqual(result, { success: true, resolvedPath: executable });
+  assert.deepEqual(spawnCall, {
+    candidate: executable,
+    args: ["--version"],
+    options: { stdio: ["pipe", "pipe", "pipe"], shell: false },
+  });
+  assert.deepEqual(child.killCalls, []);
 });
 
 test("validateExecutable reports missing executables as actionable errors", async () => {
