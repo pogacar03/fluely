@@ -19,10 +19,12 @@ try {
 
 const CONTEXT_ID = "11111111-1111-4111-8111-111111111111";
 const ATTACHMENT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const MEDIA_CAPABILITY = "b".repeat(64);
 
 function emptySnapshot() {
   return {
     revision: 0,
+    mediaCapability: MEDIA_CAPABILITY,
     conversation: {
       sessionId: "session-phone",
       revision: 0,
@@ -132,7 +134,7 @@ test("phone client hydrates canonical snapshots and applies ordered conversation
       width: 1920,
       height: 1080,
       mimeType: "image/png",
-      previewUrl: `/api/context/${CONTEXT_ID}`,
+      previewUrl: `/api/context/${MEDIA_CAPABILITY}/${CONTEXT_ID}`,
     }],
   };
   const hydrated = phoneClientModule.applyPhoneServerFrame(initial, {
@@ -141,7 +143,7 @@ test("phone client hydrates canonical snapshots and applies ordered conversation
     payload: first,
   });
   assert.equal(hydrated.effect, null);
-  assert.equal(hydrated.state.snapshot.queue[0].previewUrl, `/api/context/${CONTEXT_ID}`);
+  assert.equal(hydrated.state.snapshot.queue[0].previewUrl, `/api/context/${MEDIA_CAPABILITY}/${CONTEXT_ID}`);
   assert.deepEqual(hydrated.state.snapshot.conversation.messages, []);
 
   const firstEvent = phoneClientModule.applyPhoneServerFrame(hydrated.state, {
@@ -226,10 +228,10 @@ test("phone client detects a revision gap, requests one fresh snapshot, ignores 
 test("phone client exposes bounded reconnect backoff and separate authenticated media namespaces", () => {
   assert.equal(typeof phoneClientModule.reconnectDelayMs, "function");
   assert.deepEqual([0, 1, 2, 3, 4, 20].map((attempt) => phoneClientModule.reconnectDelayMs(attempt)), [250, 500, 1000, 2000, 4000, 8000]);
-  assert.equal(phoneClientModule.phoneImageUrl("context", CONTEXT_ID), `/api/context/${CONTEXT_ID}`);
-  assert.equal(phoneClientModule.phoneImageUrl("attachments", ATTACHMENT_ID), `/api/attachments/${ATTACHMENT_ID}`);
-  assert.equal(phoneClientModule.phoneImageUrl("context", CONTEXT_ID).includes("fluely-media"), false);
-  assert.equal(phoneClientModule.phoneImageUrl("attachments", ATTACHMENT_ID).includes("/Users/"), false);
+  assert.equal(phoneClientModule.phoneImageUrl("context", CONTEXT_ID, MEDIA_CAPABILITY), `/api/context/${MEDIA_CAPABILITY}/${CONTEXT_ID}`);
+  assert.equal(phoneClientModule.phoneImageUrl("attachments", ATTACHMENT_ID, MEDIA_CAPABILITY), `/api/attachments/${MEDIA_CAPABILITY}/${ATTACHMENT_ID}`);
+  assert.throws(() => phoneClientModule.phoneImageUrl("context", CONTEXT_ID), /capability/i);
+  assert.throws(() => phoneClientModule.phoneImageUrl("attachments", ATTACHMENT_ID, "bad"), /capability/i);
 });
 
 test("phone client probes same-origin authentication before reconnecting and stops permanently on a revoked cookie", async () => {
@@ -482,6 +484,7 @@ function controlSnapshot({ queued = true, running = false, capturing = false } =
   };
   return {
     revision: 0,
+    mediaCapability: MEDIA_CAPABILITY,
     capturing,
     conversation: {
       sessionId: "session-phone-controls",
@@ -507,7 +510,7 @@ function controlSnapshot({ queued = true, running = false, capturing = false } =
       width: 1920,
       height: 1080,
       mimeType: "image/png",
-      previewUrl: `/api/context/${CONTEXT_ID}`,
+      previewUrl: `/api/context/${MEDIA_CAPABILITY}/${CONTEXT_ID}`,
     }] : [],
   };
 }

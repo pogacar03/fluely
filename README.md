@@ -145,7 +145,13 @@ matrix, packaging policy, and final physical-phone checklist live in
 [`docs/superpowers/verification/2026-08-31-phone-companion-acceptance.md`](docs/superpowers/verification/2026-08-31-phone-companion-acceptance.md).
 The local automated B4 fix gates cover real HTTP/WebSocket pairing, session-bound
 media URLs, restart clearing, static phone assets, reconnect, and the shared
-desktop/phone canonical projection. The final physical-phone matrix remains
+desktop/phone canonical projection. Gateway shutdown now quiesces phone-origin
+capture and analysis work before returning, without cancelling independent
+desktop-origin work. Every phone context/attachment URL requires a rotating
+session capability, including store-only gateway configurations. Package
+validation uses an explicit application runtime manifest plus renderer assets
+referenced by the built index; undeclared application files and globally
+sensitive dependency files fail closed. The final physical-phone matrix remains
 pending the dedicated user launch; this implementation task does not leave
 Fluely running.
 

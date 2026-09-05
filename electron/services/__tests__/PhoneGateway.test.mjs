@@ -143,6 +143,7 @@ function makeGateway({
     ...(onCommandError ? { onCommandError } : {}),
     ...(mediaCapabilityFactory ? { mediaCapabilityFactory } : {}),
   });
+  if (projection) gateway.mediaCapability = "0".repeat(64);
   gateways.push(gateway);
   return { gateway, servers };
 }
@@ -378,6 +379,7 @@ test("authenticated media routing decodes a percent-encoded business ID only onc
   const contextId = "11111111-1111-4111-8111-111111111111";
   const qrUrls = [];
   const requestedIds = [];
+  const mediaCapability = "f".repeat(64);
   const { gateway } = makeGateway({
     portCandidates: [0],
     qrUrls,
@@ -388,6 +390,7 @@ test("authenticated media routing decodes a percent-encoded business ID only onc
       },
     },
     readMediaFile: async () => Buffer.from("png"),
+    mediaCapabilityFactory: () => mediaCapability,
   });
   await gateway.start();
   const secret = new URL(qrUrls[0]).searchParams.get("secret");
@@ -401,7 +404,7 @@ test("authenticated media routing decodes a percent-encoded business ID only onc
     return originalDecodeURIComponent(value);
   };
   try {
-    const response = await invokeHandler(gateway, "/api/context/%31" + contextId.slice(1), {
+    const response = await invokeHandler(gateway, `/api/context/${mediaCapability}/%31${contextId.slice(1)}`, {
       headers: { cookie: exchanged.headers["set-cookie"] },
     });
     assert.equal(response.statusCode, 200);
@@ -2062,6 +2065,7 @@ test("raw HTTP request targets are matched before URL normalization and reject t
   await writeFile(contextPath, pngBytes, { mode: 0o600 });
 
   const qrUrls = [];
+  const mediaCapability = "c".repeat(64);
   const { gateway } = makeGateway({
     portCandidates: [0],
     qrUrls,
@@ -2070,6 +2074,7 @@ test("raw HTTP request targets are matched before URL normalization and reject t
       getManagedPaths: (ids) => ids[0] === contextId ? [contextPath] : [],
       getManagedRoot: () => root,
     },
+    mediaCapabilityFactory: () => mediaCapability,
   });
   const ready = await gateway.start();
   const port = Number(new URL(ready.origin).port);
@@ -2078,24 +2083,32 @@ test("raw HTTP request targets are matched before URL normalization and reject t
   const exchange = await request(port, "/pair?secret=" + secret);
   const cookie = exchange.headers["set-cookie"][0].match(/^(fluely_phone_session=[^;]+)/)[1];
 
-  const valid = parseRawResponse(await rawRequest(port, "/api/context/" + contextId, {
+  const valid = parseRawResponse(await rawRequest(port, `/api/context/${mediaCapability}/${contextId}`, {
     Host: host,
     Cookie: cookie,
   }));
   assert.equal(valid.statusCode, 200);
   assert.equal(Buffer.from(valid.body, "latin1").equals(pngBytes), true);
 
+  for (const target of [
+    `/api/context/${contextId}`,
+    `/api/context/${"d".repeat(64)}/${contextId}`,
+  ]) {
+    const rejected = parseRawResponse(await rawRequest(port, target, { Host: host, Cookie: cookie }));
+    assert.equal(rejected.statusCode, 404, target);
+  }
+
   const invalidTargets = [
-    "http://" + host + "/api/context/" + contextId,
-    "/api/context/../context/" + contextId,
-    "/api/context/%2e%2e/context/" + contextId,
-    "/api/context/..\\context\\" + contextId,
-    "/api/context/%252e%252e/context/" + contextId,
-    "/api/context/" + contextId + "%2f..%2f" + contextId,
-    "/api/context/" + contextId + "?cache=1",
-    "/api/context//" + contextId,
-    "/api/context/" + contextId + "/",
-    "/api/context/%00" + contextId,
+    `http://${host}/api/context/${mediaCapability}/${contextId}`,
+    `/api/context/${mediaCapability}/../context/${contextId}`,
+    `/api/context/${mediaCapability}/%2e%2e/context/${contextId}`,
+    `/api/context/${mediaCapability}/..\\context\\${contextId}`,
+    `/api/context/${mediaCapability}/%252e%252e/context/${contextId}`,
+    `/api/context/${mediaCapability}/${contextId}%2f..%2f${contextId}`,
+    `/api/context/${mediaCapability}/${contextId}?cache=1`,
+    `/api/context/${mediaCapability}//${contextId}`,
+    `/api/context/${mediaCapability}/${contextId}/`,
+    `/api/context/${mediaCapability}/%00${contextId}`,
   ];
 
   for (const target of invalidTargets) {
@@ -2135,6 +2148,7 @@ test("authenticated media rejects symlinks, directories, unsafe modes, and overs
   await truncate(oversizedPath, 20 * 1024 * 1024 + 1);
 
   const qrUrls = [];
+  const mediaCapability = "e".repeat(64);
   const { gateway } = makeGateway({
     portCandidates: [0],
     qrUrls,
@@ -2150,6 +2164,7 @@ test("authenticated media rejects symlinks, directories, unsafe modes, and overs
       },
       getManagedRoot: () => root,
     },
+    mediaCapabilityFactory: () => mediaCapability,
   });
   const ready = await gateway.start();
   const port = Number(new URL(ready.origin).port);
@@ -2158,7 +2173,7 @@ test("authenticated media rejects symlinks, directories, unsafe modes, and overs
   const cookie = exchange.headers["set-cookie"][0].match(/^(fluely_phone_session=[^;]+)/)[1];
 
   for (const id of Object.values(ids)) {
-    const response = await requestBuffer(port, "/api/context/" + id, { Cookie: cookie });
+    const response = await requestBuffer(port, `/api/context/${mediaCapability}/${id}`, { Cookie: cookie });
     assert.equal(response.statusCode, 404, id);
     assertSafeHeaders(response);
     assert.equal(response.body.includes("/Users/"), false, id);

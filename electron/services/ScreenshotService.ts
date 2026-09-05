@@ -199,6 +199,8 @@ export class ScreenshotService {
   private capturing = false;
   private disposed = false;
   private permission: ScreenshotPermission = "unavailable";
+  private cancelCapture: ((error: ScreenshotServiceError) => void) | null = null;
+  private activeCapture: Promise<void> | null = null;
 
   public constructor(private readonly options: ScreenshotServiceOptions) {
     this.directory = options.directory ??
@@ -261,6 +263,11 @@ export class ScreenshotService {
     const timeoutNotice = new Promise<never>((_, reject) => {
       notifyTimeout = (error) => reject(error);
     });
+    let cancelCapture!: (error: ScreenshotServiceError) => void;
+    const cancellationNotice = new Promise<never>((_, reject) => {
+      cancelCapture = reject;
+    });
+    this.cancelCapture = cancelCapture;
 
     const operation = this.enqueueMutation(async () => {
       let pendingSource: Promise<void> | undefined;
@@ -288,7 +295,7 @@ export class ScreenshotService {
             timeoutNotice = permissionError(this.permission) ?? timeoutError;
           }
           notifyTimeout?.(timeoutNotice);
-        }, timeoutError);
+        }, timeoutError, cancellationNotice);
         if (this.getPlatform() === "darwin") {
           this.permission = this.readPermission();
           const permissionFailure = permissionError(this.permission);
@@ -333,8 +340,21 @@ export class ScreenshotService {
         this.emitState();
       }
     });
+    const activeCapture = operation.then(() => undefined, () => undefined);
+    this.activeCapture = activeCapture;
+    void activeCapture.finally(() => {
+      if (this.activeCapture === activeCapture) {
+        this.activeCapture = null;
+        this.cancelCapture = null;
+      }
+    });
+    return Promise.race([operation, timeoutNotice, cancellationNotice]);
+  }
 
-    return Promise.race([operation, timeoutNotice]);
+  /** Cancels the current capture boundary and waits until it can no longer persist queue state. */
+  public async cancelPending(): Promise<void> {
+    this.cancelCapture?.(captureFailed());
+    await this.activeCapture;
   }
 
   /** Resolves only after all queued mutations, including a late native source settle, are idle. */
@@ -416,6 +436,7 @@ export class ScreenshotService {
   private async selectSource(
     onTimeout: (settled: Promise<void>) => void,
     timeoutError: ScreenshotServiceError,
+    cancellation: Promise<never>,
   ): Promise<ScreenshotSource> {
     const point = this.options.screen.getCursorScreenPoint();
     const display = this.options.screen.getDisplayNearestPoint(point);
@@ -424,7 +445,7 @@ export class ScreenshotService {
       width: Math.max(1, Math.round(display.bounds.width * scaleFactor)),
       height: Math.max(1, Math.round(display.bounds.height * scaleFactor)),
     };
-    const sources = await this.getSourcesWithTimeout(thumbnailSize, onTimeout, timeoutError);
+    const sources = await this.getSourcesWithTimeout(thumbnailSize, onTimeout, timeoutError, cancellation);
     const source = sources.find((candidate) => candidate.display_id === String(display.id));
     if (!source) {
       throw captureFailed();
@@ -436,6 +457,7 @@ export class ScreenshotService {
     thumbnailSize: ScreenshotSize,
     onTimeout: (settled: Promise<void>) => void,
     timeoutError: ScreenshotServiceError,
+    cancellation: Promise<never>,
   ): Promise<readonly ScreenshotSource[]> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const sourcePromise = Promise.resolve().then(() => this.options.desktopCapturer.getSources({
@@ -451,7 +473,7 @@ export class ScreenshotService {
     });
 
     try {
-      return await Promise.race([sourcePromise, timeoutPromise]);
+      return await Promise.race([sourcePromise, timeoutPromise, cancellation]);
     } finally {
       if (timer) {
         clearTimeout(timer);

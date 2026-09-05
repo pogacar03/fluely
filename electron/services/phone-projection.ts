@@ -12,42 +12,48 @@ export interface PhoneProjectionPort {
 }
 
 export interface PhoneProjectionOptions {
-  getMediaCapability?: () => string | undefined;
+  getMediaCapability: () => string | undefined;
 }
 
-export function phoneContextUrl(screenshotId: string, mediaCapability?: string): string {
-  return mediaCapability
-    ? `/api/context/${mediaCapability}/${encodeURIComponent(screenshotId)}`
-    : `/api/context/${encodeURIComponent(screenshotId)}`;
+const MEDIA_CAPABILITY_PATTERN = /^[0-9a-f]{64}$/;
+
+function requireMediaCapability(mediaCapability: string | undefined): string {
+  if (!mediaCapability || !MEDIA_CAPABILITY_PATTERN.test(mediaCapability)) {
+    throw new Error("A current phone media capability is required.");
+  }
+  return mediaCapability;
 }
 
-export function phoneAttachmentUrl(attachmentId: string, mediaCapability?: string): string {
-  return mediaCapability
-    ? `/api/attachments/${mediaCapability}/${encodeURIComponent(attachmentId)}`
-    : `/api/attachments/${encodeURIComponent(attachmentId)}`;
+export function phoneContextUrl(screenshotId: string, mediaCapability: string): string {
+  return `/api/context/${requireMediaCapability(mediaCapability)}/${encodeURIComponent(screenshotId)}`;
 }
 
-function mapPhoneQueue(snapshot: SessionProjectionSnapshot, mediaCapability?: string): SessionProjectionSnapshot {
+export function phoneAttachmentUrl(attachmentId: string, mediaCapability: string): string {
+  return `/api/attachments/${requireMediaCapability(mediaCapability)}/${encodeURIComponent(attachmentId)}`;
+}
+
+function mapPhoneQueue(snapshot: SessionProjectionSnapshot, mediaCapability: string): SessionProjectionSnapshot {
+  const capability = requireMediaCapability(mediaCapability);
   return {
     ...snapshot,
     queue: snapshot.queue.map((item) => ({
       ...item,
-      previewUrl: phoneContextUrl(item.id, mediaCapability),
+      previewUrl: phoneContextUrl(item.id, capability),
     })),
-    ...(mediaCapability ? { mediaCapability } : {}),
+    mediaCapability: capability,
   };
 }
 
 export function toPhoneProjectionSnapshot(
   snapshot: SessionProjectionSnapshot,
-  mediaCapability?: string,
+  mediaCapability: string,
 ): SessionProjectionSnapshot {
   return mapPhoneQueue(cloneSessionProjectionSnapshot(snapshot), mediaCapability);
 }
 
 export function toPhoneProjectionEvent(
   event: SessionProjectionEvent,
-  mediaCapability?: string,
+  mediaCapability: string,
 ): SessionProjectionEvent {
   const cloned = cloneSessionProjectionEvent(event);
   if (cloned.type === "conversation") {
@@ -68,13 +74,13 @@ export function toPhoneProjectionEvent(
  */
 export function createPhoneProjection(
   source: SessionProjectionPort,
-  options: PhoneProjectionOptions = {},
+  options: PhoneProjectionOptions,
 ): PhoneProjectionPort {
-  const getMediaCapability = options.getMediaCapability ?? (() => undefined);
+  const getMediaCapability = options.getMediaCapability;
   return {
-    getSnapshot: () => toPhoneProjectionSnapshot(source.getSnapshot(), getMediaCapability()),
+    getSnapshot: () => toPhoneProjectionSnapshot(source.getSnapshot(), getMediaCapability() ?? ""),
     subscribe(listener) {
-      return source.subscribe((event) => listener(toPhoneProjectionEvent(event, getMediaCapability())));
+      return source.subscribe((event) => listener(toPhoneProjectionEvent(event, getMediaCapability() ?? "")));
     },
   };
 }

@@ -211,11 +211,12 @@ export function applyPhoneServerFrame(
 export function phoneImageUrl(
   namespace: "context" | "attachments",
   id: string,
-  mediaCapability?: string,
+  mediaCapability: string,
 ): string {
-  return mediaCapability
-    ? `/api/${namespace}/${mediaCapability}/${encodeURIComponent(id)}`
-    : `/api/${namespace}/${encodeURIComponent(id)}`;
+  if (!/^[0-9a-f]{64}$/.test(mediaCapability)) {
+    throw new Error("A current phone media capability is required.");
+  }
+  return `/api/${namespace}/${mediaCapability}/${encodeURIComponent(id)}`;
 }
 
 export function reconnectDelayMs(attempt: number): number {
@@ -336,7 +337,8 @@ function renderPhoneClient(
       const itemContainer = document.createElement("div");
       itemContainer.className = "phone-queue-item";
       const image = document.createElement("img");
-      image.src = phoneImageUrl("context", item.id, state.snapshot?.mediaCapability);
+      if (!state.snapshot?.mediaCapability) continue;
+      image.src = phoneImageUrl("context", item.id, state.snapshot.mediaCapability);
       image.alt = `Queued screenshot, ${item.width} by ${item.height}`;
       image.width = 160;
       image.height = Math.max(1, Math.round(160 * item.height / item.width));
@@ -388,7 +390,8 @@ function renderPhoneClient(
       const attachment = attachments.get(attachmentId);
       if (!attachment) continue;
       const image = document.createElement("img");
-      image.src = phoneImageUrl("attachments", attachment.id, state.snapshot?.mediaCapability);
+      if (!state.snapshot?.mediaCapability) continue;
+      image.src = phoneImageUrl("attachments", attachment.id, state.snapshot.mediaCapability);
       image.alt = `Sent screenshot, ${attachment.width} by ${attachment.height}`;
       image.width = 160;
       image.height = Math.max(1, Math.round(160 * attachment.height / attachment.width));

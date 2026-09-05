@@ -139,6 +139,7 @@ export interface PhoneGatewayOptions {
 
 export interface PhoneGatewayCommandRouter {
   execute(command: WorkspaceCommand, source: "desktop" | "phone"): Promise<CommandResult>;
+  quiesce?(scope: "phone" | "all"): Promise<void>;
 }
 
 export interface PhoneCommandFailureDiagnostic {
@@ -491,7 +492,6 @@ export class PhoneGateway {
   private readonly commandRouter: PhoneGatewayCommandRouter | null;
   private readonly onCommandError: (diagnostic: PhoneCommandFailureDiagnostic) => void;
   private readonly mediaCapabilityFactory: () => string;
-  private readonly bindMediaUrls: boolean;
   private server: GatewayHttpServer | null = null;
   private selectedAddress: string | null = null;
   private selectedPort: number | null = null;
@@ -543,7 +543,6 @@ export class PhoneGateway {
     });
     this.mediaCapabilityFactory = options.mediaCapabilityFactory ?? (() =>
       cryptoRandomBytes(MEDIA_CAPABILITY_BYTES).toString("hex"));
-    this.bindMediaUrls = Boolean(options.projection);
     this.projection = options.projection
       ? createPhoneProjection(options.projection, {
         getMediaCapability: () => this.mediaCapability ?? undefined,
@@ -615,6 +614,8 @@ export class PhoneGateway {
       this.invalidatePairingWork();
       this.pairing.revokeAll();
       this.pairingFailures.reset();
+      this.closePhoneClients();
+      await this.commandRouter?.quiesce?.("phone");
       if (this.startPromise) {
         await this.startPromise;
       }
@@ -1576,7 +1577,7 @@ export class PhoneGateway {
         : target.path === "/phone.css" && !target.hasQuery
           ? "phone.css"
           : null;
-    const mediaRoute = parseMediaRoute(target.path, target.hasQuery, this.bindMediaUrls);
+    const mediaRoute = parseMediaRoute(target.path, target.hasQuery, true);
     const isProtectedRoute = assetName !== null || mediaRoute !== null;
 
     if (!isProtectedRoute) {
@@ -1600,7 +1601,7 @@ export class PhoneGateway {
       return;
     }
 
-    if (this.bindMediaUrls && !constantTimeMediaCapabilityEqual(mediaRoute.capability, this.mediaCapability)) {
+    if (!constantTimeMediaCapabilityEqual(mediaRoute.capability, this.mediaCapability)) {
       responseBody(response, 404, "text/plain; charset=utf-8", "Not found.");
       return;
     }

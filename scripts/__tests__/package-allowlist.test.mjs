@@ -44,6 +44,25 @@ test("packaged contents accept the exact compiled runtime allowlist", () => {
   );
 });
 
+test("renderer assets must be hashed files referenced by the packaged index", () => {
+  const referenced = "/dist/assets/index-Ab_C12.js";
+  const listing = [...REQUIRED_ENTRIES, referenced, "/dist/assets/index-Unreferenced.css"].join("\n");
+  const errors = packageAllowlist.validatePackageContents(listing, {
+    packageJson: { main: "dist-electron/electron/main.js" },
+    rendererAssetPaths: [referenced],
+  });
+  assert.equal(errors.some((error) => error.includes(referenced)), false);
+  assert.ok(errors.some((error) => error.includes("/dist/assets/index-Unreferenced.css")));
+  assert.deepEqual(
+    packageAllowlist.rendererAssetsFromIndex('<script src="./assets/index-Ab_C12.js"></script>'),
+    [referenced],
+  );
+  assert.throws(
+    () => packageAllowlist.rendererAssetsFromIndex('<script src="./assets/dev.js"></script>'),
+    /unexpected asset/i,
+  );
+});
+
 test("manifest rejects app-owned malicious fixtures while allowing a runtime dependency test file", () => {
   const listing = [
     ...REQUIRED_ENTRIES,
@@ -51,8 +70,15 @@ test("manifest rejects app-owned malicious fixtures while allowing a runtime dep
     "/dist/test-helper.js",
     "/dist/foo.spec.mjs",
     "/dist/config.env",
+    "/dist/coverage/report.json",
+    "/dist/secret.json",
+    "/dist/dev.js",
     "/secret.txt",
     "/node_modules/pkg/test.js",
+    "/node_modules/pkg/.npmrc",
+    "/node_modules/pkg/credentials.json",
+    "/node_modules/pkg/private.key",
+    "/node_modules/pkg/coverage/report.json",
   ].join("\n");
 
   const errors = packageAllowlist.validatePackageContents(listing, {
@@ -65,7 +91,14 @@ test("manifest rejects app-owned malicious fixtures while allowing a runtime dep
     "/dist/test-helper.js",
     "/dist/foo.spec.mjs",
     "/dist/config.env",
+    "/dist/coverage/report.json",
+    "/dist/secret.json",
+    "/dist/dev.js",
     "/secret.txt",
+    "/node_modules/pkg/.npmrc",
+    "/node_modules/pkg/credentials.json",
+    "/node_modules/pkg/private.key",
+    "/node_modules/pkg/coverage/report.json",
   ]) {
     assert.ok(errors.some((error) => error.includes(fixture)), fixture);
   }

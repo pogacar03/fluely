@@ -279,6 +279,7 @@ async function createRealCommandRuntime(root, control) {
       capture: () => screenshots.capture(),
       delete: (id) => screenshots.delete(id),
       clear: () => screenshots.clear(),
+      cancelPending: () => screenshots.cancelPending(),
     },
     attachments,
     conversation,
@@ -291,6 +292,10 @@ async function createRealCommandRuntime(root, control) {
         await control.commandGate.promise;
       }
       return result;
+    },
+    quiesce: async (scope) => {
+      await router.quiesce(scope);
+      control.commandGate.resolve();
     },
   };
   const projection = new SessionProjectionStore({
@@ -558,6 +563,45 @@ test("a new session runtime starts empty and rejects old cookies and media IDs",
   }
 });
 
+test("disable quiesces a gated real phone capture before closing and prevents late persistence", { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "fluely-phone-capture-stop-"));
+  temporaryDirectories.push(root);
+  const control = { captureGate: deferred(), commandGate: deferred() };
+  const runtime = await createRealCommandRuntime(root, control);
+  let socket;
+  try {
+    const ready = await runtime.gateway.start();
+    const port = Number(new URL(ready.origin).port);
+    const cookie = await pair(runtime, port);
+    const phone = await openWebSocket(port, cookie, ready.origin);
+    socket = phone.socket;
+    await phone.nextFrame();
+    socket.send(JSON.stringify({
+      type: "command",
+      command: { type: "capture", requestId: "capture-stop-quiesce" },
+    }));
+    await waitFor(() => runtime.screenshots.getState().capturing === true);
+    await waitFor(() => [...runtime.gateway.phoneSessions.values()].some((session) => session.inFlight.has("capture-stop-quiesce")));
+
+    await Promise.race([
+      runtime.gateway.stop(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("gateway stop did not quiesce capture")), 2_000)),
+    ]);
+    assert.equal(runtime.screenshots.getState().capturing, false);
+    assert.deepEqual(runtime.screenshots.getState().items, []);
+    await assertPortCanBind(port);
+
+    control.captureGate.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(runtime.screenshots.getState().items, []);
+  } finally {
+    control.captureGate.resolve();
+    control.commandGate.resolve();
+    try { socket?.close(); } catch { /* test cleanup */ }
+    await disposeRealRuntime(runtime);
+  }
+});
+
 test("same storage paths and real command services clear active capture, streaming, and phone in-flight state on restart", { timeout: 30_000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "fluely-phone-real-restart-"));
   temporaryDirectories.push(root);
@@ -615,11 +659,10 @@ test("same storage paths and real command services clear active capture, streami
     assert.deepEqual(await readFile(oldScreenshotPath), PNG_BYTES);
     assert.deepEqual(await readFile(oldAttachmentPath), PNG_BYTES);
 
-    oldControl.commandGate.resolve();
-    oldRuntime.analysis.cancel();
-    await oldRuntime.router.whenIdle();
     await abandonRuntime(oldRuntime);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    const stoppedSnapshot = oldRuntime.projection.getSnapshot();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(oldRuntime.projection.getSnapshot(), stoppedSnapshot);
 
     const freshControl = {
       captureGate: deferred(),

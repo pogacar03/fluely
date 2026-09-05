@@ -635,3 +635,49 @@ test("terminal analysis callbacks racing start rejection produce one terminal wi
     }
   }
 });
+
+test("phone quiesce cancels an in-flight phone capture and releases queued desktop work", async () => {
+  const harness = await makeHarness({
+    provider: { stream: async function* () { yield "answer"; } },
+  });
+  let rejectCapture;
+  let captureStarted = false;
+  harness.screenshots.capture = () => new Promise((_, reject) => {
+    captureStarted = true;
+    rejectCapture = reject;
+  });
+  harness.screenshots.cancelPending = async () => {
+    rejectCapture?.(Object.assign(new Error("capture cancelled"), { code: "COMMAND_CANCELLED" }));
+  };
+
+  const phoneCapture = harness.router.execute({ type: "capture", requestId: "phone-capture-quiesce" }, "phone");
+  while (!captureStarted) await new Promise((resolve) => setImmediate(resolve));
+  const desktopClear = harness.router.execute({ type: "clear-queue", requestId: "desktop-clear-after-phone" }, "desktop");
+
+  await harness.router.quiesce("phone");
+  await assert.rejects(phoneCapture, (error) => error?.code === "COMMAND_CANCELLED");
+  await desktopClear;
+  assert.deepEqual(harness.screenshots.getState().items, []);
+});
+
+test("phone quiesce cancels phone-owned streaming but preserves desktop-owned streaming", async () => {
+  for (const source of ["phone", "desktop"]) {
+    const harness = await makeHarness({
+      provider: {
+        stream: async function* (_path, options) {
+          yield "partial";
+          await new Promise((resolve) => options.signal.addEventListener("abort", resolve, { once: true }));
+        },
+      },
+    });
+    await harness.router.execute({ type: "send", requestId: `${source}-stream-quiesce`, prompt: "Question" }, source);
+    while (harness.analysis.getState().status !== "running") await new Promise((resolve) => setImmediate(resolve));
+
+    await harness.router.quiesce("phone");
+    assert.equal(harness.analysis.getState().status, source === "phone" ? "cancelled" : "running", source);
+    if (source === "desktop") {
+      await harness.router.quiesce("all");
+      assert.equal(harness.analysis.getState().status, "cancelled");
+    }
+  }
+});

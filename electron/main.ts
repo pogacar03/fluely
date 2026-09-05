@@ -364,6 +364,7 @@ function getCommandRouter(settings: SettingsService): CommandRouter {
         capture: () => captureCurrentWindow(),
         delete: (id) => screenshots.delete(id),
         clear: () => screenshots.clear(),
+        cancelPending: () => screenshots.cancelPending(),
       },
       attachments: getAttachmentStore(),
       conversation: getConversationStore(),
@@ -650,6 +651,11 @@ if (acquireSingleInstance(applicationInstance, () => app.quit())) {
       await phoneGatewayLifecycle?.dispose();
     } catch {
       // Best-effort gateway shutdown must not prevent the app from quitting.
+    }
+    try {
+      await commandRouter?.quiesce("all");
+    } catch {
+      // Best-effort global quiescence must not prevent the app from quitting.
     }
     try {
       analysisService?.cancel();

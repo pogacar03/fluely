@@ -23,6 +23,7 @@ export interface CommandRouterScreenshotPort {
   capture(): Promise<ContextScreenshot>;
   delete(id: string): Promise<ScreenshotState>;
   clear(): Promise<ScreenshotState>;
+  cancelPending?(): Promise<void>;
 }
 
 export interface CommandRouterAttachmentPort {
@@ -78,7 +79,8 @@ export interface CommandRouterOptions {
 export type CommandRouterErrorCode =
   | "ANALYSIS_IN_PROGRESS"
   | "SCREENSHOT_NOT_FOUND"
-  | "ANALYSIS_FAILED";
+  | "ANALYSIS_FAILED"
+  | "COMMAND_CANCELLED";
 
 export interface CommandRouterError extends Error {
   code: CommandRouterErrorCode;
@@ -87,8 +89,19 @@ export interface CommandRouterError extends Error {
 
 interface ActiveRun {
   messageId: string;
+  source: "desktop" | "phone";
   providerSettled: Promise<void>;
   terminal: boolean;
+}
+
+interface CommandScope {
+  source: "desktop" | "phone";
+  generation: number;
+  globalGeneration: number;
+  started: boolean;
+  operation?: Promise<CommandResult>;
+  cancellation: Promise<never>;
+  cancel(error: CommandRouterError): void;
 }
 
 function createError(
@@ -122,6 +135,10 @@ export class CommandRouter {
   private readonly requestDeduper = createRequestIdDeduper<CommandResult>();
   private commandTail: Promise<void> = Promise.resolve();
   private activeRun: ActiveRun | null = null;
+  private activeCommand: CommandScope | null = null;
+  private readonly scopes = new Set<CommandScope>();
+  private phoneGeneration = 0;
+  private globalGeneration = 0;
 
   public constructor(options: CommandRouterOptions) {
     this.screenshots = options.screenshots;
@@ -131,12 +148,36 @@ export class CommandRouter {
     this.analysis.onStateChanged((event) => this.handleAnalysisEvent(event));
   }
 
-  public execute(command: WorkspaceCommand, _source: "desktop" | "phone"): Promise<CommandResult> {
+  public execute(command: WorkspaceCommand, source: "desktop" | "phone"): Promise<CommandResult> {
     return this.requestDeduper.run(
       command.requestId,
       JSON.stringify(command),
-      () => this.enqueue(() => this.executeOnce(command)),
+      () => this.executeScoped(command, source),
     );
+  }
+
+  public async quiesce(scope: "phone" | "all"): Promise<void> {
+    if (scope === "all") this.globalGeneration += 1;
+    else this.phoneGeneration += 1;
+    const targets = [...this.scopes].filter((item) => scope === "all" || item.source === "phone");
+    const cancellation = createError(
+      "COMMAND_CANCELLED",
+      "The command was cancelled because its session ended.",
+      "Start a new session and try again.",
+    );
+    for (const target of targets) target.cancel(cancellation);
+
+    const activeCommand = this.activeCommand;
+    if (activeCommand && (scope === "all" || activeCommand.source === "phone")) {
+      await this.screenshots.cancelPending?.();
+    }
+    const activeRun = this.activeRun;
+    if (activeRun && (scope === "all" || activeRun.source === "phone")) {
+      await this.analysis.cancel();
+      await this.analysis.whenIdle?.();
+      await activeRun.providerSettled;
+    }
+    await Promise.allSettled(targets.filter((target) => target.started).map((target) => target.operation));
   }
 
   public async whenIdle(): Promise<void> {
@@ -146,10 +187,11 @@ export class CommandRouter {
     await this.conversation.whenIdle?.();
   }
 
-  private async executeOnce(command: WorkspaceCommand): Promise<CommandResult> {
+  private async executeOnce(command: WorkspaceCommand, source: "desktop" | "phone", scope: CommandScope): Promise<CommandResult> {
     switch (command.type) {
       case "capture":
         await this.screenshots.capture();
+        this.assertCurrent(scope);
         return this.result();
       case "remove":
         return this.result(await this.screenshots.delete(command.screenshotId));
@@ -165,14 +207,15 @@ export class CommandRouter {
         await this.activeRun?.providerSettled;
         return this.result();
       case "send":
-        return this.send(command.prompt);
+        return this.send(command.prompt, source, scope);
       case "capture-and-send":
         await this.screenshots.capture();
-        return this.send(command.prompt);
+        this.assertCurrent(scope);
+        return this.send(command.prompt, source, scope);
     }
   }
 
-  private async send(prompt: string): Promise<CommandResult> {
+  private async send(prompt: string, source: "desktop" | "phone", scope: CommandScope): Promise<CommandResult> {
     this.ensureAnalysisAvailable();
     const queue = this.screenshots.getState();
     if (queue.items.length === 0) {
@@ -195,6 +238,7 @@ export class CommandRouter {
           );
         }
         materialized.push(await this.attachments.addFromScreenshot(screenshot, sourcePath));
+        this.assertCurrent(scope);
       }
     } catch (error) {
       await this.deleteMaterialized(materialized);
@@ -206,7 +250,8 @@ export class CommandRouter {
         normalizeContextPrompt(prompt),
         materialized,
       );
-      await this.startAnalysis(turn.assistant.id, {
+      this.assertCurrent(scope);
+      await this.startAnalysis(turn.assistant.id, source, {
         prompt: normalizeContextPrompt(prompt),
         screenshotIds: queue.items.map((item) => item.id),
         intent: "answer",
@@ -219,10 +264,10 @@ export class CommandRouter {
     }
   }
 
-  private async startAnalysis(messageId: string, request: AnalysisRequest): Promise<void> {
+  private async startAnalysis(messageId: string, source: "desktop" | "phone", request: AnalysisRequest): Promise<void> {
     let settle!: () => void;
     const providerSettled = new Promise<void>((resolve) => { settle = resolve; });
-    const activeRun: ActiveRun = { messageId, providerSettled, terminal: false };
+    const activeRun: ActiveRun = { messageId, source, providerSettled, terminal: false };
     this.activeRun = activeRun;
     try {
       await this.analysis.start(request);
@@ -348,6 +393,47 @@ export class CommandRouter {
       conversation: this.conversation.snapshot(),
       analysis: this.analysis.getState(),
     };
+  }
+
+  private executeScoped(command: WorkspaceCommand, source: "desktop" | "phone"): Promise<CommandResult> {
+    let cancel!: (error: CommandRouterError) => void;
+    const cancellation = new Promise<never>((_, reject) => { cancel = reject; });
+    const commandScope: CommandScope = {
+      source,
+      generation: source === "phone" ? this.phoneGeneration : this.globalGeneration,
+      globalGeneration: this.globalGeneration,
+      started: false,
+      cancellation,
+      cancel,
+    };
+    this.scopes.add(commandScope);
+    const operation = this.enqueue(async () => {
+      this.assertCurrent(commandScope);
+      commandScope.started = true;
+      this.activeCommand = commandScope;
+      try {
+        return await this.executeOnce(command, source, commandScope);
+      } finally {
+        if (this.activeCommand === commandScope) this.activeCommand = null;
+      }
+    });
+    commandScope.operation = operation;
+    const exposed = Promise.race([operation, cancellation]);
+    void exposed.finally(() => this.scopes.delete(commandScope)).catch(() => undefined);
+    return exposed;
+  }
+
+  private assertCurrent(scope: CommandScope): void {
+    const current = scope.globalGeneration === this.globalGeneration && (
+      scope.source !== "phone" || scope.generation === this.phoneGeneration
+    );
+    if (!current) {
+      throw createError(
+        "COMMAND_CANCELLED",
+        "The command was cancelled because its session ended.",
+        "Start a new session and try again.",
+      );
+    }
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {

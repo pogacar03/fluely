@@ -9,6 +9,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const bundlePath = path.resolve(__dirname, "../..", "dist-phone/phone.js");
 const CONTEXT_ID = "11111111-1111-4111-8111-111111111111";
 const ATTACHMENT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const MEDIA_CAPABILITY = "9".repeat(64);
 
 function makeFakeTimer() {
   const entries = [];
@@ -121,6 +122,7 @@ function snapshotWithUntrustedText(text) {
     revision: 1,
     payload: {
       revision: 1,
+      mediaCapability: MEDIA_CAPABILITY,
       conversation: {
         sessionId: "session-bundle",
         revision: 1,
@@ -148,7 +150,7 @@ function snapshotWithUntrustedText(text) {
         width: 1920,
         height: 1080,
         mimeType: "image/png",
-        previewUrl: "/api/context/" + CONTEXT_ID,
+        previewUrl: `/api/context/${MEDIA_CAPABILITY}/${CONTEXT_ID}`,
       }],
     },
   };
@@ -170,7 +172,7 @@ test("built phone bundle renders untrusted projection text as text and keeps med
     assert.equal(root.textContent.includes(maliciousText), true);
     assert.deepEqual(
       [...root.querySelectorAll("img")].map((image) => image.getAttribute("src")),
-      ["/api/context/" + CONTEXT_ID, "/api/attachments/" + ATTACHMENT_ID],
+      [`/api/context/${MEDIA_CAPABILITY}/${CONTEXT_ID}`, `/api/attachments/${MEDIA_CAPABILITY}/${ATTACHMENT_ID}`],
     );
     assert.equal(dom.window.pwned, undefined);
   } finally {
@@ -189,8 +191,8 @@ test("built phone bundle renders the initial canonical snapshot and applies an i
     const root = dom.window.document.getElementById("phone-app");
     assert.equal(root.querySelectorAll(".phone-message").length, 1);
     assert.equal(root.querySelector(".phone-message-text")?.textContent, "initial user text");
-    assert.equal(root.querySelector("img[src^=\"/api/context/\"]")?.getAttribute("src"), "/api/context/" + CONTEXT_ID);
-    assert.equal(root.querySelector("img[src^=\"/api/attachments/\"]")?.getAttribute("src"), "/api/attachments/" + ATTACHMENT_ID);
+    assert.equal(root.querySelector("img[src^=\"/api/context/\"]")?.getAttribute("src"), `/api/context/${MEDIA_CAPABILITY}/${CONTEXT_ID}`);
+    assert.equal(root.querySelector("img[src^=\"/api/attachments/\"]")?.getAttribute("src"), `/api/attachments/${MEDIA_CAPABILITY}/${ATTACHMENT_ID}`);
 
     instances[0].emit("message", {
       data: JSON.stringify({

@@ -19,6 +19,7 @@ const [{ cloneSessionProjectionSnapshot }, phoneProjectionModule] = await Promis
 
 const QUEUE_ID = "11111111-1111-4111-8111-111111111111";
 const ATTACHMENT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const MEDIA_CAPABILITY = "a".repeat(64);
 
 function canonicalSnapshot() {
   return {
@@ -62,16 +63,19 @@ test("phone projection preserves canonical conversation metadata and only rewrit
   assert.equal(typeof phoneProjectionModule.phoneAttachmentUrl, "function");
 
   const canonical = canonicalSnapshot();
-  const phone = phoneProjectionModule.toPhoneProjectionSnapshot(canonical);
+  const phone = phoneProjectionModule.toPhoneProjectionSnapshot(canonical, MEDIA_CAPABILITY);
   const canonicalComparable = cloneSessionProjectionSnapshot(canonical);
   const phoneComparable = structuredClone(phone);
+  delete phoneComparable.mediaCapability;
   phoneComparable.queue = phoneComparable.queue.map(({ previewUrl, ...item }) => item);
   canonicalComparable.queue = canonicalComparable.queue.map(({ previewUrl, ...item }) => item);
 
   assert.deepEqual(phoneComparable, canonicalComparable);
-  assert.equal(phone.queue[0].previewUrl, `/api/context/${QUEUE_ID}`);
-  assert.equal(phoneProjectionModule.phoneContextUrl(QUEUE_ID), `/api/context/${QUEUE_ID}`);
-  assert.equal(phoneProjectionModule.phoneAttachmentUrl(ATTACHMENT_ID), `/api/attachments/${ATTACHMENT_ID}`);
+  assert.equal(phone.queue[0].previewUrl, `/api/context/${MEDIA_CAPABILITY}/${QUEUE_ID}`);
+  assert.equal(phoneProjectionModule.phoneContextUrl(QUEUE_ID, MEDIA_CAPABILITY), `/api/context/${MEDIA_CAPABILITY}/${QUEUE_ID}`);
+  assert.equal(phoneProjectionModule.phoneAttachmentUrl(ATTACHMENT_ID, MEDIA_CAPABILITY), `/api/attachments/${MEDIA_CAPABILITY}/${ATTACHMENT_ID}`);
+  assert.throws(() => phoneProjectionModule.phoneContextUrl(QUEUE_ID), /capability/i);
+  assert.throws(() => phoneProjectionModule.phoneAttachmentUrl(ATTACHMENT_ID, "bad"), /capability/i);
   assert.equal(phone.queue[0].previewUrl.includes("/Users/"), false);
 });
 
@@ -86,7 +90,9 @@ test("phone projection subscription preserves projection revisions and returns i
       return () => listeners.delete(listener);
     },
   };
-  const phone = phoneProjectionModule.createPhoneProjection(source);
+  const phone = phoneProjectionModule.createPhoneProjection(source, {
+    getMediaCapability: () => MEDIA_CAPABILITY,
+  });
   const events = [];
   phone.subscribe((event) => events.push(event));
 
@@ -98,7 +104,18 @@ test("phone projection subscription preserves projection revisions and returns i
   assert.equal(events.length, 1);
   assert.equal(events[0].revision, 5);
   assert.equal(events[0].type, "queue-changed");
-  assert.equal(events[0].queue[0].previewUrl, `/api/context/${QUEUE_ID}`);
+  assert.equal(events[0].queue[0].previewUrl, `/api/context/${MEDIA_CAPABILITY}/${QUEUE_ID}`);
   events[0].queue[0].id = "mutated";
   assert.equal(queue[0].id, QUEUE_ID);
+});
+
+test("phone projection fails closed when the current session capability is unavailable", () => {
+  const source = {
+    getSnapshot: () => ({ ...canonicalSnapshot(), queue: [] }),
+    subscribe: () => () => undefined,
+  };
+  const phone = phoneProjectionModule.createPhoneProjection(source, {
+    getMediaCapability: () => undefined,
+  });
+  assert.throws(() => phone.getSnapshot(), /capability/i);
 });

@@ -143,6 +143,26 @@ test("ScreenshotService tracks a timed-out source request until it settles", asy
   assert.equal(sourceCalls, 2);
 });
 
+test("ScreenshotService cancellation is bounded and a late native source cannot persist", async () => {
+  const directory = await makeDirectory();
+  let releaseSources;
+  const adapters = makeAdapters({
+    getSources: () => new Promise((resolve) => { releaseSources = resolve; }),
+  });
+  const service = makeService(directory, adapters, { sourceTimeoutMs: 10_000 });
+  const capture = service.capture();
+  while (!releaseSources) await new Promise((resolve) => setImmediate(resolve));
+
+  await service.cancelPending();
+  await assert.rejects(capture, (error) => error?.code === "SCREEN_CAPTURE_FAILED");
+  assert.equal(service.getState().capturing, false);
+  assert.deepEqual(service.getState().items, []);
+
+  releaseSources([{ display_id: "42", thumbnail: makeThumbnail("late") }]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(await readdir(directory), []);
+});
+
 test("ScreenshotService returns an actionable first-use permission timeout", async () => {
   const directory = await makeDirectory();
   let releaseSources;

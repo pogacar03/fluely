@@ -68,15 +68,27 @@ attachment namespace. The package check requires the compiled Electron,
 renderer, and phone entrypoints and rejects repository development sources,
 maps, tests, and environment files inside `app.asar`.
 
-The 2026-09-06 B4 fix round also verifies that `/`, `/phone.js`, and
+The 2026-09-06 B4 hardening round also verifies that `/`, `/phone.js`, and
 `/phone.css` remain cookie-authenticated static assets without a media
-capability, while context/attachment media URLs remain session-capability
-bound. The real backpressure test proves that an authorized, non-revoked
-cookie can reconnect after the gateway closes the overloaded socket. This fix
-round passed the focused acceptance/capability/allowlist group 62/62, the
-complete B1-B4 focused command 219/219, and `npm test` 369/369; typecheck,
-`build:phone`, and `build` also passed. Directory packaging and packaged smoke
-are intentionally left to the independent verifier for this round.
+capability, while every context/attachment media request requires the current
+session capability even when no projection adapter is configured. The real
+backpressure test proves that an authorized, non-revoked cookie can reconnect
+after the gateway closes the overloaded socket. Phone disable quiesces and
+waits for phone-origin capture/analysis/queued work while preserving unrelated
+desktop-origin analysis; app quit applies global quiescence. The package policy
+allows only its explicit compiled application manifest and hashed renderer
+assets referenced by `dist/index.html`. Runtime dependency package roots may
+retain their own test files, but global secret, credential, key, map, env,
+`.npmrc`, and coverage patterns remain denied.
+
+TDD evidence for this round was RED `70/76`, followed by GREEN `106/106` for
+the directly related focused group. A final missing-capability projection test
+was RED `2/3` then GREEN `3/3`. The built phone-bundle regression passed `4/4`;
+the exact complete B1-B4 command above passed `225/225`; and `npm test`
+passed `375/375`. `npm run typecheck`, `npm run build:phone`, `npm run build`,
+and `git diff --check` also passed. `npm run package:dir`, packaged smoke, and
+real app.asar/allowlist inspection are intentionally left to the independent
+verifier for this round.
 
 `smoke:packaged` may launch only the packaged executable it discovers, with a
 new temporary user-data directory. It must survive the smoke interval, then
@@ -86,10 +98,10 @@ persistent application launch is part of Task 4.
 ## Security and lifecycle assertions
 
 - Unauthenticated, stale-cookie, forged Host/Origin, traversal, wrong-media-namespace, malformed-frame, oversized-frame, prompt-limit, attachment-limit, rate-limit, duplicate-ID, and backpressure paths fail closed with bounded safe responses.
-- Pairing secrets are one-use and expire after two minutes. Re-pairing closes the old phone session; disabling and quitting close listeners and sockets.
+- Pairing secrets are one-use and expire after two minutes. Re-pairing closes the old phone session; disabling and quitting close listeners and sockets. Disable returns only after phone-origin router work is quiescent; quit globally quiesces shared router work.
 - Phone errors and default diagnostics contain stable public fields only; no local path, pairing secret, cookie, prompt, or provider detail is returned to the phone or renderer.
 - Desktop and phone consume one canonical revisioned projection. Capture, send, remove, clear, cancel, reconnect, and streaming are reflected by the same queue/conversation state.
-- Restart creates a fresh session. Old cookies and old context/attachment IDs do not authorize or resolve in the new runtime.
+- Restart creates a fresh session. Old cookies and old context/attachment capabilities/IDs do not authorize or resolve in the new runtime.
 
 ## Final physical-phone matrix
 

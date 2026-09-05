@@ -29,11 +29,41 @@ const DIST_PHONE_FILES = new Set([
   "/dist-phone/phone.css",
   "/dist-phone/phone.js",
 ]);
+const APP_RUNTIME_FILES = new Set([
+  "/assets/icon.svg",
+  "/dist/index.html",
+  "/dist-phone/index.html", "/dist-phone/phone.css", "/dist-phone/phone.js",
+  "/dist-electron/electron/main.js", "/dist-electron/electron/phone/phone.js",
+  "/dist-electron/electron/preload.js", "/dist-electron/electron/preloadBridge.js",
+  "/dist-electron/electron/windowConfig.js",
+  ...[
+    "AnalysisService", "AttachmentStore", "CapturePrivacyController", "CodexCliService",
+    "CommandRouter", "ConversationStore", "PhoneGateway", "ScreenshotService",
+    "SessionProjectionStore", "SettingsService", "ShortcutManager", "application-bootstrap",
+    "application-instance", "capture-workflow", "codex-run-diagnostics", "context-media",
+    "ipcHandlers", "network-address", "pairing-rate-limiter", "pairing-session",
+    "phone-gateway-lifecycle", "phone-projection", "screenshot-session", "secure-media-file",
+    "session-media-protocol", "settings-core", "shortcut-command-routing", "window-lifecycle",
+  ].map((name) => `/dist-electron/electron/services/${name}.js`),
+  ...[
+    "App", "conversation-hydration", "workspace-navigation",
+  ].map((name) => `/dist-electron/src/renderer/${name}.js`),
+  ...[
+    "ContextQueue", "Conversation", "PhoneConnectionPanel", "SetupView", "WorkView",
+  ].map((name) => `/dist-electron/src/renderer/components/${name}.js`),
+  ...[
+    "context-queue", "conversation", "ipc", "phone-gateway", "settings-actions",
+    "workspace-state", "workspace-view",
+  ].map((name) => `/dist-electron/src/shared/${name}.js`),
+]);
 const APP_OWNED_PREFIXES = ["/assets", "/dist", "/dist-electron", "/dist-phone"];
-const RUNTIME_FILE_EXTENSIONS = /\.(?:css|html|ico|js|json|mjs|node|png|svg|wasm|webp|woff2)$/i;
 const GLOBAL_SENSITIVE_PATTERNS = [
   /\.map$/i,
   /(?:^|\/)\.env(?:\..*)?$/i,
+  /(?:^|\/)\.npmrc$/i,
+  /\.(?:pem|key)$/i,
+  /(?:^|\/)(?:credentials|secret)[^/]*$/i,
+  /(?:^|\/)coverage(?:\/|$)/i,
 ];
 const APP_SENSITIVE_SEGMENTS = new Set([
   "__tests__",
@@ -99,7 +129,7 @@ function sensitiveAppOwnedReason(path) {
   return null;
 }
 
-function validateEntry(entry, allPaths, runtimePackageRoots, errors, sourceLabel = "") {
+function validateEntry(entry, allPaths, runtimePackageRoots, rendererAssetPaths, errors, sourceLabel = "") {
   const path = entry.path;
   if (entry.symlink) {
     errors.push(`symlink is not allowed in packaged contents: ${sourceLabel}${path}`);
@@ -124,17 +154,9 @@ function validateEntry(entry, allPaths, runtimePackageRoots, errors, sourceLabel
   const directory = isDirectory(path, allPaths);
   if (appOwned) {
     if (ALLOWED_ROOT_ENTRIES.has(path) || path === "/dist-phone" || path === "/package.json") return;
-    if (path.startsWith("/assets/")) {
-      errors.push(`package manifest rejects app-owned asset: ${sourceLabel}${path}`);
-      return;
-    }
-    if (path.startsWith("/dist-phone/") && !DIST_PHONE_FILES.has(path)) {
-      errors.push(`package manifest rejects phone runtime path: ${sourceLabel}${path}`);
-      return;
-    }
-    if (!directory && !RUNTIME_FILE_EXTENSIONS.test(path)) {
-      errors.push(`package manifest rejects app-owned runtime extension: ${sourceLabel}${path}`);
-    }
+    if (directory && [...APP_RUNTIME_FILES, ...rendererAssetPaths].some((candidate) => candidate.startsWith(`${path}/`))) return;
+    if (APP_RUNTIME_FILES.has(path) || rendererAssetPaths.has(path)) return;
+    errors.push(`package manifest rejects undeclared app-owned path: ${sourceLabel}${path}`);
     return;
   }
 
@@ -146,8 +168,9 @@ function validateEntry(entry, allPaths, runtimePackageRoots, errors, sourceLabel
 /** Validate the asar listing and an optional app.asar.unpacked listing. */
 export function validatePackageContents(
   listing,
-  { packageJson, runtimePackageRoots = [], unpackedListing = [] } = {},
+  { packageJson, runtimePackageRoots = [], unpackedListing = [], rendererAssetPaths = [] } = {},
 ) {
+  const allowedRendererAssets = new Set(rendererAssetPaths);
   const parsed = parseListing(listing);
   const unpacked = parseListing(unpackedListing).map((entry) => ({
     ...entry,
@@ -173,13 +196,25 @@ export function validatePackageContents(
     errors.push("package.json main must point to /dist-electron/electron/main.js");
   }
 
-  for (const entry of asarEntries) validateEntry(entry, paths, runtimePackageRoots, errors);
+  for (const entry of asarEntries) validateEntry(entry, paths, runtimePackageRoots, allowedRendererAssets, errors);
   const unpackedPaths = unpacked.filter((entry) => entry.path).map((entry) => entry.path);
   for (const entry of unpacked.filter((candidate) => candidate.path)) {
-    validateEntry(entry, unpackedPaths, runtimePackageRoots, errors, "app.asar.unpacked");
+    validateEntry(entry, unpackedPaths, runtimePackageRoots, allowedRendererAssets, errors, "app.asar.unpacked");
   }
 
   return [...new Set(errors)];
+}
+
+export function rendererAssetsFromIndex(indexHtml) {
+  const assets = new Set();
+  for (const match of String(indexHtml ?? "").matchAll(/(?:src|href)=["']\.\/assets\/([^"']+)["']/g)) {
+    if (!/^index-[A-Za-z0-9_-]+\.(?:css|js)$/.test(match[1])) {
+      throw new Error(`renderer index references an unexpected asset: ${match[1]}`);
+    }
+    assets.add(`/dist/assets/${match[1]}`);
+  }
+  if (assets.size === 0) throw new Error("renderer index does not reference compiled assets.");
+  return [...assets];
 }
 
 function readPackageJson() {
@@ -293,10 +328,19 @@ export function runPackageAllowlistCheck() {
   }
 
   const packageJson = readPackageJson();
+  const rendererIndex = spawnSync(asarCommand, ["extract-file", asarPath, "dist/index.html"], { encoding: "utf8" });
+  let rendererAssetPaths = [];
+  try {
+    if (rendererIndex.status !== 0) throw new Error("renderer index could not be inspected.");
+    rendererAssetPaths = rendererAssetsFromIndex(rendererIndex.stdout);
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : "renderer index could not be inspected.");
+  }
   errors.push(...validatePackageContents(listing.stdout, {
     packageJson,
     runtimePackageRoots: getRuntimePackageRoots(packageJson, readPackageLock()),
     unpackedListing,
+    rendererAssetPaths,
   }));
   return { errors: [...new Set(errors)], asarPath };
 }
