@@ -97,7 +97,7 @@ export interface WorkspaceActionState {
 export interface CanonicalWorkspaceBusyInput {
   capturing?: boolean;
   conversation?: ConversationSnapshot | null;
-  analysisStatus?: AnalysisStatus | null;
+  localPending?: boolean;
 }
 
 export interface CanonicalWorkspaceBusyState {
@@ -110,20 +110,18 @@ export interface CanonicalWorkspaceBusyState {
 export function getCanonicalWorkspaceBusyState({
   capturing = false,
   conversation,
-  analysisStatus,
+  localPending = false,
 }: CanonicalWorkspaceBusyInput): CanonicalWorkspaceBusyState {
   const activeMessage = conversation?.activeMessageId
     ? conversation.messages.find((message) => message.id === conversation.activeMessageId)
     : undefined;
-  const isRunning =
-    analysisStatus === "running" ||
-    activeMessage?.status === "pending" ||
+  const isRunning = activeMessage?.status === "pending" ||
     activeMessage?.status === "streaming";
   const isCapturing = capturing === true;
   return {
     isCapturing,
     isRunning,
-    isBusy: isCapturing || isRunning,
+    isBusy: isCapturing || isRunning || localPending,
   };
 }
 
@@ -135,20 +133,20 @@ export function getWorkspaceActionState(
   capturing = false,
   conversation?: ConversationSnapshot | null,
 ): WorkspaceActionState {
+  const isRunning = status === "running";
   const canonical = getCanonicalWorkspaceBusyState({
     capturing,
     conversation,
-    analysisStatus: status,
+    localPending: isRunning || commandBusy,
   });
-  const isRunning = canonical.isRunning;
-  const isBusy = commandBusy || canonical.isBusy;
+  const canCancel = (isRunning || canonical.isRunning) && !commandBusy;
   return {
-    isRunning,
-    isBusy,
-    canCapture: !isBusy,
-    canSendImages: !isBusy && queueCount > 0,
-    canCaptureAndSend: !isBusy,
-    canCancel: isRunning && !commandBusy,
+    isRunning: isRunning || canonical.isRunning,
+    isBusy: canonical.isBusy,
+    canCapture: !canonical.isBusy,
+    canSendImages: !canonical.isBusy && queueCount > 0,
+    canCaptureAndSend: !canonical.isBusy,
+    canCancel,
     captureLabel: "Capture",
     sendImagesLabel: "Send images",
     captureAndSendLabel: "Capture & ask",

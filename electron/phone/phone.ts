@@ -269,10 +269,11 @@ export function getPhoneActionState(state: PhoneClientState): PhoneActionState {
   const canonical = getCanonicalWorkspaceBusyState({
     capturing: state.snapshot?.capturing,
     conversation: state.snapshot?.conversation,
+    localPending: Boolean(state.commandPending),
   });
   const isRunning = canonical.isRunning;
   const isCapturing = canonical.isCapturing;
-  const isBusy = Boolean(state.commandPending) || canonical.isBusy;
+  const isBusy = canonical.isBusy;
   const connected = state.connection === "connected";
   const queueCount = state.snapshot?.queue.length ?? 0;
   return {

@@ -88,7 +88,7 @@ test("getAnalysisActionState disables asks while running and enables cancel", ()
   assert.equal(workspaceState.getAnalysisActionState("completed", 1).canAskQueue, true);
 });
 
-test("canonical workspace busy state covers capture, pending, streaming, and restored idle", () => {
+test("canonical workspace busy state covers capture, pending, streaming, local pending, and restored idle", () => {
   const conversation = (status) => ({
     sessionId: "session-busy",
     revision: 1,
@@ -120,6 +120,12 @@ test("canonical workspace busy state covers capture, pending, streaming, and res
   assert.deepEqual(workspaceState.getCanonicalWorkspaceBusyState({
     capturing: false,
     conversation: conversation("completed"),
+    localPending: true,
+  }), { isCapturing: false, isRunning: false, isBusy: true });
+  assert.deepEqual(workspaceState.getCanonicalWorkspaceBusyState({
+    capturing: false,
+    conversation: conversation("completed"),
+    localPending: false,
   }), { isCapturing: false, isRunning: false, isBusy: false });
 });
 
@@ -138,6 +144,7 @@ test("workspace action state exposes separate capture/send actions and suppresse
   });
 
   const running = workspaceState.getWorkspaceActionState("running", 2, false, false);
+  assert.equal(running.isBusy, true);
   assert.equal(running.canCapture, false);
   assert.equal(running.canSendImages, false);
   assert.equal(running.canCaptureAndSend, false);

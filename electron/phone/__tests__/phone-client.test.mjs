@@ -6,11 +6,15 @@ import { JSDOM } from "jsdom";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const modulePath = path.resolve(__dirname, "../../../dist-electron/electron/phone/phone.js");
+const workspaceStatePath = path.resolve(__dirname, "../../../dist-electron/src/shared/workspace-state.js");
 let phoneClientModule;
+let workspaceStateModule;
 try {
   phoneClientModule = await import(pathToFileURL(modulePath).href);
+  workspaceStateModule = await import(pathToFileURL(workspaceStatePath).href);
 } catch {
   phoneClientModule = {};
+  workspaceStateModule = {};
 }
 
 const CONTEXT_ID = "11111111-1111-4111-8111-111111111111";
@@ -507,6 +511,39 @@ function controlSnapshot({ queued = true, running = false, capturing = false } =
     }] : [],
   };
 }
+
+test("phone and desktop share canonical busy inputs and the same localPending contract", () => {
+  for (const snapshot of [
+    controlSnapshot({ capturing: true }),
+    controlSnapshot({ running: true }),
+    controlSnapshot({ capturing: false, running: false }),
+  ]) {
+    const shared = workspaceStateModule.getCanonicalWorkspaceBusyState({
+      capturing: snapshot.capturing,
+      conversation: snapshot.conversation,
+      localPending: false,
+    });
+    const phone = phoneClientModule.getPhoneActionState({
+      connection: "connected",
+      snapshot,
+    });
+    assert.equal(phone.isBusy, shared.isBusy);
+  }
+
+  const snapshot = controlSnapshot({ capturing: false, running: false });
+  const sharedLocalPending = workspaceStateModule.getCanonicalWorkspaceBusyState({
+    capturing: snapshot.capturing,
+    conversation: snapshot.conversation,
+    localPending: true,
+  });
+  const phoneLocalPending = phoneClientModule.getPhoneActionState({
+    connection: "connected",
+    snapshot,
+    commandPending: { requestId: "phone-local-pending", type: "capture" },
+  });
+  assert.equal(sharedLocalPending.isBusy, true);
+  assert.equal(phoneLocalPending.isBusy, sharedLocalPending.isBusy);
+});
 
 test("phone DOM controls send every workspace command, mirror canonical busy state, and keep ack state out of the conversation", () => {
   const dom = new JSDOM("<div id=\"phone-app\"></div>", { url: "http://phone.test/" });
