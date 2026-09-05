@@ -43,3 +43,59 @@ test("packaged contents accept the exact compiled runtime allowlist", () => {
     [],
   );
 });
+
+test("manifest rejects app-owned malicious fixtures while allowing a runtime dependency test file", () => {
+  const listing = [
+    ...REQUIRED_ENTRIES,
+    "/dist/__tests__/leaked.mjs",
+    "/dist/test-helper.js",
+    "/dist/foo.spec.mjs",
+    "/dist/config.env",
+    "/secret.txt",
+    "/node_modules/pkg/test.js",
+  ].join("\n");
+
+  const errors = packageAllowlist.validatePackageContents(listing, {
+    packageJson: { main: "dist-electron/electron/main.js" },
+    runtimePackageRoots: ["/node_modules/pkg"],
+  });
+
+  for (const fixture of [
+    "/dist/__tests__/leaked.mjs",
+    "/dist/test-helper.js",
+    "/dist/foo.spec.mjs",
+    "/dist/config.env",
+    "/secret.txt",
+  ]) {
+    assert.ok(errors.some((error) => error.includes(fixture)), fixture);
+  }
+  assert.equal(errors.some((error) => error.includes("/node_modules/pkg/test.js")), false);
+});
+
+test("manifest rejects unknown dependencies, unsafe paths, and unpacked sensitive entries", () => {
+  const errors = packageAllowlist.validatePackageContents([
+    ...REQUIRED_ENTRIES,
+    "/node_modules/unknown/index.js",
+    "/dist/../secret.txt",
+    "/dist\\evil.js",
+  ].join("\n"), {
+    packageJson: { main: "dist-electron/electron/main.js" },
+    runtimePackageRoots: ["/node_modules/pkg"],
+    unpackedListing: ["/app.asar.unpacked/secret.txt", "SYMLINK:/app.asar.unpacked/link.js"],
+  });
+
+  assert.ok(errors.some((error) => error.includes("/node_modules/unknown/index.js")));
+  assert.ok(errors.some((error) => error.includes("unsafe package path")));
+  assert.ok(errors.some((error) => error.includes("app.asar.unpacked/secret.txt")));
+  assert.ok(errors.some((error) => error.includes("symlink")));
+});
+
+test("asar discovery requires exactly one candidate", () => {
+  assert.equal(typeof packageAllowlist.findAsarPath, "function");
+  assert.equal(packageAllowlist.findAsarPath(["/release/Fluely.app/app.asar"]), "/release/Fluely.app/app.asar");
+  assert.throws(() => packageAllowlist.findAsarPath([]), /exactly one app\.asar/);
+  assert.throws(() => packageAllowlist.findAsarPath([
+    "/release/one/app.asar",
+    "/release/two/app.asar",
+  ]), /exactly one app\.asar/);
+});

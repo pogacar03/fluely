@@ -140,6 +140,15 @@ npm run package:dir
 
 The current package target is an unsigned macOS Apple Silicon directory build. Public release signing, final artwork, and the next screenshot/provider milestone are still ahead.
 
+The phone companion's copyable automated acceptance command, security/lifecycle
+matrix, packaging policy, and final physical-phone checklist live in
+[`docs/superpowers/verification/2026-08-31-phone-companion-acceptance.md`](docs/superpowers/verification/2026-08-31-phone-companion-acceptance.md).
+The local automated B4 fix gates cover real HTTP/WebSocket pairing, session-bound
+media URLs, restart clearing, static phone assets, reconnect, and the shared
+desktop/phone canonical projection. The final physical-phone matrix remains
+pending the dedicated user launch; this implementation task does not leave
+Fluely running.
+
 ## Scope guardrails
 
 The MVP deliberately does not include:

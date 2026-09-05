@@ -283,17 +283,21 @@ test("real components stream canonical snapshots/events over PhoneGateway HTTP+W
         state.snapshot.conversation.messages.some((message) => message.id === turn.assistant.id);
     });
     const initial = phoneClient.getState();
-    assert.equal(initial.snapshot.queue[0].previewUrl, "/api/context/" + SCREENSHOT_ID);
+    const mediaCapability = initial.snapshot.mediaCapability;
+    assert.match(mediaCapability, /^[0-9a-f]{64}$/);
+    const contextUrl = "/api/context/" + mediaCapability + "/" + SCREENSHOT_ID;
+    const attachmentUrl = "/api/attachments/" + mediaCapability + "/" + ATTACHMENT_ID;
+    assert.equal(initial.snapshot.queue[0].previewUrl, contextUrl);
     assert.equal(
       initial.snapshot.conversation.messages.some((message) => message.text === "Question from the desktop"),
       true,
     );
     assert.equal(
-      phoneRoot.querySelector('img[src="/api/context/' + SCREENSHOT_ID + '"]') !== null,
+      phoneRoot.querySelector('img[src="' + contextUrl + '"]') !== null,
       true,
     );
     assert.equal(
-      phoneRoot.querySelector('img[src="/api/attachments/' + ATTACHMENT_ID + '"]') !== null,
+      phoneRoot.querySelector('img[src="' + attachmentUrl + '"]') !== null,
       true,
     );
 
@@ -315,12 +319,12 @@ test("real components stream canonical snapshots/events over PhoneGateway HTTP+W
 
     const contextResponse = await requestOnce(
       port,
-      "/api/context/" + SCREENSHOT_ID,
+      contextUrl,
       { Host: advertisedHost, Cookie: cookieHeader },
     );
     const attachmentResponse = await requestOnce(
       port,
-      "/api/attachments/" + ATTACHMENT_ID,
+      attachmentUrl,
       { Host: advertisedHost, Cookie: cookieHeader },
     );
     assert.equal(contextResponse.statusCode, 200);

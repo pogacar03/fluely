@@ -1,5 +1,5 @@
 import { createServer as createHttpServer } from "node:http";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes as cryptoRandomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { networkInterfaces } from "node:os";
@@ -63,6 +63,8 @@ const BIND_HOST = "0.0.0.0";
 const FALLBACK_PORT = 0;
 const SESSION_COOKIE = "fluely_phone_session";
 const OPAQUE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MEDIA_CAPABILITY_PATTERN = /^[0-9a-f]{64}$/i;
+const MEDIA_CAPABILITY_BYTES = 32;
 const PHONE_ASSET_DIRECTORY = join(__dirname, "../../../dist-phone");
 const SECURITY_HEADERS = {
   "Content-Security-Policy": "default-src 'none'; base-uri 'none'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; img-src 'self' data:; script-src 'self'; style-src 'self'",
@@ -132,6 +134,7 @@ export interface PhoneGatewayOptions {
   readMediaFile?: PhoneGatewayFileReader;
   commandRouter?: PhoneGatewayCommandRouter;
   onCommandError?: (diagnostic: PhoneCommandFailureDiagnostic) => void;
+  mediaCapabilityFactory?: () => string;
 }
 
 export interface PhoneGatewayCommandRouter {
@@ -316,8 +319,8 @@ function responseBytes(
 }
 
 type PhoneMediaRoute =
-  | { namespace: "context"; id: string }
-  | { namespace: "attachments"; id: string };
+  | { namespace: "context"; id: string; capability?: string }
+  | { namespace: "attachments"; id: string; capability?: string };
 
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/;
 const ENCODED_SEPARATOR_PATTERN = /%(?:2f|5c)/i;
@@ -361,7 +364,7 @@ export function parseRawRequestTarget(target: unknown): RawRequestTarget | null 
   return { path, query, hasQuery: queryIndex >= 0 };
 }
 
-function parseMediaRoute(pathname: string, hasQuery: boolean): PhoneMediaRoute | null {
+function parseMediaRoute(pathname: string, hasQuery: boolean, requireCapability = false): PhoneMediaRoute | null {
   if (hasQuery) {
     return null;
   }
@@ -374,8 +377,13 @@ function parseMediaRoute(pathname: string, hasQuery: boolean): PhoneMediaRoute |
     if (!pathname.startsWith(prefix)) {
       continue;
     }
-    const rawId = pathname.slice(prefix.length);
-    if (!rawId || rawId.includes("/")) {
+    const segments = pathname.slice(prefix.length).split("/");
+    if (segments.length !== (requireCapability ? 2 : 1)) {
+      return null;
+    }
+    const rawCapability = requireCapability ? segments[0] : undefined;
+    const rawId = segments.at(-1) ?? "";
+    if (!rawId || (rawCapability !== undefined && !MEDIA_CAPABILITY_PATTERN.test(rawCapability))) {
       return null;
     }
     let id: string;
@@ -387,7 +395,11 @@ function parseMediaRoute(pathname: string, hasQuery: boolean): PhoneMediaRoute |
     if (!OPAQUE_ID_PATTERN.test(id)) {
       return null;
     }
-    return { namespace, id };
+    return {
+      namespace,
+      id,
+      ...(rawCapability ? { capability: rawCapability } : {}),
+    };
   }
   return null;
 }
@@ -449,6 +461,17 @@ function buildGatewayOrigin(address: string, port: number): string {
   return origin.origin;
 }
 
+function constantTimeMediaCapabilityEqual(candidate: string | undefined, expected: string | null): boolean {
+  if (!expected || typeof candidate !== "string" || !MEDIA_CAPABILITY_PATTERN.test(candidate)) {
+    return false;
+  }
+  const candidateBytes = Buffer.from(candidate, "hex");
+  const expectedBytes = Buffer.from(expected, "hex");
+  return candidateBytes.byteLength === MEDIA_CAPABILITY_BYTES &&
+    expectedBytes.byteLength === MEDIA_CAPABILITY_BYTES &&
+    timingSafeEqual(candidateBytes, expectedBytes);
+}
+
 export class PhoneGateway {
   private readonly createServer: (handler: PhoneGatewayRequestHandler) => GatewayHttpServer;
   private readonly getNetworkInterfaces: () => NetworkInterfacesSnapshot;
@@ -467,6 +490,8 @@ export class PhoneGateway {
   private readonly readMediaFile: PhoneGatewayFileReader;
   private readonly commandRouter: PhoneGatewayCommandRouter | null;
   private readonly onCommandError: (diagnostic: PhoneCommandFailureDiagnostic) => void;
+  private readonly mediaCapabilityFactory: () => string;
+  private readonly bindMediaUrls: boolean;
   private server: GatewayHttpServer | null = null;
   private selectedAddress: string | null = null;
   private selectedPort: number | null = null;
@@ -486,6 +511,7 @@ export class PhoneGateway {
   private readonly phoneSessions = new Map<string, PhoneCommandSession>();
   private heartbeatTimer: unknown = null;
   private lastBroadcastRevision = 0;
+  private mediaCapability: string | null = null;
 
   public constructor(options: PhoneGatewayOptions = {}) {
     this.createServer = options.createServer ?? ((handler) => createHttpServer(handler) as unknown as GatewayHttpServer);
@@ -506,7 +532,6 @@ export class PhoneGateway {
       now: this.now,
       ...options.pairingFailureRateLimit,
     });
-    this.projection = options.projection ? createPhoneProjection(options.projection) : null;
     this.context = options.context ?? null;
     this.attachments = options.attachments ?? null;
     this.phoneAssetsDirectory = options.phoneAssetsDirectory ?? PHONE_ASSET_DIRECTORY;
@@ -516,6 +541,14 @@ export class PhoneGateway {
     this.onCommandError = options.onCommandError ?? ((diagnostic) => {
       console.warn("Phone command failed.", diagnostic);
     });
+    this.mediaCapabilityFactory = options.mediaCapabilityFactory ?? (() =>
+      cryptoRandomBytes(MEDIA_CAPABILITY_BYTES).toString("hex"));
+    this.bindMediaUrls = Boolean(options.projection);
+    this.projection = options.projection
+      ? createPhoneProjection(options.projection, {
+        getMediaCapability: () => this.mediaCapability ?? undefined,
+      })
+      : null;
   }
 
   public getStatus(): PhoneGatewayStatus {
@@ -613,6 +646,7 @@ export class PhoneGateway {
     const origin = this.origin;
     const generation = this.beginPairingGeneration();
     const pairing = this.pairing.issue(this.now());
+    this.rotateMediaCapability();
     this.closePhoneClients();
     this.pairingFailures.reset();
     this.pairingExpiresAt = pairing.expiresAt;
@@ -652,6 +686,7 @@ export class PhoneGateway {
 
     const generation = this.beginPairingGeneration();
     const pairing = this.pairing.issue(this.now());
+    this.rotateMediaCapability();
     this.pairingFailures.reset();
     let listening: ListeningServer;
     try {
@@ -1376,6 +1411,7 @@ export class PhoneGateway {
     this.selectedAddress = null;
     this.selectedPort = null;
     this.origin = null;
+    this.mediaCapability = null;
     this.qrDataUrl = "";
     this.pairingExpiresAt = 0;
     for (const socket of this.sockets) {
@@ -1443,6 +1479,14 @@ export class PhoneGateway {
     } finally {
       this.pairingExpiryTimer = null;
     }
+  }
+
+  private rotateMediaCapability(): void {
+    const capability = this.mediaCapabilityFactory();
+    if (typeof capability !== "string" || !MEDIA_CAPABILITY_PATTERN.test(capability)) {
+      throw new Error("Phone media capability factory returned an invalid value.");
+    }
+    this.mediaCapability = capability;
   }
 
   private invalidatePairingWork(): void {
@@ -1532,7 +1576,7 @@ export class PhoneGateway {
         : target.path === "/phone.css" && !target.hasQuery
           ? "phone.css"
           : null;
-    const mediaRoute = parseMediaRoute(target.path, target.hasQuery);
+    const mediaRoute = parseMediaRoute(target.path, target.hasQuery, this.bindMediaUrls);
     const isProtectedRoute = assetName !== null || mediaRoute !== null;
 
     if (!isProtectedRoute) {
@@ -1552,6 +1596,11 @@ export class PhoneGateway {
     }
 
     if (!mediaRoute) {
+      responseBody(response, 404, "text/plain; charset=utf-8", "Not found.");
+      return;
+    }
+
+    if (this.bindMediaUrls && !constantTimeMediaCapabilityEqual(mediaRoute.capability, this.mediaCapability)) {
       responseBody(response, 404, "text/plain; charset=utf-8", "Not found.");
       return;
     }
@@ -1624,6 +1673,7 @@ export class PhoneGateway {
     }
 
     this.pairingFailures.recordSuccess();
+    this.rotateMediaCapability();
     this.closePhoneClients();
     this.invalidatePairingWork();
     response.setHeader("Set-Cookie", `${SESSION_COOKIE}=${exchange.cookieToken}; HttpOnly; SameSite=Strict; Path=/`);

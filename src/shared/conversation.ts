@@ -51,6 +51,8 @@ export interface SessionProjectionSnapshot {
   conversation: ConversationSnapshot;
   queue: ContextScreenshot[];
   capturing?: boolean;
+  /** Phone-only opaque media capability; never a filesystem path or cookie. */
+  mediaCapability?: string;
 }
 
 export interface ConversationPort {
@@ -159,6 +161,7 @@ export function cloneSessionProjectionSnapshot(snapshot: SessionProjectionSnapsh
     conversation: cloneConversationSnapshot(snapshot.conversation),
     queue: cloneProjectionQueue(snapshot.queue),
     ...(typeof snapshot.capturing === "boolean" ? { capturing: snapshot.capturing } : {}),
+    ...(typeof snapshot.mediaCapability === "string" ? { mediaCapability: snapshot.mediaCapability } : {}),
   };
 }
 

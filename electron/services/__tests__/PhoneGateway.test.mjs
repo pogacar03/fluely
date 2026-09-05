@@ -107,6 +107,7 @@ function makeGateway({
   readMediaFile,
   commandRouter,
   onCommandError,
+  mediaCapabilityFactory,
 } = {}) {
   const servers = [];
   const clock = now ?? (() => 10_000);
@@ -140,6 +141,7 @@ function makeGateway({
     ...(readMediaFile ? { readMediaFile } : {}),
     ...(commandRouter ? { commandRouter } : {}),
     ...(onCommandError ? { onCommandError } : {}),
+    ...(mediaCapabilityFactory ? { mediaCapabilityFactory } : {}),
   });
   gateways.push(gateway);
   return { gateway, servers };
@@ -1099,6 +1101,7 @@ test("authenticated phone assets and media routes return exact bytes and generic
   const contextId = "11111111-1111-4111-8111-111111111111";
   const attachmentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const qrCalls = [];
+  const mediaCapability = "a".repeat(64);
   const pairedGateway = makeGateway({
     portCandidates: [0],
     qrUrls: qrCalls,
@@ -1120,19 +1123,22 @@ test("authenticated phone assets and media routes return exact bytes and generic
       }, queue: [] }),
       subscribe: () => () => undefined,
     },
+    mediaCapabilityFactory: () => mediaCapability,
   }).gateway;
   const pairedReady = await pairedGateway.start();
   const pairedPort = Number(new URL(pairedReady.origin).port);
   const pairingSecret = new URL(qrCalls[0]).searchParams.get("secret");
   const exchange = await request(pairedPort, `/pair?secret=${pairingSecret}`);
   const cookieHeader = exchange.headers["set-cookie"][0].match(/^(fluely_phone_session=[^;]+)/)[1];
+  const contextRoute = `/api/context/${mediaCapability}/${contextId}`;
+  const attachmentRoute = `/api/attachments/${mediaCapability}/${attachmentId}`;
 
   const protectedRoutes = [
     "/",
     "/phone.js",
     "/phone.css",
-    `/api/context/${contextId}`,
-    `/api/attachments/${attachmentId}`,
+    contextRoute,
+    attachmentRoute,
   ];
   for (const route of protectedRoutes) {
     const unauthorized = await requestBuffer(pairedPort, route);
@@ -1155,12 +1161,12 @@ test("authenticated phone assets and media routes return exact bytes and generic
   }
 
   for (const [route, headers] of [
-    [`/api/context/${contextId}/extra`, { Cookie: cookieHeader }],
+    [`${contextRoute}/extra`, { Cookie: cookieHeader }],
     [`/api/context/..%2F${contextId}`, { Cookie: cookieHeader }],
-    [`/api/context/${attachmentId}`, { Cookie: cookieHeader }],
-    [`/api/attachments/${contextId}`, { Cookie: cookieHeader }],
-    [`/api/context/${contextId}?content-type=image%2Fpng`, { Cookie: cookieHeader }],
-    [`/api/attachments/${attachmentId}`, { Cookie: cookieHeader, Range: "bytes=0-1" }],
+    [`/api/context/${mediaCapability}/${attachmentId}`, { Cookie: cookieHeader }],
+    [`/api/attachments/${mediaCapability}/${contextId}`, { Cookie: cookieHeader }],
+    [`${contextRoute}?content-type=image%2Fpng`, { Cookie: cookieHeader }],
+    [`${attachmentRoute}`, { Cookie: cookieHeader, Range: "bytes=0-1" }],
   ]) {
     const rejected = await requestBuffer(pairedPort, route, headers);
     assert.equal(rejected.statusCode, 404, route);
@@ -1168,8 +1174,8 @@ test("authenticated phone assets and media routes return exact bytes and generic
     assertSafeHeaders(rejected);
   }
 
-  const contextResponse = await requestBuffer(pairedPort, `/api/context/${contextId}`, { Cookie: cookieHeader });
-  const attachmentResponse = await requestBuffer(pairedPort, `/api/attachments/${attachmentId}`, { Cookie: cookieHeader });
+  const contextResponse = await requestBuffer(pairedPort, contextRoute, { Cookie: cookieHeader });
+  const attachmentResponse = await requestBuffer(pairedPort, attachmentRoute, { Cookie: cookieHeader });
   for (const response of [contextResponse, attachmentResponse]) {
     assert.equal(response.statusCode, 200);
     assert.deepEqual(response.body, pngBytes);

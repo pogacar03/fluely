@@ -54,6 +54,7 @@ function cloneProjection(snapshot: SessionProjectionSnapshot): SessionProjection
     conversation: cloneConversation(snapshot.conversation),
     queue: snapshot.queue.map((item) => ({ ...item })),
     ...(typeof snapshot.capturing === "boolean" ? { capturing: snapshot.capturing } : {}),
+    ...(snapshot.mediaCapability ? { mediaCapability: snapshot.mediaCapability } : {}),
   };
 }
 
@@ -207,8 +208,14 @@ export function applyPhoneServerFrame(
   return { state, effect: null };
 }
 
-export function phoneImageUrl(namespace: "context" | "attachments", id: string): string {
-  return `/api/${namespace}/${encodeURIComponent(id)}`;
+export function phoneImageUrl(
+  namespace: "context" | "attachments",
+  id: string,
+  mediaCapability?: string,
+): string {
+  return mediaCapability
+    ? `/api/${namespace}/${mediaCapability}/${encodeURIComponent(id)}`
+    : `/api/${namespace}/${encodeURIComponent(id)}`;
 }
 
 export function reconnectDelayMs(attempt: number): number {
@@ -329,7 +336,7 @@ function renderPhoneClient(
       const itemContainer = document.createElement("div");
       itemContainer.className = "phone-queue-item";
       const image = document.createElement("img");
-      image.src = phoneImageUrl("context", item.id);
+      image.src = phoneImageUrl("context", item.id, state.snapshot?.mediaCapability);
       image.alt = `Queued screenshot, ${item.width} by ${item.height}`;
       image.width = 160;
       image.height = Math.max(1, Math.round(160 * item.height / item.width));
@@ -381,7 +388,7 @@ function renderPhoneClient(
       const attachment = attachments.get(attachmentId);
       if (!attachment) continue;
       const image = document.createElement("img");
-      image.src = phoneImageUrl("attachments", attachment.id);
+      image.src = phoneImageUrl("attachments", attachment.id, state.snapshot?.mediaCapability);
       image.alt = `Sent screenshot, ${attachment.width} by ${attachment.height}`;
       image.width = 160;
       image.height = Math.max(1, Math.round(160 * attachment.height / attachment.width));

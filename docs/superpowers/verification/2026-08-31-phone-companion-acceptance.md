@@ -11,7 +11,44 @@ Run from `/Users/yu/Documents/cluely二开/fluely`:
 npm run build:electron
 npm run build:phone
 node --test electron/services/__tests__/phone-companion-acceptance.test.mjs scripts/__tests__/package-allowlist.test.mjs
-node --test <complete B1-B4 focused file set>
+node --test \
+  electron/phone/__tests__/phone-client.test.mjs \
+  electron/services/__tests__/AttachmentStore.test.mjs \
+  electron/services/__tests__/CommandRouter.test.mjs \
+  electron/services/__tests__/ConversationStore.test.mjs \
+  electron/services/__tests__/PhoneGateway.test.mjs \
+  electron/services/__tests__/ScreenshotService.test.mjs \
+  electron/services/__tests__/SessionProjectionStore.test.mjs \
+  electron/services/__tests__/canonical-session.integration.test.mjs \
+  electron/services/__tests__/context-media.test.mjs \
+  electron/services/__tests__/network-address.test.mjs \
+  electron/services/__tests__/pairing-rate-limiter.test.mjs \
+  electron/services/__tests__/pairing-session.test.mjs \
+  electron/services/__tests__/phone-companion-acceptance.test.mjs \
+  electron/services/__tests__/phone-gateway-ipc.test.mjs \
+  electron/services/__tests__/phone-gateway-lifecycle.test.mjs \
+  electron/services/__tests__/phone-gateway-real-components.integration.test.mjs \
+  electron/services/__tests__/phone-projection.test.mjs \
+  electron/services/__tests__/secure-media-file.test.mjs \
+  electron/services/__tests__/session-media-protocol.test.mjs \
+  electron/services/__tests__/workspace-command-ipc.test.mjs \
+  electron/services/__tests__/workspace-media-integration.test.mjs \
+  scripts/__tests__/package-allowlist.test.mjs \
+  scripts/__tests__/phone-assets.test.mjs \
+  scripts/__tests__/phone-bundle.integration.test.mjs \
+  scripts/__tests__/smoke-packaged.test.mjs \
+  src/renderer/__tests__/App-phone-gateway.test.mjs \
+  src/renderer/__tests__/Conversation.test.mjs \
+  src/renderer/__tests__/PhoneConnectionPanel.test.mjs \
+  src/renderer/__tests__/SetupView.test.mjs \
+  src/renderer/__tests__/conversation-hydration.test.mjs \
+  src/renderer/__tests__/workspace-navigation.test.mjs \
+  src/renderer/__tests__/workspace-state.test.mjs \
+  src/renderer/__tests__/workview-interactions.test.mjs \
+  src/shared/__tests__/context-queue.test.mjs \
+  src/shared/__tests__/conversation.test.mjs \
+  src/shared/__tests__/phone-gateway.test.mjs \
+  src/shared/__tests__/workspace-view.test.mjs
 npm test
 npm run typecheck
 npm run build:phone
@@ -30,6 +67,16 @@ starts with an empty queue, conversation, capture state, streaming state, and
 attachment namespace. The package check requires the compiled Electron,
 renderer, and phone entrypoints and rejects repository development sources,
 maps, tests, and environment files inside `app.asar`.
+
+The 2026-09-06 B4 fix round also verifies that `/`, `/phone.js`, and
+`/phone.css` remain cookie-authenticated static assets without a media
+capability, while context/attachment media URLs remain session-capability
+bound. The real backpressure test proves that an authorized, non-revoked
+cookie can reconnect after the gateway closes the overloaded socket. This fix
+round passed the focused acceptance/capability/allowlist group 62/62, the
+complete B1-B4 focused command 219/219, and `npm test` 369/369; typecheck,
+`build:phone`, and `build` also passed. Directory packaging and packaged smoke
+are intentionally left to the independent verifier for this round.
 
 `smoke:packaged` may launch only the packaged executable it discovers, with a
 new temporary user-data directory. It must survive the smoke interval, then
