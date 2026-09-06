@@ -125,6 +125,9 @@ export function PhoneConnectionPanel({
             <span className="field-label">LAN address</span>
             <code className="phone-origin">{status.origin}</code>
             <span className="field-help">Scan the QR code or enter this URL on the phone.</span>
+            {status.networkNotice && (
+              <span className="field-help phone-network-notice" role="note">{status.networkNotice}</span>
+            )}
             <span className={`phone-paired-indicator ${status.paired ? "paired" : ""}`}>
               <span aria-hidden="true">{status.paired ? "✓" : "○"}</span>
               {status.paired ? "Paired phone connected" : "No phone paired yet"}
@@ -136,7 +139,7 @@ export function PhoneConnectionPanel({
                 onClick={() => void onRegeneratePairing()}
                 disabled={busy}
               >
-                Regenerate pairing
+                Refresh connection &amp; regenerate QR
               </button>
               <button
                 type="button"

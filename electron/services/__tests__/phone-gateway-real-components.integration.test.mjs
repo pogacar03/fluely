@@ -349,6 +349,142 @@ test("real components stream canonical snapshots/events over PhoneGateway HTTP+W
   }
 });
 
+test("first authenticated snapshot contains ordered multi-turn history, queued screenshots, and fetchable media after reconnect", { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "fluely-phone-history-integration-"));
+  const queueListeners = new Set();
+  let gateway;
+  let projection;
+  let screenshots;
+  let attachments;
+  let conversation;
+  let socket;
+  const screenshotIds = [
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222",
+    "33333333-3333-4333-8333-333333333333",
+  ];
+  const attachmentIds = [
+    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  ];
+  try {
+    let screenshotIndex = 0;
+    let attachmentIndex = 0;
+    screenshots = new ScreenshotService({
+      directory: path.join(root, "screenshots"),
+      platform: "linux",
+      desktopCapturer: {
+        getSources: async () => [{
+          display_id: "1",
+          thumbnail: { toPNG: () => PNG_BYTES, getSize: () => ({ width: 1920, height: 1080 }) },
+        }],
+      },
+      screen: {
+        getCursorScreenPoint: () => ({ x: 1, y: 1 }),
+        getDisplayNearestPoint: () => ({ id: 1, bounds: { width: 1920, height: 1080 }, scaleFactor: 1 }),
+      },
+      idFactory: () => screenshotIds[screenshotIndex++],
+      now: () => new Date(100),
+      onStateChanged: (state) => { for (const listener of queueListeners) listener(state); },
+    });
+    attachments = new AttachmentStore({
+      rootDirectory: path.join(root, "session-attachments"),
+      sessionId: "session-phone-history",
+      idFactory: () => attachmentIds[attachmentIndex++],
+      now: () => 200,
+    });
+    await Promise.all([screenshots.whenIdle(), attachments.whenReady()]);
+    const captured = [await screenshots.capture(), await screenshots.capture(), await screenshots.capture()];
+    await screenshots.whenIdle();
+    conversation = new ConversationStore({
+      sessionId: attachments.sessionId,
+      now: () => 300,
+      idFactory: (() => { let index = 0; return () => `history-message-${++index}`; })(),
+    });
+    const conversationAttachments = [];
+    for (const item of captured.slice(0, 2)) {
+      const sourcePath = screenshots.getManagedPaths([item.id])[0];
+      const attachment = await attachments.addFromScreenshot(item, sourcePath);
+      conversation.addAttachment(attachment);
+      conversationAttachments.push(attachment);
+    }
+    const firstTurn = conversation.startTurn("First question", [conversationAttachments[0].id]);
+    conversation.finishAssistant(firstTurn.assistant.id, "completed", "First model reply");
+    const secondTurn = conversation.startTurn("Second question", [conversationAttachments[1].id]);
+    conversation.finishAssistant(secondTurn.assistant.id, "completed", "Second model reply");
+    projection = new SessionProjectionStore({
+      conversation,
+      queue: {
+        getState: () => screenshots.getState(),
+        onStateChanged(listener) { queueListeners.add(listener); return () => queueListeners.delete(listener); },
+      },
+    });
+    const qrUrls = [];
+    gateway = new PhoneGateway({
+      networkInterfaces: () => ({ en0: [{ address: "192.168.50.8", family: "IPv4", internal: false }] }),
+      portCandidates: [0],
+      projection,
+      context: { getManagedPaths: (ids) => screenshots.getManagedPaths(ids), getManagedRoot: () => screenshots.getManagedRoot() },
+      attachments: { getPath: (id) => attachments.getPath(id), getManagedRoot: () => attachments.directory },
+      qrCode: { toDataURL: async (url) => { qrUrls.push(url); return "data:qr"; } },
+    });
+    const ready = await gateway.start();
+    const port = Number(new URL(ready.origin).port);
+    const host = new URL(ready.origin).host;
+    const secret = new URL(qrUrls[0]).searchParams.get("secret");
+    const exchange = await requestOnce(port, `/pair?secret=${encodeURIComponent(secret)}`, { Host: host });
+    const cookie = exchange.headers["set-cookie"]?.[0]?.match(/^(fluely_phone_session=[^;]+)/)?.[1];
+    assert.ok(cookie);
+    const open = () => new Promise((resolve, reject) => {
+      const nextFrames = [];
+      const waiters = [];
+      const current = new WebSocket("ws://127.0.0.1:" + port + "/ws", { headers: { Cookie: cookie }, origin: ready.origin });
+      current.on("message", (data) => {
+        const frame = JSON.parse(String(data));
+        const waiter = waiters.shift();
+        if (waiter) waiter(frame); else nextFrames.push(frame);
+      });
+      current.once("error", reject);
+      current.once("open", () => resolve({ socket: current, next: () => nextFrames.length ? Promise.resolve(nextFrames.shift()) : new Promise((nextResolve) => waiters.push(nextResolve)) }));
+    });
+    const first = await open();
+    socket = first.socket;
+    const snapshotFrame = await first.next();
+    assert.equal(snapshotFrame.type, "snapshot");
+    assert.deepEqual(snapshotFrame.payload.queue.map((item) => item.id), screenshotIds);
+    assert.deepEqual(snapshotFrame.payload.conversation.messages.map((message) => message.text), [
+      "First question", "First model reply", "Second question", "Second model reply",
+    ]);
+    assert.deepEqual(snapshotFrame.payload.conversation.messages.map((message) => message.sequence), [1, 2, 3, 4]);
+    const capability = snapshotFrame.payload.mediaCapability;
+    for (const id of screenshotIds) {
+      const response = await requestOnce(port, `/api/context/${capability}/${id}`, { Host: host, Cookie: cookie });
+      assert.equal(response.statusCode, 200, id);
+      assert.deepEqual(response.body, PNG_BYTES);
+    }
+    for (const id of attachmentIds) {
+      const response = await requestOnce(port, `/api/attachments/${capability}/${id}`, { Host: host, Cookie: cookie });
+      assert.equal(response.statusCode, 200, id);
+      assert.deepEqual(response.body, PNG_BYTES);
+    }
+    socket.close();
+    const reconnected = await open();
+    socket = reconnected.socket;
+    const reconnectFrame = await reconnected.next();
+    assert.equal(reconnectFrame.type, "snapshot");
+    assert.deepEqual(reconnectFrame.payload.conversation.messages.map((message) => message.text), snapshotFrame.payload.conversation.messages.map((message) => message.text));
+    assert.deepEqual(reconnectFrame.payload.queue.map((item) => item.id), screenshotIds);
+  } finally {
+    try { socket?.close(); } catch { /* test cleanup */ }
+    await gateway?.stop();
+    projection?.dispose();
+    screenshots?.dispose();
+    await conversation?.dispose();
+    await attachments?.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("desktop and phone commands share canonical order, idempotency, cancellation, reconnect, and session revocation", { timeout: 30_000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "fluely-phone-commands-integration-"));
   const screenshotDirectory = path.join(root, "screenshots");
@@ -678,11 +814,13 @@ test("desktop and phone commands share canonical order, idempotency, cancellatio
     ]);
     await assertDesktopPhoneConverged();
 
-    await gateway.regeneratePairing();
+    const refreshed = await gateway.regeneratePairing();
     await waitFor(() => phoneClient.getState().connection === "revoked");
-    const oldHttp = await requestOnce(port, "/", { Host: advertisedHost, Cookie: cookieHeader });
+    const refreshedPort = Number(new URL(refreshed.origin).port);
+    const refreshedHost = new URL(refreshed.origin).host;
+    const oldHttp = await requestOnce(refreshedPort, "/", { Host: refreshedHost, Cookie: cookieHeader });
     assert.equal(oldHttp.statusCode, 401);
-    assert.equal(await expectRejectedWebSocket(port, cookieHeader, ready.origin), 401);
+    assert.equal(await expectRejectedWebSocket(refreshedPort, cookieHeader, refreshed.origin), 401);
   } finally {
     if (releaseStream) releaseStream();
     phoneClient?.stop();

@@ -32,7 +32,7 @@ function makeFakeTimer() {
   };
 }
 
-function makeFakeSocketClass() {
+function makeFakeSocketClass({ onCreate } = {}) {
   const instances = [];
   class FakeSocket {
     static OPEN = 1;
@@ -43,6 +43,7 @@ function makeFakeSocketClass() {
       this.readyState = 0;
       this.listeners = new Map();
       instances.push(this);
+      onCreate?.(this);
     }
 
     addEventListener(type, listener) {
@@ -94,7 +95,9 @@ async function loadPhoneBundle({ fetchImpl }) {
     runScripts: "outside-only",
   });
   const timer = makeFakeTimer();
-  const { FakeSocket, instances } = makeFakeSocketClass();
+  let resolveSocketCreated;
+  const socketCreated = new Promise((resolve) => { resolveSocketCreated = resolve; });
+  const { FakeSocket, instances } = makeFakeSocketClass({ onCreate: resolveSocketCreated });
   Object.defineProperty(dom.window, "WebSocket", {
     configurable: true,
     value: FakeSocket,
@@ -113,7 +116,7 @@ async function loadPhoneBundle({ fetchImpl }) {
   });
   dom.window.eval(bundle);
   await flushMicrotasks();
-  return { dom, timer, instances };
+  return { dom, timer, instances, socketCreated };
 }
 
 function snapshotWithUntrustedText(text) {
@@ -158,10 +161,11 @@ function snapshotWithUntrustedText(text) {
 
 test("built phone bundle renders untrusted projection text as text and keeps media URLs in opaque namespaces", async () => {
   const maliciousText = "<img src=x onerror=window.pwned=1><script>window.pwned=2</script>";
-  const { dom, instances } = await loadPhoneBundle({
-    fetchImpl: async () => ({ status: 200, ok: true }),
+  const { dom, instances, socketCreated } = await loadPhoneBundle({
+    fetchImpl: async () => ({ status: 200, ok: true, json: async () => snapshotWithUntrustedText(maliciousText).payload }),
   });
   try {
+    await socketCreated;
     assert.equal(instances.length, 1);
     instances[0].open();
     instances[0].emit("message", { data: JSON.stringify(snapshotWithUntrustedText(maliciousText)) });
@@ -182,10 +186,11 @@ test("built phone bundle renders untrusted projection text as text and keeps med
 });
 
 test("built phone bundle renders the initial canonical snapshot and applies an incremental event in the DOM", async () => {
-  const { dom, instances } = await loadPhoneBundle({
-    fetchImpl: async () => ({ status: 200, ok: true }),
+  const { dom, instances, socketCreated } = await loadPhoneBundle({
+    fetchImpl: async () => ({ status: 200, ok: true, json: async () => snapshotWithUntrustedText("initial user text").payload }),
   });
   try {
+    await socketCreated;
     instances[0].open();
     instances[0].emit("message", { data: JSON.stringify(snapshotWithUntrustedText("initial user text")) });
     const root = dom.window.document.getElementById("phone-app");
@@ -222,10 +227,11 @@ test("built phone bundle renders the initial canonical snapshot and applies an i
 });
 
 test("built phone bundle clears and resets rendered conversation on the canonical cleared event", async () => {
-  const { dom, instances } = await loadPhoneBundle({
-    fetchImpl: async () => ({ status: 200, ok: true }),
+  const { dom, instances, socketCreated } = await loadPhoneBundle({
+    fetchImpl: async () => ({ status: 200, ok: true, json: async () => snapshotWithUntrustedText("remove me").payload }),
   });
   try {
+    await socketCreated;
     instances[0].open();
     instances[0].emit("message", { data: JSON.stringify(snapshotWithUntrustedText("remove me")) });
     const root = dom.window.document.getElementById("phone-app");
@@ -265,23 +271,18 @@ test("built phone bundle marks a revoked cookie and does not open another socket
     },
   });
   try {
-    instances[0].open();
-    instances[0].close();
-    assert.equal(timer.active().length, 1);
-    timer.fire(timer.active()[0]);
-
     const root = dom.window.document.getElementById("phone-app");
     await waitForCondition(
       () => root.querySelector(".phone-connection-revoked")?.textContent === "Pairing revoked",
       "the packaged client to render revoked state",
     );
     assert.equal(root.querySelector(".phone-connection-revoked")?.textContent, "Pairing revoked");
-    assert.equal(instances.length, 1);
+    assert.equal(instances.length, 0);
     assert.equal(fetchCalls.length, 1);
-    assert.equal(fetchCalls[0].input, "/");
+    assert.equal(fetchCalls[0].input, "/api/bootstrap");
     assert.equal(fetchCalls[0].init.credentials, "same-origin");
     assert.equal(fetchCalls[0].init.cache, "no-store");
-    assert.equal(fetchCalls[0].init.headers.Accept, "text/html");
+    assert.equal(fetchCalls[0].init.headers.Accept, "application/json");
     assert.equal(timer.active().length, 0);
   } finally {
     instances[0]?.close();

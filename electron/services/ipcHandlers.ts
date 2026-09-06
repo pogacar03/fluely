@@ -23,6 +23,7 @@ import type {
   ConversationPort,
   ConversationSnapshot,
 } from "../../src/shared/conversation";
+import { PHONE_GATEWAY_SHARED_NETWORK_NOTICE } from "../../src/shared/phone-gateway";
 import {
   createRequestIdDeduper,
 } from "../../src/shared/context-queue";
@@ -482,6 +483,9 @@ export function serializePhoneGatewayStatus(value: unknown): PhoneGatewayStatus 
       qrDataUrl,
       pairingExpiresAt,
       paired: value.paired === true,
+      ...(value.networkNotice === PHONE_GATEWAY_SHARED_NETWORK_NOTICE
+        ? { networkNotice: PHONE_GATEWAY_SHARED_NETWORK_NOTICE }
+        : {}),
     };
   }
   if (value.state === "error" &&

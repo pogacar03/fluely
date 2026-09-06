@@ -125,3 +125,18 @@ test("private IPv4 selection ignores internal and public interfaces without publ
     en0: [{ address: "198.51.100.7", family: "IPv4", internal: false }],
   }), null);
 });
+
+test("advertised LAN candidates are physical, ordered by RFC1918 before RFC6598, and preserve every safe address", () => {
+  assert.equal(typeof networkAddress.selectPrivateIpv4Candidates, "function");
+  assert.deepEqual(networkAddress.selectPrivateIpv4Candidates({
+    docker0: [{ address: "192.168.99.2", family: "IPv4", internal: false }],
+    en0: [
+      { address: "100.119.160.60", family: "IPv4", internal: false },
+      { address: "192.168.50.8", family: "IPv4", internal: false },
+    ],
+    en1: [{ address: "192.168.60.9", family: 4, internal: false }],
+    utun0: [{ address: "100.64.0.20", family: "IPv4", internal: false }],
+    en2: [{ address: "100.64.0.21", family: "IPv4", internal: false }],
+    en3: [{ address: "8.8.8.8", family: "IPv4", internal: false }],
+  }), ["192.168.50.8", "192.168.60.9", "100.119.160.60", "100.64.0.21"]);
+});

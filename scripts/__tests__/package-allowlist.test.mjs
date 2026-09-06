@@ -15,6 +15,7 @@ const REQUIRED_ENTRIES = [
   "/dist-phone/index.html",
   "/dist-phone/phone.css",
   "/dist-phone/phone.js",
+  "/dist-electron/electron/services/phone-gateway-startup.js",
   "/package.json",
 ];
 
@@ -134,6 +135,8 @@ test("package:dir runs the strict checker after electron-builder with fail-fast 
   ]) {
     assert.ok(builderConfig.includes(pattern), pattern);
   }
+  assert.match(builderConfig, /NSLocalNetworkUsageDescription/);
+  assert.doesNotMatch(builderConfig, /NSBonjourServices|NSBonjourServiceTypes/);
 });
 
 test("the package checker resolves its asar parser as a direct declared dependency", () => {

@@ -57,13 +57,13 @@ function isObviousVirtualInterface(name: string): boolean {
   return /^(?:utun|tun|tap|tailscale|docker|vmnet|bridge|awdl|llw|p2p|ppp|wg|veth|br-|virbr|vboxnet|podman|cni|flannel)(?:\d|[-_.]|$)/i.test(name);
 }
 
-function selectCandidate(
+function selectCandidates(
   interfaces: NetworkInterfacesSnapshot,
   predicate: (address: string) => boolean,
-  allowVirtual: boolean,
-): string | null {
+): string[] {
+  const selected: string[] = [];
   for (const name of Object.keys(interfaces).sort()) {
-    if (!allowVirtual && isObviousVirtualInterface(name)) {
+    if (isObviousVirtualInterface(name)) {
       continue;
     }
     const candidates = interfaces[name] ?? [];
@@ -72,20 +72,31 @@ function selectCandidate(
         continue;
       }
       const canonical = canonicalizeIpv4(candidate.address);
-      if (canonical && predicate(canonical)) {
-        return canonical;
+      if (canonical && predicate(canonical) && !selected.includes(canonical)) {
+        selected.push(canonical);
       }
     }
   }
-  return null;
+  return selected;
 }
 
-/** Selects RFC1918 first, then RFC6598, with no public-address fallback. */
+/** Selects all physical RFC1918 candidates first, then physical RFC6598 candidates. */
+export function selectPrivateIpv4Candidates(
+  interfaces: NetworkInterfacesSnapshot,
+): string[] {
+  const rfc1918 = selectCandidates(interfaces, (address) => {
+    const parsed = parseIpv4(address);
+    return parsed !== null && isRfc1918Ipv4(parsed);
+  });
+  return [
+    ...rfc1918,
+    ...selectCandidates(interfaces, isSharedIpv4).filter((address) => !rfc1918.includes(address)),
+  ];
+}
+
+/** Selects the highest-priority physical RFC1918/RFC6598 address. */
 export function selectPrivateIpv4(
   interfaces: NetworkInterfacesSnapshot,
 ): string | null {
-  return selectCandidate(interfaces, (address) => {
-    const parsed = parseIpv4(address);
-    return parsed !== null && isRfc1918Ipv4(parsed);
-  }, true) ?? selectCandidate(interfaces, isSharedIpv4, false);
+  return selectPrivateIpv4Candidates(interfaces)[0] ?? null;
 }

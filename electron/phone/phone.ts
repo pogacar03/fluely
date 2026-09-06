@@ -282,7 +282,7 @@ export function getPhoneActionState(state: PhoneClientState): PhoneActionState {
   const isRunning = canonical.isRunning;
   const isCapturing = canonical.isCapturing;
   const isBusy = canonical.isBusy;
-  const connected = state.connection === "connected";
+  const connected = state.connection === "connected" && state.snapshot !== null;
   const queueCount = state.snapshot?.queue.length ?? 0;
   return {
     isRunning,
@@ -310,8 +310,10 @@ function renderPhoneClient(
   shell.className = "phone-shell";
   appendText(shell, "p", "FLUELY PHONE COMPANION", "phone-eyebrow");
   appendText(shell, "h1", "Your workspace, in sync", "phone-title");
-  const connectionText = state.connection === "connected"
-    ? "Connected"
+  const connectionText = state.snapshot === null && (state.connection === "connecting" || state.connection === "connected")
+    ? "Syncing…"
+    : state.connection === "connected"
+      ? "Connected"
     : state.connection === "connecting"
       ? "Connecting…"
       : state.connection === "revoked"
@@ -328,7 +330,9 @@ function renderPhoneClient(
   queueSection.className = "phone-card";
   appendText(queueSection, "h2", "Context to send");
   const queue = state.snapshot?.queue ?? [];
-  if (queue.length === 0) {
+  if (!state.snapshot) {
+    appendText(queueSection, "p", "Syncing current screenshots…", "phone-syncing");
+  } else if (queue.length === 0) {
     appendText(queueSection, "p", "No screenshots queued.", "phone-empty");
   } else {
     const queueList = document.createElement("div");
@@ -363,7 +367,9 @@ function renderPhoneClient(
   appendText(conversationSection, "h2", "Conversation");
   const messages = state.snapshot?.conversation.messages.slice().sort((left, right) => left.sequence - right.sequence) ?? [];
   const attachments = new Map((state.snapshot?.conversation.attachments ?? []).map((item) => [item.id, item]));
-  if (messages.length === 0) {
+  if (!state.snapshot) {
+    appendText(conversationSection, "p", "Syncing conversation history…", "phone-syncing");
+  } else if (messages.length === 0) {
     appendText(conversationSection, "p", "Sent screenshots and answers will appear here.", "phone-empty");
   }
   for (const message of messages) {
@@ -495,11 +501,16 @@ export interface PhoneClientWebSocketConstructor {
 
 export interface PhoneClientOptions {
   WebSocket?: PhoneClientWebSocketConstructor;
-  fetch?: (input: string, init?: RequestInit) => Promise<{ status: number; ok?: boolean }>;
+  fetch?: (input: string, init?: RequestInit) => Promise<{
+    status: number;
+    ok?: boolean;
+    json?: () => Promise<unknown>;
+  }>;
   fetchTimeoutMs?: number;
   setTimeout?: (callback: () => void, delayMs: number) => unknown;
   clearTimeout?: (handle: unknown) => void;
   location?: { protocol: string; host: string };
+  bootstrap?: boolean;
 }
 
 const DEFAULT_FETCH_TIMEOUT_MS = 5_000;
@@ -516,6 +527,7 @@ export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions 
     ? Math.floor(options.fetchTimeoutMs as number)
     : DEFAULT_FETCH_TIMEOUT_MS;
   const locationInfo = options.location ?? globalThis.location;
+  const shouldBootstrap = options.bootstrap !== false;
   let socket: PhoneClientWebSocket | null = null;
   let stopped = false;
   let reconnectTimer: unknown = null;
@@ -548,7 +560,7 @@ export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions 
     }));
   };
   function sendCommand(command: PhoneCommandInput): boolean {
-    if (!socket || socket.readyState !== (WebSocketConstructor.OPEN ?? 1) || state.commandPending) {
+    if (!socket || socket.readyState !== (WebSocketConstructor.OPEN ?? 1) || !state.snapshot || state.commandPending) {
       return false;
     }
     const requestId = nextCommandRequestId(command.type);
@@ -611,9 +623,66 @@ export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions 
       clearTimeoutImpl(timeoutHandle);
     }
   };
+  const hydrateBootstrap = async (): Promise<"authenticated" | "revoked" | "unavailable"> => {
+    if (!fetchImpl || typeof AbortController !== "function") {
+      return "unavailable";
+    }
+    const controller = new AbortController();
+    const timeoutHandle = setTimeoutImpl(() => controller.abort(), fetchTimeoutMs);
+    try {
+      const response = await fetchImpl("/api/bootstrap", {
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      });
+      if (response.status === 401 || response.status === 403) {
+        return "revoked";
+      }
+      if (response.status < 200 || response.status >= 300 || typeof response.json !== "function") {
+        return "unavailable";
+      }
+      const payload = await response.json();
+      if (!payload || typeof payload !== "object" || typeof (payload as { revision?: unknown }).revision !== "number") {
+        return "unavailable";
+      }
+      const applied = applyPhoneServerFrame(state, {
+        type: "snapshot",
+        revision: (payload as { revision: number }).revision,
+        payload: payload as SessionProjectionSnapshot,
+      });
+      if (!applied.state.snapshot) {
+        return "unavailable";
+      }
+      state = { ...applied.state, errorMessage: undefined, resyncPending: false };
+      publish();
+      return "authenticated";
+    } catch {
+      return "unavailable";
+    } finally {
+      clearTimeoutImpl(timeoutHandle);
+    }
+  };
+  async function connectAfterBootstrap(generation: number): Promise<void> {
+    if (stopped || generation !== reconnectGeneration) return;
+    const authentication = shouldBootstrap ? await hydrateBootstrap() : await Promise.resolve("authenticated" as const);
+    if (stopped || generation !== reconnectGeneration) return;
+    if (authentication === "revoked") {
+      state = { ...state, connection: "revoked", errorMessage: "Pairing revoked.", commandPending: undefined };
+      publish();
+      return;
+    }
+    if (authentication === "unavailable") {
+      state = { ...state, connection: "error", errorMessage: "The phone companion authentication check failed." };
+      publish();
+      scheduleReconnect();
+      return;
+    }
+    connect();
+  }
   async function reconnectAfterAuthentication(generation: number): Promise<void> {
     if (stopped || generation !== reconnectGeneration) return;
-    const authentication = await probeAuthentication();
+    const authentication = shouldBootstrap ? await hydrateBootstrap() : await probeAuthentication();
     if (stopped || generation !== reconnectGeneration) return;
     if (authentication === "revoked") {
       state = { ...state, connection: "revoked", errorMessage: "Pairing revoked.", commandPending: undefined };
@@ -690,11 +759,19 @@ export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions 
     }
     state = { ...state, connection: "connecting", reconnectAttempt: 0, errorMessage: undefined, commandPending: undefined };
     publish();
-    connect();
+    if (shouldBootstrap) {
+      void connectAfterBootstrap(reconnectGeneration);
+    } else {
+      connect();
+    }
   };
 
   publish();
-  connect();
+  if (shouldBootstrap) {
+    void connectAfterBootstrap(reconnectGeneration);
+  } else {
+    connect();
+  }
   return {
     getState: () => ({ ...state, ...(state.snapshot ? { snapshot: cloneProjection(state.snapshot) } : {}) }),
     sendCommand,

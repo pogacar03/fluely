@@ -17,6 +17,7 @@ export type PhoneGatewayStatus =
     qrDataUrl: string;
     pairingExpiresAt: number;
     paired: boolean;
+    networkNotice?: string;
   }
   | {
     state: "error";
@@ -27,6 +28,9 @@ export type PhoneGatewayStatus =
 export type PhoneGatewayStatusListener = (status: PhoneGatewayStatus) => void;
 
 export const PHONE_GATEWAY_PAIRING_TTL_MS = 120_000;
+
+export const PHONE_GATEWAY_SHARED_NETWORK_NOTICE =
+  "Shared, campus, or enterprise networks may isolate devices. If pairing fails, connect the computer to the phone hotspot, then refresh the QR code.";
 
 export const PHONE_GATEWAY_PORTS = [
   4123, 4124, 4125, 4126, 4127, 4128,

@@ -215,6 +215,106 @@ test("gateway advertises an RFC6598 shared address in its origin and QR pairing 
   assert.ok(new URL(qrUrls[0]).searchParams.get("secret"));
 });
 
+test("gateway accepts every current physical LAN host and refreshes the preferred address and QR after a network switch", async () => {
+  let interfaces = {
+    docker0: [{ address: "192.168.99.2", family: "IPv4", internal: false }],
+    en0: [{ address: "192.168.50.8", family: "IPv4", internal: false }],
+    en1: [{ address: "192.168.60.9", family: "IPv4", internal: false }],
+  };
+  const qrUrls = [];
+  const { gateway, servers } = makeGateway({
+    networkInterfaces: () => interfaces,
+    portCandidates: [0],
+    qrUrls,
+  });
+
+  const ready = await gateway.start();
+  assert.equal(ready.origin, "http://192.168.50.8:45678");
+  const secret = new URL(qrUrls[0]).searchParams.get("secret");
+  const secondaryExchange = await invokeHandler(gateway, `/pair?secret=${secret}`, {
+    headers: { host: "192.168.60.9:45678" },
+  });
+  assert.equal(secondaryExchange.statusCode, 302);
+  const oldCookie = secondaryExchange.headers["set-cookie"].match(/^(fluely_phone_session=[^;]+)/)[1];
+
+  interfaces = {
+    en0: [{ address: "100.119.160.60", family: "IPv4", internal: false }],
+    en1: [{ address: "198.51.100.9", family: "IPv4", internal: false }],
+  };
+  const refreshed = await gateway.regeneratePairing();
+  assert.equal(refreshed.origin, "http://100.119.160.60:45678");
+  assert.equal(new URL(qrUrls[1]).origin, refreshed.origin);
+  assert.match(refreshed.networkNotice, /shared|campus|enterprise|hotspot/i);
+  assert.equal(servers.length, 2);
+  assert.equal(servers[0].closeCalls, 1);
+  assert.equal(servers[1].listenCalls.length, 1);
+  const revoked = await invokeHandler(gateway, "/api/bootstrap", {
+    headers: { host: "100.119.160.60:45678", cookie: oldCookie },
+  });
+  assert.equal(revoked.statusCode, 401);
+});
+
+test("authenticated bootstrap returns the complete opaque phone projection without paths or pairing credentials", async () => {
+  const projection = {
+    getSnapshot: () => ({
+      revision: 7,
+      conversation: {
+        sessionId: "session-bootstrap",
+        revision: 4,
+        messages: [{
+          id: "message-1",
+          sequence: 1,
+          role: "assistant",
+          text: "Answer",
+          attachmentIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+          status: "completed",
+          createdAt: 1,
+        }],
+        attachments: [{
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          mimeType: "image/png",
+          width: 10,
+          height: 10,
+          byteLength: 4,
+          createdAt: 1,
+        }],
+      },
+      queue: [{
+        id: "11111111-1111-4111-8111-111111111111",
+        capturedAt: 1,
+        width: 10,
+        height: 10,
+        mimeType: "image/png",
+        previewUrl: "/api/context/" + "a".repeat(64) + "/11111111-1111-4111-8111-111111111111",
+        path: "/Users/private/screenshot.png",
+      }],
+      mediaCapability: "a".repeat(64),
+    }),
+    subscribe: () => () => undefined,
+  };
+  const qrUrls = [];
+  const { gateway } = makeGateway({
+    portCandidates: [0],
+    qrUrls,
+    projection,
+    createServer: (handler) => createLoopbackServer(handler),
+  });
+  const ready = await gateway.start();
+  const port = Number(new URL(ready.origin).port);
+  const host = new URL(ready.origin).host;
+  const secret = new URL(qrUrls[0]).searchParams.get("secret");
+  const exchange = await request(port, `/pair?secret=${secret}`, { Host: host });
+  const cookie = exchange.headers["set-cookie"]?.[0]?.match(/^(fluely_phone_session=[^;]+)/)?.[1];
+  const response = await request(port, "/api/bootstrap", { Host: host, Cookie: cookie });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["cache-control"], "no-store");
+  assert.equal(response.headers["content-type"], "application/json; charset=utf-8");
+  assert.equal(JSON.parse(response.body).revision, 7);
+  assert.match(response.body, /Answer/);
+  assert.doesNotMatch(response.body, /Users\/private|pairingSecret|fluely_phone_session|secret=/i);
+});
+
 function request(port, requestPath, headers = {}) {
   return new Promise((resolve, reject) => {
     const request = createHttpServer;
@@ -840,16 +940,18 @@ test("gateway broadcasts paired state and replacement pairing revokes the old co
   assert.equal(statusEvents.at(-1).paired, true);
 
   const replacement = await gateway.regeneratePairing();
+  const replacementPort = Number(new URL(replacement.origin).port);
+  const replacementHost = new URL(replacement.origin).host;
   assert.equal(replacement.state, "ready");
   assert.equal(replacement.paired, false);
   assert.equal(statusEvents.at(-1).paired, false);
   const secondSecret = new URL(qrUrls[1]).searchParams.get("secret");
-  const oldPhone = await request(port, "/", { Cookie: firstCookie });
+  const oldPhone = await request(replacementPort, "/", { Host: replacementHost, Cookie: firstCookie });
   assert.equal(oldPhone.statusCode, 401);
 
-  const secondExchange = await request(port, `/pair?secret=${secondSecret}`);
+  const secondExchange = await request(replacementPort, `/pair?secret=${secondSecret}`, { Host: replacementHost });
   const secondCookie = secondExchange.headers["set-cookie"][0].match(/^(fluely_phone_session=[^;]+)/)[1];
-  assert.equal((await request(port, "/", { Cookie: secondCookie })).statusCode, 200);
+  assert.equal((await request(replacementPort, "/", { Host: replacementHost, Cookie: secondCookie })).statusCode, 200);
   assert.equal(gateway.getStatus().paired, true);
   assert.equal(statusEvents.at(-1).paired, true);
 
@@ -960,7 +1062,7 @@ test("gateway keeps the B1 GET Host and Origin boundary and does not add write r
   })).statusCode, 404);
 });
 
-test("late concurrent QR generation cannot overwrite the latest valid pairing", async () => {
+test("concurrent refresh requests share one restart and keep its QR pairing current", async () => {
   const qrCalls = [];
   const qrDeferreds = [];
   const { gateway } = makeGateway({
@@ -985,17 +1087,17 @@ test("late concurrent QR generation cannot overwrite the latest valid pairing", 
   const first = gateway.regeneratePairing();
   const second = gateway.regeneratePairing();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(qrDeferreds.length, 3);
+  assert.strictEqual(first, second);
+  assert.equal(qrDeferreds.length, 2);
 
-  qrDeferreds[2].resolve("data:image/png;base64,latest");
+  qrDeferreds[1].resolve("data:image/png;base64,latest");
   await second;
-  qrDeferreds[1].resolve("data:image/png;base64,stale");
   await first;
 
   const status = gateway.getStatus();
   assert.equal(status.state, "ready");
   assert.equal(status.qrDataUrl, "data:image/png;base64,latest");
-  assert.equal(new URL(qrCalls[2]).searchParams.get("secret") !== new URL(qrCalls[1]).searchParams.get("secret"), true);
+  assert.equal(new URL(qrCalls[1]).searchParams.get("secret") !== new URL(qrCalls[0]).searchParams.get("secret"), true);
   assert.equal(new URL(status.qrDataUrl).search, "");
 });
 
@@ -1019,15 +1121,16 @@ test("a stale QR rejection from before stop/restart cannot tear down the restart
 
   const stale = gateway.regeneratePairing();
   await new Promise((resolve) => setImmediate(resolve));
-  await gateway.stop();
+  const stopping = gateway.stop();
+  qrDeferreds[1].reject(new Error("stale QR failure"));
+  await stale;
+  await stopping;
 
   const restarting = gateway.start();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(qrDeferreds.length, 3);
   qrDeferreds[2].resolve("data:image/png;base64,restarted");
   await restarting;
-  qrDeferreds[1].reject(new Error("stale QR failure"));
-  await stale;
 
   assert.deepEqual(gateway.getStatus(), {
     state: "ready",

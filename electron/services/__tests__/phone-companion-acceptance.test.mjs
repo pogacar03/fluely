@@ -400,19 +400,20 @@ test("disable and replacement pairing revoke old cookies and old authenticated m
     assert.equal(oldMedia.statusCode, 200);
     assert.deepEqual(oldMedia.body, PNG_BYTES);
 
-    await runtime.gateway.regeneratePairing();
-    assert.equal((await requestOnce(port, "/", { Cookie: oldCookie })).statusCode, 401);
-    assert.equal((await requestOnce(port, oldMediaUrl, { Cookie: oldCookie })).statusCode, 401);
+    const refreshed = await runtime.gateway.regeneratePairing();
+    const refreshedPort = Number(new URL(refreshed.origin).port);
+    assert.equal((await requestOnce(refreshedPort, "/", { Cookie: oldCookie })).statusCode, 401);
+    assert.equal((await requestOnce(refreshedPort, oldMediaUrl, { Cookie: oldCookie })).statusCode, 401);
 
-    const replacementCookie = await pair(runtime, port);
-    const replacementWs = await openWebSocket(port, replacementCookie, ready.origin);
+    const replacementCookie = await pair(runtime, refreshedPort);
+    const replacementWs = await openWebSocket(refreshedPort, replacementCookie, refreshed.origin);
     replacementSocket = replacementWs.socket;
     const replacementSnapshot = await replacementWs.nextFrame();
     const replacementMediaUrl = replacementSnapshot.payload.queue[0].previewUrl
       .replace("/api/context/", "/api/attachments/")
       .replace(item.id, attachment.id);
-    assert.equal((await requestOnce(port, oldMediaUrl, { Cookie: replacementCookie })).statusCode, 404);
-    assert.equal((await requestOnce(port, replacementMediaUrl, { Cookie: replacementCookie })).statusCode, 200);
+    assert.equal((await requestOnce(refreshedPort, oldMediaUrl, { Cookie: replacementCookie })).statusCode, 404);
+    assert.equal((await requestOnce(refreshedPort, replacementMediaUrl, { Cookie: replacementCookie })).statusCode, 200);
 
     await runtime.gateway.stop();
     const disabled = await requestStatus(port, "/", { Cookie: replacementCookie });
@@ -499,17 +500,18 @@ test("phone media URLs are bound to the issuing paired session and rotate on rep
     const oldAttachmentUrl = oldContextUrl.replace("/api/context/", "/api/attachments/").replace(item.id, attachment.id);
     assert.equal((await requestOnce(port, oldAttachmentUrl, { Cookie: oldCookie })).statusCode, 200);
 
-    await runtime.gateway.regeneratePairing();
-    const newCookie = await pair(runtime, port);
-    const newWs = await openWebSocket(port, newCookie, ready.origin);
+    const refreshed = await runtime.gateway.regeneratePairing();
+    const refreshedPort = Number(new URL(refreshed.origin).port);
+    const newCookie = await pair(runtime, refreshedPort);
+    const newWs = await openWebSocket(refreshedPort, newCookie, refreshed.origin);
     newSocket = newWs.socket;
     const newSnapshot = await newWs.nextFrame();
     const newContextUrl = newSnapshot.payload.queue[0].previewUrl;
     const newAttachmentUrl = newContextUrl.replace("/api/context/", "/api/attachments/").replace(item.id, attachment.id);
     assert.notEqual(newContextUrl, oldContextUrl);
-    assert.equal((await requestOnce(port, oldAttachmentUrl, { Cookie: newCookie })).statusCode, 404);
-    assert.equal((await requestOnce(port, newAttachmentUrl, { Cookie: newCookie })).statusCode, 200);
-    assert.equal((await requestOnce(port, oldAttachmentUrl, { Cookie: oldCookie })).statusCode, 401);
+    assert.equal((await requestOnce(refreshedPort, oldAttachmentUrl, { Cookie: newCookie })).statusCode, 404);
+    assert.equal((await requestOnce(refreshedPort, newAttachmentUrl, { Cookie: newCookie })).statusCode, 200);
+    assert.equal((await requestOnce(refreshedPort, oldAttachmentUrl, { Cookie: oldCookie })).statusCode, 401);
   } finally {
     try { oldSocket?.close(); } catch { /* test cleanup */ }
     try { newSocket?.close(); } catch { /* test cleanup */ }

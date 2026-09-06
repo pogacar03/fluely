@@ -24,6 +24,7 @@ import {
   parsePhoneClientFrame,
   PHONE_GATEWAY_PAIRING_TTL_MS,
   PHONE_GATEWAY_PORTS,
+  PHONE_GATEWAY_SHARED_NETWORK_NOTICE,
   serializePhoneServerFrame,
   type ServerFrame,
   type PhoneGatewayStatusListener,
@@ -38,7 +39,8 @@ import type { WorkspaceCommand } from "../../src/shared/ipc";
 import {
   canonicalizeIpv4,
   isPrivateIpv4,
-  selectPrivateIpv4,
+  isSharedIpv4,
+  selectPrivateIpv4Candidates,
   type NetworkInterfacesSnapshot,
 } from "./network-address";
 import {
@@ -494,6 +496,7 @@ export class PhoneGateway {
   private readonly mediaCapabilityFactory: () => string;
   private server: GatewayHttpServer | null = null;
   private selectedAddress: string | null = null;
+  private advertisedAddresses: string[] = [];
   private selectedPort: number | null = null;
   private origin: string | null = null;
   private qrDataUrl = "";
@@ -503,6 +506,7 @@ export class PhoneGateway {
   private readonly statusListeners = new Set<PhoneGatewayStatusListener>();
   private startPromise: Promise<PhoneGatewayStatus> | undefined;
   private stopPromise: Promise<PhoneGatewayStatus> | undefined;
+  private refreshPromise: Promise<PhoneGatewayStatus> | undefined;
   private pairingGeneration = 0;
   private pairingExpiryTimer: unknown = null;
   private webSocketServer: WebSocketServer | null = null;
@@ -632,46 +636,38 @@ export class PhoneGateway {
     return promise;
   }
 
-  public async regeneratePairing(): Promise<PhoneGatewayStatus> {
-    if (this.stopPromise) {
-      await this.stopPromise;
-      return this.getStatus();
-    }
-    if (this.startPromise) {
-      await this.startPromise;
-    }
-    if (this.status.state !== "ready" || !this.origin) {
-      return this.getStatus();
+  public regeneratePairing(): Promise<PhoneGatewayStatus> {
+    if (this.refreshPromise) {
+      return this.refreshPromise;
     }
 
-    const origin = this.origin;
-    const generation = this.beginPairingGeneration();
-    const pairing = this.pairing.issue(this.now());
-    this.rotateMediaCapability();
-    this.closePhoneClients();
-    this.pairingFailures.reset();
-    this.pairingExpiresAt = pairing.expiresAt;
-    this.schedulePairingExpiry(generation, pairing.expiresAt);
-    this.publishStatus();
-    try {
-      const qrDataUrl = await this.qrCode.toDataURL(this.buildPairingUrl(origin, pairing.secret));
-      if (!this.isCurrentPairingGeneration(generation, origin)) {
+    const promise = (async () => {
+      if (this.stopPromise) {
+        await this.stopPromise;
+      }
+      if (this.startPromise) {
+        await this.startPromise;
+      }
+      if (this.status.state !== "ready") {
         return this.getStatus();
       }
-      this.qrDataUrl = qrDataUrl;
-      this.publishStatus();
-      return this.getStatus();
-    } catch {
-      if (!this.isCurrentPairingGeneration(generation, origin)) {
-        return this.getStatus();
-      }
-      this.pairing.revokeAll();
-      this.pairingFailures.reset();
-      await this.closeServer();
-      this.status = errorStatus("start_failed", "Phone companion could not start.");
-      this.publishStatus();
-      return this.getStatus();
-    }
+
+      // A refresh is also the network-change boundary: stop first so the
+      // address list, port, pairing secret, media capability, and sessions are
+      // all recreated from current state by start().
+      await this.stop();
+      return this.start();
+    })();
+    this.refreshPromise = promise;
+    promise.then(
+      () => {
+        if (this.refreshPromise === promise) this.refreshPromise = undefined;
+      },
+      () => {
+        if (this.refreshPromise === promise) this.refreshPromise = undefined;
+      },
+    );
+    return promise;
   }
 
   public async dispose(): Promise<void> {
@@ -679,7 +675,8 @@ export class PhoneGateway {
   }
 
   private async startInternal(): Promise<PhoneGatewayStatus> {
-    const address = selectPrivateIpv4(this.getNetworkInterfaces());
+    const addresses = selectPrivateIpv4Candidates(this.getNetworkInterfaces());
+    const address = addresses[0];
     if (!address) {
       this.pairing.revokeAll();
       return errorStatus("no_lan_address", "No private or shared LAN address is available.");
@@ -701,6 +698,7 @@ export class PhoneGateway {
     }
 
     this.server = listening.server;
+    this.advertisedAddresses = addresses;
     this.selectedAddress = address;
     this.selectedPort = listening.port;
     try {
@@ -1388,6 +1386,7 @@ export class PhoneGateway {
       client.revoked = true;
       this.revokeCommandSessionState(client.commandSession);
       try {
+        this.sendSerializedFrame(client, serializeSessionRevoked());
         client.socket.close(1001, "Phone session ended.");
         client.socket.terminate();
       } catch {
@@ -1410,6 +1409,7 @@ export class PhoneGateway {
     const server = this.server;
     this.server = null;
     this.selectedAddress = null;
+    this.advertisedAddresses = [];
     this.selectedPort = null;
     this.origin = null;
     this.mediaCapability = null;
@@ -1468,6 +1468,9 @@ export class PhoneGateway {
       qrDataUrl: this.qrDataUrl,
       pairingExpiresAt: this.pairingExpiresAt,
       paired: this.pairing.isPaired(),
+      ...(isSharedIpv4(this.selectedAddress ?? "")
+        ? { networkNotice: PHONE_GATEWAY_SHARED_NETWORK_NOTICE }
+        : {}),
     };
   }
 
@@ -1527,9 +1530,9 @@ export class PhoneGateway {
     }
 
     const host = request.headers.host;
-    const advertisedHost = this.origin.startsWith("http://") ? this.origin.slice("http://".length) : "";
+    const advertisedHosts = this.advertisedAddresses.map((address) => `${address}:${this.selectedPort}`);
     const allowedHosts = new Set([
-      advertisedHost,
+      ...advertisedHosts,
       `127.0.0.1:${this.selectedPort}`,
       `localhost:${this.selectedPort}`,
     ]);
@@ -1538,7 +1541,13 @@ export class PhoneGateway {
     }
 
     const origin = request.headers.origin;
-    return requireOrigin ? origin === this.origin : origin === undefined || origin === this.origin;
+    const allowedOrigins = new Set([
+      ...advertisedHosts.map((host) => `http://${host}`),
+      `http://127.0.0.1:${this.selectedPort}`,
+      `http://localhost:${this.selectedPort}`,
+    ]);
+    return requireOrigin ? typeof origin === "string" && allowedOrigins.has(origin)
+      : origin === undefined || (typeof origin === "string" && allowedOrigins.has(origin));
   }
 
   private handleRequest(request: IncomingMessage, response: ServerResponse): void {
@@ -1577,8 +1586,9 @@ export class PhoneGateway {
         : target.path === "/phone.css" && !target.hasQuery
           ? "phone.css"
           : null;
+    const isBootstrapRoute = target.path === "/api/bootstrap" && !target.hasQuery;
     const mediaRoute = parseMediaRoute(target.path, target.hasQuery, true);
-    const isProtectedRoute = assetName !== null || mediaRoute !== null;
+    const isProtectedRoute = assetName !== null || mediaRoute !== null || isBootstrapRoute;
 
     if (!isProtectedRoute) {
       responseBody(response, 404, "text/plain; charset=utf-8", "Not found.");
@@ -1588,6 +1598,20 @@ export class PhoneGateway {
     const token = parseCookies(request.headers.cookie).get(SESSION_COOKIE);
     if (!token || !this.pairing.authenticate(token)) {
       responseBody(response, 401, "text/plain; charset=utf-8", "Authentication required.");
+      return;
+    }
+
+    if (isBootstrapRoute) {
+      if (!this.projection) {
+        responseBody(response, 404, "text/plain; charset=utf-8", "Not found.");
+        return;
+      }
+      responseBody(
+        response,
+        200,
+        "application/json; charset=utf-8",
+        JSON.stringify(this.projection.getSnapshot()),
+      );
       return;
     }
 

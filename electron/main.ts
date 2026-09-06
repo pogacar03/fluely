@@ -52,6 +52,7 @@ import {
   createPhoneGatewayLifecycle,
   type PhoneGatewayLifecycle,
 } from "./services/phone-gateway-lifecycle";
+import { initializePhoneGatewayAfterStoresReady } from "./services/phone-gateway-startup";
 
 let mainWindow: BrowserWindow | null = null;
 let mainWindowReady = false;
@@ -460,15 +461,19 @@ async function ensureSettingsService(): Promise<SettingsService> {
 
 async function initializeMainServices(): Promise<SettingsService> {
   const loadedSettings = await ensureSettingsService();
-  const phoneLifecycle = getPhoneGatewayLifecycle(loadedSettings);
-  await phoneLifecycle.initialize(loadedSettings.get().phoneGateway);
   const screenshots = getScreenshotService();
   const attachments = getAttachmentStore();
   const conversation = getConversationStore();
   const analysis = getAnalysisService(loadedSettings);
   const router = getCommandRouter(loadedSettings);
 
-  await Promise.all([attachments.whenReady(), screenshots.whenIdle()]);
+  const phoneLifecycle = getPhoneGatewayLifecycle(loadedSettings);
+  await initializePhoneGatewayAfterStoresReady({
+    settings: loadedSettings.get().phoneGateway,
+    screenshotReady: () => screenshots.whenIdle(),
+    attachmentReady: () => attachments.whenReady(),
+    initializeGateway: (phoneSettings) => phoneLifecycle.initialize(phoneSettings),
+  });
   registerContextMediaProtocol();
 
   if (!ipcHandlersRegistered) {

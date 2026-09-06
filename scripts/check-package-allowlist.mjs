@@ -43,7 +43,7 @@ const APP_RUNTIME_FILES = new Set([
     "SessionProjectionStore", "SettingsService", "ShortcutManager", "application-bootstrap",
     "application-instance", "capture-workflow", "codex-run-diagnostics", "context-media",
     "ipcHandlers", "network-address", "pairing-rate-limiter", "pairing-session",
-    "phone-gateway-lifecycle", "phone-projection", "screenshot-session", "secure-media-file",
+    "phone-gateway-lifecycle", "phone-gateway-startup", "phone-projection", "screenshot-session", "secure-media-file",
     "session-media-protocol", "settings-core", "shortcut-command-routing", "window-lifecycle",
   ].map((name) => `/dist-electron/electron/services/${name}.js`),
   ...[

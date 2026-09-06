@@ -68,7 +68,7 @@ function makeFakeTimer() {
   };
 }
 
-function makeFakeSocketClass() {
+function makeFakeSocketClass({ onCreate } = {}) {
   const instances = [];
   class FakeSocket {
     static OPEN = 1;
@@ -80,6 +80,7 @@ function makeFakeSocketClass() {
       this.sent = [];
       this.listeners = new Map();
       instances.push(this);
+      onCreate?.(this);
     }
 
     addEventListener(type, listener) {
@@ -115,6 +116,10 @@ function makeFakeSocketClass() {
 async function flushMicrotasks() {
   await Promise.resolve();
   await Promise.resolve();
+}
+
+function startUnitPhoneClient(root, options = {}) {
+  return phoneClientModule.startPhoneClient(root, { ...options, bootstrap: false });
 }
 
 test("phone client hydrates canonical snapshots and applies ordered conversation events without optimistic messages", () => {
@@ -242,7 +247,7 @@ test("phone client probes same-origin authentication before reconnecting and sto
   const timer = makeFakeTimer();
   const { FakeSocket, instances } = makeFakeSocketClass();
   const fetchCalls = [];
-  const client = phoneClientModule.startPhoneClient(dom.window.document.getElementById("phone-app"), {
+  const client = startUnitPhoneClient(dom.window.document.getElementById("phone-app"), {
     WebSocket: FakeSocket,
     fetch: async (input, init) => {
       fetchCalls.push({ input, init });
@@ -280,6 +285,76 @@ test("phone client probes same-origin authentication before reconnecting and sto
   }
 });
 
+test("phone client hydrates from bootstrap before opening the WebSocket", async () => {
+  const dom = new JSDOM("<div id=\"phone-app\"></div>", { url: "http://phone.test/" });
+  const previousDocument = globalThis.document;
+  globalThis.document = dom.window.document;
+  let resolveSocketCreated;
+  const socketCreated = new Promise((resolve) => { resolveSocketCreated = resolve; });
+  const { FakeSocket, instances } = makeFakeSocketClass({ onCreate: resolveSocketCreated });
+  let resolveBootstrap;
+  const bootstrap = new Promise((resolve) => { resolveBootstrap = resolve; });
+  const payload = emptySnapshot();
+  payload.conversation.messages = [message("history-1", 1, "Existing answer")];
+  const client = phoneClientModule.startPhoneClient(dom.window.document.getElementById("phone-app"), {
+    WebSocket: FakeSocket,
+    fetch: async () => bootstrap,
+    location: { protocol: "http:", host: "phone.test" },
+  });
+
+  try {
+    assert.equal(instances.length, 0);
+    resolveBootstrap({ status: 200, ok: true, json: async () => payload });
+    const socket = await socketCreated;
+    assert.equal(instances.length, 1);
+    assert.deepEqual(client.getState().snapshot.conversation.messages.map((item) => item.text), ["Existing answer"]);
+    socket.open();
+    assert.equal(client.getState().connection, "connected");
+  } finally {
+    client.stop();
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
+test("phone client shows syncing until the first authenticated snapshot and does not render null history as empty", () => {
+  const dom = new JSDOM("<div id=\"phone-app\"></div>", { url: "http://phone.test/" });
+  const previousDocument = globalThis.document;
+  globalThis.document = dom.window.document;
+  const { FakeSocket, instances } = makeFakeSocketClass();
+  const client = startUnitPhoneClient(dom.window.document.getElementById("phone-app"), {
+    WebSocket: FakeSocket,
+    fetch: async () => ({ status: 200, ok: true }),
+    location: { protocol: "http:", host: "phone.test" },
+  });
+
+  try {
+    assert.equal(client.getState().snapshot, null);
+    assert.match(dom.window.document.body.textContent ?? "", /syncing/i);
+    assert.doesNotMatch(dom.window.document.body.textContent ?? "", /No screenshots queued|Sent screenshots and answers/);
+
+    instances[0].open();
+    assert.equal(client.getState().snapshot, null);
+    assert.match(dom.window.document.body.textContent ?? "", /syncing/i);
+
+    instances[0].emit("message", { data: JSON.stringify({
+      type: "snapshot",
+      revision: 0,
+      payload: {
+        revision: 0,
+        conversation: { sessionId: "syncing", revision: 0, messages: [], attachments: [] },
+        queue: [],
+      },
+    }) });
+    assert.doesNotMatch(dom.window.document.body.textContent ?? "", /syncing/i);
+    assert.match(dom.window.document.body.textContent ?? "", /No screenshots queued/);
+  } finally {
+    client.stop();
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
 test("phone client continues bounded reconnect after network probe errors and can restart after authentication is restored", async () => {
   const dom = new JSDOM("<div id=\"phone-app\"></div>", { url: "http://phone.test/" });
   const previousDocument = globalThis.document;
@@ -287,7 +362,7 @@ test("phone client continues bounded reconnect after network probe errors and ca
   const timer = makeFakeTimer();
   const { FakeSocket, instances } = makeFakeSocketClass();
   let probeCount = 0;
-  const client = phoneClientModule.startPhoneClient(dom.window.document.getElementById("phone-app"), {
+  const client = startUnitPhoneClient(dom.window.document.getElementById("phone-app"), {
     WebSocket: FakeSocket,
     fetch: async () => {
       probeCount += 1;
@@ -338,7 +413,7 @@ test("phone client treats a forbidden authentication probe as a permanent revoca
   globalThis.document = dom.window.document;
   const timer = makeFakeTimer();
   const { FakeSocket, instances } = makeFakeSocketClass();
-  const client = phoneClientModule.startPhoneClient(dom.window.document.getElementById("phone-app"), {
+  const client = startUnitPhoneClient(dom.window.document.getElementById("phone-app"), {
     WebSocket: FakeSocket,
     fetch: async () => ({ status: 403, ok: false }),
     setTimeout: timer.setTimeout,
@@ -367,7 +442,7 @@ test("phone client treats non-2xx non-revocation probe responses as transient an
   globalThis.document = dom.window.document;
   const timer = makeFakeTimer();
   const { FakeSocket, instances } = makeFakeSocketClass();
-  const client = phoneClientModule.startPhoneClient(dom.window.document.getElementById("phone-app"), {
+  const client = startUnitPhoneClient(dom.window.document.getElementById("phone-app"), {
     WebSocket: FakeSocket,
     fetch: async () => ({ status: 503, ok: false }),
     setTimeout: timer.setTimeout,
@@ -397,7 +472,7 @@ test("phone client aborts a pending authentication probe and continues bounded b
   const timer = makeFakeTimer();
   const { FakeSocket, instances } = makeFakeSocketClass();
   let probeSignal;
-  const client = phoneClientModule.startPhoneClient(dom.window.document.getElementById("phone-app"), {
+  const client = startUnitPhoneClient(dom.window.document.getElementById("phone-app"), {
     WebSocket: FakeSocket,
     fetch: async (_input, init) => {
       probeSignal = init.signal;
@@ -439,7 +514,7 @@ test("phone client keeps SESSION_REVOKED locked through websocket error and clos
   globalThis.document = dom.window.document;
   const timer = makeFakeTimer();
   const { FakeSocket, instances } = makeFakeSocketClass();
-  const client = phoneClientModule.startPhoneClient(dom.window.document.getElementById("phone-app"), {
+  const client = startUnitPhoneClient(dom.window.document.getElementById("phone-app"), {
     WebSocket: FakeSocket,
     fetch: async () => ({ status: 200, ok: true }),
     setTimeout: timer.setTimeout,
@@ -449,6 +524,9 @@ test("phone client keeps SESSION_REVOKED locked through websocket error and clos
 
   try {
     instances[0].open();
+    instances[0].emit("message", {
+      data: JSON.stringify({ type: "snapshot", revision: 0, payload: emptySnapshot() }),
+    });
     assert.equal(client.sendCommand({ type: "capture" }), true);
     assert.ok(client.getState().commandPending);
     instances[0].emit("message", {
@@ -554,7 +632,7 @@ test("phone DOM controls send every workspace command, mirror canonical busy sta
   globalThis.document = dom.window.document;
   const timer = makeFakeTimer();
   const { FakeSocket, instances } = makeFakeSocketClass();
-  const client = phoneClientModule.startPhoneClient(dom.window.document.getElementById("phone-app"), {
+  const client = startUnitPhoneClient(dom.window.document.getElementById("phone-app"), {
     WebSocket: FakeSocket,
     fetch: async () => ({ status: 200, ok: true }),
     setTimeout: timer.setTimeout,
@@ -642,7 +720,7 @@ test("phone command errors clear only command loading and never invent messages 
   globalThis.document = dom.window.document;
   const timer = makeFakeTimer();
   const { FakeSocket, instances } = makeFakeSocketClass();
-  const client = phoneClientModule.startPhoneClient(dom.window.document.getElementById("phone-app"), {
+  const client = startUnitPhoneClient(dom.window.document.getElementById("phone-app"), {
     WebSocket: FakeSocket,
     fetch: async () => ({ status: 200, ok: true }),
     setTimeout: timer.setTimeout,
@@ -680,7 +758,7 @@ test("phone controls use canonical capturing state for busy and aria-busy withou
   globalThis.document = dom.window.document;
   const timer = makeFakeTimer();
   const { FakeSocket, instances } = makeFakeSocketClass();
-  const client = phoneClientModule.startPhoneClient(dom.window.document.getElementById("phone-app"), {
+  const client = startUnitPhoneClient(dom.window.document.getElementById("phone-app"), {
     WebSocket: FakeSocket,
     fetch: async () => ({ status: 200, ok: true }),
     setTimeout: timer.setTimeout,
