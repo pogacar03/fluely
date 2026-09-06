@@ -121,8 +121,29 @@ new temporary user-data directory. It must survive the smoke interval, then
 terminate that owned child and remove only its temporary directory. No
 persistent application launch is part of Task 4.
 
+The final RFC6598 closeout was independently verified on 2026-09-06. The
+fresh B1-B4 verifier passed `238/238`, and `npm test` passed `388/388`; the
+previously recorded typecheck, phone build, desktop build, and diff checks
+also remained green. `npm run package:dir` passed, including its embedded
+strict package allowlist. One initial packaged-smoke attempt hit a transient
+macOS `NSApplication` `SIGABRT` before entering the project JavaScript; an
+independent fresh rerun then exited `0`, kept the packaged app alive for the
+required five seconds, terminated only its owned child, and left no smoke
+child or temporary directory behind. The standalone
+`node scripts/check-package-allowlist.mjs` check also passed for the current
+`app.asar`, including required entries, renderer assets, unpacked content,
+symlink policy, and sensitive-file exclusions. PID 74415 was confirmed as
+the expected packaged executable, received only a graceful `SIGTERM`, and
+exited; protected PIDs 34152, 34165, and 34166 were not touched. No Fluely
+process was left resident.
+
 ## Security and lifecycle assertions
 
+- RFC6598 shared space (`100.64.0.0/10`) is offered only when the user confirms
+  that the address is reachable on a trusted LAN or shared network. Selection
+  still rejects public, loopback, link-local, and obvious virtual or
+  point-to-point interfaces; RFC1918 addresses remain preferred when both are
+  available.
 - Unauthenticated, stale-cookie, forged Host/Origin, traversal, wrong-media-namespace, malformed-frame, oversized-frame, prompt-limit, attachment-limit, rate-limit, duplicate-ID, and backpressure paths fail closed with bounded safe responses.
 - Pairing secrets are one-use and expire after two minutes. Re-pairing closes the old phone session; disabling and quitting close listeners and sockets. Disable returns only after phone-origin router work is quiescent; quit globally quiesces shared router work.
 - Phone errors and default diagnostics contain stable public fields only; no local path, pairing secret, cookie, prompt, or provider detail is returned to the phone or renderer.

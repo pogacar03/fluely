@@ -452,12 +452,12 @@ function isWebSocketKey(value: string | string[] | undefined): boolean {
 function buildGatewayOrigin(address: string, port: number): string {
   const canonicalAddress = canonicalizeIpv4(address);
   if (!canonicalAddress || !isPrivateIpv4(canonicalAddress)) {
-    throw new Error("Gateway address is not a canonical private IPv4 address.");
+    throw new Error("Gateway address is not a canonical private or shared LAN IPv4 address.");
   }
 
   const origin = new URL(`http://${canonicalAddress}:${port}`);
   if (origin.protocol !== "http:" || origin.hostname !== canonicalAddress || !isPrivateIpv4(origin.hostname)) {
-    throw new Error("Gateway origin hostname did not preserve its private IPv4 address.");
+    throw new Error("Gateway origin hostname did not preserve its private or shared LAN IPv4 address.");
   }
   return origin.origin;
 }
@@ -682,7 +682,7 @@ export class PhoneGateway {
     const address = selectPrivateIpv4(this.getNetworkInterfaces());
     if (!address) {
       this.pairing.revokeAll();
-      return errorStatus("no_lan_address", "No private LAN address is available.");
+      return errorStatus("no_lan_address", "No private or shared LAN address is available.");
     }
 
     const generation = this.beginPairingGeneration();

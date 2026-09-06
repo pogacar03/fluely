@@ -10,7 +10,7 @@ export interface PhoneConnectionPanelProps {
 }
 
 const SAFE_ERROR_COPY: Record<Extract<PhoneGatewayStatus, { state: "error" }>['code'], string> = {
-  no_lan_address: "No private LAN address is available.",
+  no_lan_address: "No private or shared LAN address is available.",
   port_unavailable: "No gateway port is available.",
   start_failed: "Phone companion could not start.",
 };

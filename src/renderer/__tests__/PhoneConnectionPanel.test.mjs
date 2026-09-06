@@ -86,6 +86,28 @@ test("phone panel hides QR credentials while disabled and renders LAN-only pairi
   assert.match(document.body.textContent ?? "", /unencrypted/i);
 });
 
+test("phone panel renders the exact shared-LAN address error message", async () => {
+  assert.equal(typeof PhoneConnectionPanel, "function");
+  const root = createRoot(document.getElementById("root"));
+  roots.push(root);
+  await act(async () => {
+    root.render(React.createElement(PhoneConnectionPanel, {
+      status: {
+        state: "error",
+        code: "no_lan_address",
+        message: "No private or shared LAN address is available.",
+      },
+      onEnable: () => undefined,
+      onDisable: () => undefined,
+      onRegeneratePairing: () => undefined,
+    }));
+  });
+  assert.equal(
+    document.querySelector('[role="alert"]')?.textContent,
+    "No private or shared LAN address is available.",
+  );
+});
+
 test("phone panel supports regeneration and disable/revoke actions with an expiry countdown", async () => {
   assert.equal(typeof PhoneConnectionPanel, "function");
   const root = createRoot(document.getElementById("root"));

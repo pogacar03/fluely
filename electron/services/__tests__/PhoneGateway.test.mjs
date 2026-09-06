@@ -191,9 +191,28 @@ test("gateway refuses to listen without a private LAN address", async () => {
   assert.deepEqual(await gateway.start(), {
     state: "error",
     code: "no_lan_address",
-    message: "No private LAN address is available.",
+    message: "No private or shared LAN address is available.",
   });
   assert.equal(created.length, 0);
+});
+
+test("gateway advertises an RFC6598 shared address in its origin and QR pairing URL", async () => {
+  assert.equal(typeof gatewayModule.PhoneGateway, "function");
+  const qrUrls = [];
+  const { gateway } = makeGateway({
+    networkInterfaces: () => ({
+      en0: [{ address: "100.119.160.60", family: "IPv4", internal: false }],
+    }),
+    portCandidates: [0],
+    qrUrls,
+  });
+
+  const ready = await gateway.start();
+  assert.equal(ready.state, "ready");
+  assert.equal(ready.origin, "http://100.119.160.60:45678");
+  assert.equal(new URL(qrUrls[0]).origin, ready.origin);
+  assert.equal(new URL(qrUrls[0]).pathname, "/pair");
+  assert.ok(new URL(qrUrls[0]).searchParams.get("secret"));
 });
 
 function request(port, requestPath, headers = {}) {
@@ -850,7 +869,7 @@ test("gateway rejects non-canonical private addresses before constructing an adv
   assert.deepEqual(await gateway.start(), {
     state: "error",
     code: "no_lan_address",
-    message: "No private LAN address is available.",
+    message: "No private or shared LAN address is available.",
   });
 });
 
