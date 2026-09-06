@@ -163,6 +163,33 @@ test("ScreenshotService cancellation is bounded and a late native source cannot 
   assert.deepEqual(await readdir(directory), []);
 });
 
+test("ScreenshotService cancellation matches the owner that atomically claimed capture", async () => {
+  for (const activeOwner of ["desktop", "phone"]) {
+    const directory = await makeDirectory();
+    let releaseSources;
+    const adapters = makeAdapters({
+      getSources: () => new Promise((resolve) => { releaseSources = resolve; }),
+    });
+    const service = makeService(directory, adapters, { sourceTimeoutMs: 10_000 });
+    const pending = service.capture(activeOwner);
+    while (!releaseSources) await new Promise((resolve) => setImmediate(resolve));
+
+    const failedOwner = activeOwner === "desktop" ? "phone" : "desktop";
+    await assert.rejects(service.capture(failedOwner), (error) => error?.code === "CAPTURE_IN_PROGRESS");
+    await service.cancelPending(failedOwner);
+    assert.equal(service.getState().capturing, true, activeOwner);
+
+    await service.cancelPending(activeOwner);
+    await assert.rejects(pending, (error) => error?.code === "SCREEN_CAPTURE_FAILED");
+    assert.equal(service.getState().capturing, false, activeOwner);
+
+    releaseSources([{ display_id: "42", thumbnail: makeThumbnail("late") }]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(service.getState().items, [], activeOwner);
+    assert.deepEqual(await readdir(directory), [], activeOwner);
+  }
+});
+
 test("ScreenshotService detaches a native source that never settles after capture timeout", async () => {
   for (const lateOutcome of ["resolve", "reject"]) {
     const directory = await makeDirectory();

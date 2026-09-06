@@ -712,11 +712,14 @@ test("quiesce retains timed-out capture ownership and cancels only the requested
     });
     let cancelCalls = 0;
     let capturing = true;
-    harness.screenshots.capture = async () => {
+    let activeOwner;
+    harness.screenshots.capture = async (owner) => {
+      activeOwner = owner;
       throw Object.assign(new Error("capture timed out"), { code: "SCREEN_CAPTURE_FAILED" });
     };
     harness.screenshots.getState = () => ({ items: [], capturing, permission: "granted" });
-    harness.screenshots.cancelPending = async () => {
+    harness.screenshots.cancelPending = async (owner) => {
+      if (owner && owner !== activeOwner) return;
       cancelCalls += 1;
       capturing = false;
     };
@@ -726,6 +729,50 @@ test("quiesce retains timed-out capture ownership and cancels only the requested
     await harness.router.quiesce("phone");
     assert.equal(cancelCalls, source === "phone" ? 1 : 0, source);
     if (source === "desktop") {
+      await harness.router.quiesce("all");
+      assert.equal(cancelCalls, 1);
+    }
+  }
+});
+
+test("a failed cross-source capture attempt cannot replace the active capture owner", async () => {
+  for (const activeOwner of ["desktop", "phone"]) {
+    const harness = await makeHarness({
+      provider: { stream: async function* () { yield "unused"; } },
+    });
+    let capturing = false;
+    let claimedOwner;
+    let cancelCalls = 0;
+    harness.screenshots.capture = async (owner) => {
+      if (capturing) {
+        throw Object.assign(new Error("capture in progress"), { code: "CAPTURE_IN_PROGRESS" });
+      }
+      capturing = true;
+      claimedOwner = owner;
+      throw Object.assign(new Error("capture timed out"), { code: "SCREEN_CAPTURE_FAILED" });
+    };
+    harness.screenshots.getState = () => ({ items: [], capturing, permission: "granted" });
+    harness.screenshots.cancelPending = async (owner) => {
+      if (owner && owner !== claimedOwner) return;
+      cancelCalls += 1;
+      capturing = false;
+    };
+    harness.screenshots.whenIdle = () => new Promise(() => {});
+
+    const failedOwner = activeOwner === "desktop" ? "phone" : "desktop";
+    await assert.rejects(
+      harness.router.execute({ type: "capture", requestId: `${activeOwner}-owns-capture` }, activeOwner),
+      { code: "SCREEN_CAPTURE_FAILED" },
+    );
+    await assert.rejects(
+      harness.router.execute({ type: "capture", requestId: `${failedOwner}-cannot-claim` }, failedOwner),
+      { code: "CAPTURE_IN_PROGRESS" },
+    );
+
+    await harness.router.quiesce("phone");
+    assert.equal(cancelCalls, activeOwner === "phone" ? 1 : 0, activeOwner);
+    if (activeOwner === "desktop") {
+      assert.equal(capturing, true);
       await harness.router.quiesce("all");
       assert.equal(cancelCalls, 1);
     }

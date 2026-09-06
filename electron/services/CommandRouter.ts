@@ -20,10 +20,10 @@ import type {
 export interface CommandRouterScreenshotPort {
   getState(): ScreenshotState;
   getManagedPaths(ids?: readonly string[]): string[];
-  capture(): Promise<ContextScreenshot>;
+  capture(source: "desktop" | "phone"): Promise<ContextScreenshot>;
   delete(id: string): Promise<ScreenshotState>;
   clear(): Promise<ScreenshotState>;
-  cancelPending?(): Promise<void>;
+  cancelPending?(source?: "desktop" | "phone"): Promise<void>;
   whenIdle?(): Promise<void>;
 }
 
@@ -140,7 +140,6 @@ export class CommandRouter {
   private readonly scopes = new Set<CommandScope>();
   private phoneGeneration = 0;
   private globalGeneration = 0;
-  private captureOwner: "desktop" | "phone" | null = null;
 
   public constructor(options: CommandRouterOptions) {
     this.screenshots = options.screenshots;
@@ -169,11 +168,7 @@ export class CommandRouter {
     );
     for (const target of targets) target.cancel(cancellation);
 
-    const ownedCapture = this.captureOwner;
-    if (ownedCapture && (scope === "all" || ownedCapture === "phone")) {
-      await this.screenshots.cancelPending?.();
-      if (this.captureOwner === ownedCapture) this.captureOwner = null;
-    }
+    await this.screenshots.cancelPending?.(scope === "phone" ? "phone" : undefined);
     const activeRun = this.activeRun;
     if (activeRun && (scope === "all" || activeRun.source === "phone")) {
       await this.analysis.cancel();
@@ -193,7 +188,7 @@ export class CommandRouter {
   private async executeOnce(command: WorkspaceCommand, source: "desktop" | "phone", scope: CommandScope): Promise<CommandResult> {
     switch (command.type) {
       case "capture":
-        await this.capture(source);
+        await this.screenshots.capture(source);
         this.assertCurrent(scope);
         return this.result();
       case "remove":
@@ -212,7 +207,7 @@ export class CommandRouter {
       case "send":
         return this.send(command.prompt, source, scope);
       case "capture-and-send":
-        await this.capture(source);
+        await this.screenshots.capture(source);
         this.assertCurrent(scope);
         return this.send(command.prompt, source, scope);
     }
@@ -396,26 +391,6 @@ export class CommandRouter {
       conversation: this.conversation.snapshot(),
       analysis: this.analysis.getState(),
     };
-  }
-
-  private async capture(source: "desktop" | "phone"): Promise<ContextScreenshot> {
-    this.captureOwner = source;
-    try {
-      return await this.screenshots.capture();
-    } finally {
-      if (!this.screenshots.getState().capturing) {
-        if (this.captureOwner === source) this.captureOwner = null;
-      } else {
-        const idle = this.screenshots.whenIdle?.();
-        if (idle) {
-          void idle.finally(() => {
-            if (!this.screenshots.getState().capturing && this.captureOwner === source) {
-              this.captureOwner = null;
-            }
-          }).catch(() => undefined);
-        }
-      }
-    }
   }
 
   private executeScoped(command: WorkspaceCommand, source: "desktop" | "phone"): Promise<CommandResult> {

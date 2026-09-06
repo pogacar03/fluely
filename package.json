@@ -19,6 +19,7 @@
     "smoke:packaged": "node scripts/smoke-packaged.mjs"
   },
   "devDependencies": {
+    "@electron/asar": "^3.4.1",
     "@types/node": "^22.10.2",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^18.3.12",

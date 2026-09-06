@@ -81,6 +81,14 @@ export interface ScreenshotServiceOptions {
 }
 
 export type ScreenshotServiceError = IpcError;
+export type ScreenshotCaptureOwner = "desktop" | "phone";
+
+interface ActiveCaptureBoundary {
+  owner: ScreenshotCaptureOwner;
+  settled: Promise<void>;
+  cancel(error: ScreenshotServiceError): void;
+  detach(): void;
+}
 
 const DEFAULT_SOURCE_TIMEOUT_MS = 5000;
 const MANAGED_FILE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.png(?:\.tmp)?$/i;
@@ -199,9 +207,7 @@ export class ScreenshotService {
   private capturing = false;
   private disposed = false;
   private permission: ScreenshotPermission = "unavailable";
-  private cancelCapture: ((error: ScreenshotServiceError) => void) | null = null;
-  private detachCapture: (() => void) | null = null;
-  private activeCapture: Promise<void> | null = null;
+  private activeCapture: ActiveCaptureBoundary | null = null;
 
   public constructor(private readonly options: ScreenshotServiceOptions) {
     this.directory = options.directory ??
@@ -249,7 +255,7 @@ export class ScreenshotService {
     return this.directory;
   }
 
-  public capture(): Promise<ContextScreenshot> {
+  public capture(owner: ScreenshotCaptureOwner = "desktop"): Promise<ContextScreenshot> {
     if (this.capturing) {
       return Promise.reject(captureInProgress());
     }
@@ -272,9 +278,6 @@ export class ScreenshotService {
     const detachNotice = new Promise<void>((resolve) => {
       detachCapture = resolve;
     });
-    this.cancelCapture = cancelCapture;
-    this.detachCapture = detachCapture;
-
     const operation = this.enqueueMutation(async () => {
       let pendingSource: Promise<void> | undefined;
       let initialPermission: ScreenshotPermission = "unavailable";
@@ -346,23 +349,28 @@ export class ScreenshotService {
         this.emitState();
       }
     });
-    const activeCapture = operation.then(() => undefined, () => undefined);
+    const activeCapture: ActiveCaptureBoundary = {
+      owner,
+      settled: operation.then(() => undefined, () => undefined),
+      cancel: cancelCapture,
+      detach: detachCapture,
+    };
     this.activeCapture = activeCapture;
-    void activeCapture.finally(() => {
+    void activeCapture.settled.finally(() => {
       if (this.activeCapture === activeCapture) {
         this.activeCapture = null;
-        this.cancelCapture = null;
-        this.detachCapture = null;
       }
     });
     return Promise.race([operation, timeoutNotice, cancellationNotice]);
   }
 
   /** Cancels the current capture boundary and waits until it can no longer persist queue state. */
-  public async cancelPending(): Promise<void> {
-    this.cancelCapture?.(captureFailed());
-    this.detachCapture?.();
-    await this.activeCapture;
+  public async cancelPending(owner?: ScreenshotCaptureOwner): Promise<void> {
+    const activeCapture = this.activeCapture;
+    if (!activeCapture || (owner && activeCapture.owner !== owner)) return;
+    activeCapture.cancel(captureFailed());
+    activeCapture.detach();
+    await activeCapture.settled;
   }
 
   /** Resolves only after all queued mutations, including a late native source settle, are idle. */

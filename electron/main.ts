@@ -361,10 +361,10 @@ function getCommandRouter(settings: SettingsService): CommandRouter {
       screenshots: {
         getState: () => screenshots.getState(),
         getManagedPaths: (ids) => screenshots.getManagedPaths(ids),
-        capture: () => captureCurrentWindow(),
+        capture: (source) => captureCurrentWindow(source),
         delete: (id) => screenshots.delete(id),
         clear: () => screenshots.clear(),
-        cancelPending: () => screenshots.cancelPending(),
+        cancelPending: (source) => screenshots.cancelPending(source),
         whenIdle: () => screenshots.whenIdle(),
       },
       attachments: getAttachmentStore(),
@@ -428,7 +428,7 @@ function captureFailure(): IpcError {
   };
 }
 
-function captureCurrentWindow(): Promise<ContextScreenshot> {
+function captureCurrentWindow(source: "desktop" | "phone" = "desktop"): Promise<ContextScreenshot> {
   const window = mainWindow;
   if (!window || window.isDestroyed()) {
     return Promise.reject(captureFailure());
@@ -437,7 +437,7 @@ function captureCurrentWindow(): Promise<ContextScreenshot> {
   return createScreenshotWorkflow({
     window,
     platform: process.platform,
-    capture: () => getScreenshotService().capture(),
+    capture: () => getScreenshotService().capture(source),
     whenIdle: () => getScreenshotService().whenIdle(),
     delete: (id) => getScreenshotService().delete(id),
     clear: () => getScreenshotService().clear(),

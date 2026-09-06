@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
@@ -133,6 +134,17 @@ test("package:dir runs the strict checker after electron-builder with fail-fast 
   ]) {
     assert.ok(builderConfig.includes(pattern), pattern);
   }
+});
+
+test("the package checker resolves its asar parser as a direct declared dependency", () => {
+  const projectRoot = path.resolve(__dirname, "../..");
+  const result = spawnSync("npm", ["ls", "@electron/asar", "--depth=0", "--json"], {
+    cwd: projectRoot,
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const tree = JSON.parse(result.stdout);
+  assert.match(tree.dependencies?.["@electron/asar"]?.version ?? "", /^3\.4\./);
 });
 
 test("manifest rejects unknown dependencies, unsafe paths, and unpacked sensitive entries", () => {

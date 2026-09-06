@@ -277,10 +277,10 @@ async function createRealCommandRuntime(root, control) {
     screenshots: {
       getState: () => screenshots.getState(),
       getManagedPaths: (ids) => screenshots.getManagedPaths(ids),
-      capture: () => screenshots.capture(),
+      capture: (source) => screenshots.capture(source),
       delete: (id) => screenshots.delete(id),
       clear: () => screenshots.clear(),
-      cancelPending: () => screenshots.cancelPending(),
+      cancelPending: (source) => screenshots.cancelPending(source),
       whenIdle: () => screenshots.whenIdle(),
     },
     attachments,
