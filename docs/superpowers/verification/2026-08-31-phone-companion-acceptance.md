@@ -90,6 +90,32 @@ and `git diff --check` also passed. `npm run package:dir`, packaged smoke, and
 real app.asar/allowlist inspection are intentionally left to the independent
 verifier for this round.
 
+The final 2026-09-06 review round added bounded detachment for a native capture
+promise that remains pending after the public timeout. `cancelPending()`, phone
+disable, and app quit return without waiting forever; generation/cancellation
+guards keep any late resolve or rejection from writing a file, queue item, or
+conversation update. Lifecycle quiescence remains source-scoped: phone disable
+cancels only phone-origin work, while app quit/restart uses global quiescence.
+This is separate from the user's phone **Cancel** and **Clear conversation**
+commands, which intentionally control the shared active analysis regardless of
+which device started it.
+
+Package admission now rejects every basename ending in `.env` as well as
+`.env`/`.env.*`, and continues to reject maps, `.npmrc`, keys, credentials,
+secrets, and coverage paths everywhere, including runtime dependencies.
+Application-owned tests and fixtures are always rejected; a declared runtime
+dependency may retain ordinary test files for ecosystem compatibility. The
+checker reads `dist/index.html` from the archive and requires each referenced
+hashed renderer asset to exist. `npm run package:dir` invokes the checker after
+`electron-builder --dir` with fail-fast command chaining.
+
+Final-round TDD was RED `52/58` and GREEN `58/58`. The exact B1-B4 command
+above passed `230/230`; `npm test` passed `380/380`; typecheck, phone build,
+desktop build, `package:dir` with its embedded allowlist, packaged smoke,
+standalone app.asar/allowlist inspection, and diff-check all passed. The
+physical-phone matrix below remains pending the dedicated user-run launch and
+is not claimed complete here.
+
 `smoke:packaged` may launch only the packaged executable it discovers, with a
 new temporary user-data directory. It must survive the smoke interval, then
 terminate that owned child and remove only its temporary directory. No

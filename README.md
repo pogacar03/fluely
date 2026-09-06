@@ -86,7 +86,7 @@ Shortcuts will be configurable, validated on registration, and surfaced when the
 
 ## Background screenshots and capture privacy
 
-`⌘ ⇧ 8` captures the display nearest the pointer through Electron's documented `desktopCapturer` API, even when Fluely is in the background. Before capture, Fluely hides its own window, waits briefly for the compositor, and restores the previous visible state without activating the app on macOS. If the native request times out, Fluely returns an error while keeping the window hidden until that request settles; restart Fluely if it never settles. The session-scoped queue stores at most five PNGs below Fluely's local user-data directory; startup and Clear remove only strict UUID-managed PNG/temp files and preserve unrelated files. The renderer receives only opaque IDs, timestamps, and dimensions, never filesystem paths or image bytes.
+`⌘ ⇧ 8` captures the display nearest the pointer through Electron's documented `desktopCapturer` API, even when Fluely is in the background. Before capture, Fluely hides its own window, waits briefly for the compositor, and restores the previous visible state without activating the app on macOS. If the native request times out, Fluely returns an error while continuing to observe it safely; disabling the phone companion or quitting detaches a phone-owned pending request in bounded time, and a late native result cannot write a file or change the shared queue. The session-scoped queue stores at most five PNGs below Fluely's local user-data directory; startup and Clear remove only strict UUID-managed PNG/temp files and preserve unrelated files. The renderer receives only opaque IDs, timestamps, and dimensions, never filesystem paths or image bytes.
 
 Capture protection is enabled by default with Electron's `setContentProtection(true)` and is reapplied when the window is shown. On macOS, Screen Recording permission is required. The first capture may display the macOS system authorization dialog; Fluely cannot bypass or suppress that consent. If consent is denied or restricted, the corresponding state and Settings guidance are reported.
 
@@ -126,6 +126,8 @@ The first LAN slice uses HTTP and WebSocket without TLS. Use it only on a truste
 
 Desktop and phone project one canonical session. **Capture** adds a computer screenshot to the shared draft queue, **Send images** sends the queue without capturing or clearing it, **Capture & ask** performs both actions, and **Cancel**, **Clear queue**, **Clear conversation**, and **Remove** remain explicit controls. The desktop Settings and Work views are two mutually exclusive views in one window; Settings starts the workspace and Work returns to Settings.
 
+Phone-issued **Cancel** and **Clear conversation** are intentional remote controls of the shared conversation, so they may stop the current analysis even when it was started on the desktop. Lifecycle shutdown is narrower: disabling the phone companion cancels only phone-origin work, while quitting or restarting Fluely globally quiesces all work before transient state is cleared.
+
 ## Development
 
 Milestone 1 is runnable locally. The standard verification loop is:
@@ -151,7 +153,9 @@ desktop-origin work. Every phone context/attachment URL requires a rotating
 session capability, including store-only gateway configurations. Package
 validation uses an explicit application runtime manifest plus renderer assets
 referenced by the built index; undeclared application files and globally
-sensitive dependency files fail closed. The final physical-phone matrix remains
+sensitive dependency files fail closed. `package:dir` runs this strict check
+automatically after packaging, so a manifest failure makes the package command
+fail. The final physical-phone matrix remains
 pending the dedicated user launch; this implementation task does not leave
 Fluely running.
 

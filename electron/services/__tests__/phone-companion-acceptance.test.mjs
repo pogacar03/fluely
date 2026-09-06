@@ -230,6 +230,7 @@ async function createRealCommandRuntime(root, control) {
     },
     idFactory: () => screenshotId,
     now: () => new Date(500),
+    ...(control.sourceTimeoutMs ? { sourceTimeoutMs: control.sourceTimeoutMs } : {}),
     onStateChanged: (state) => {
       for (const listener of queueListeners) listener(state);
     },
@@ -280,6 +281,7 @@ async function createRealCommandRuntime(root, control) {
       delete: (id) => screenshots.delete(id),
       clear: () => screenshots.clear(),
       cancelPending: () => screenshots.cancelPending(),
+      whenIdle: () => screenshots.whenIdle(),
     },
     attachments,
     conversation,
@@ -594,6 +596,41 @@ test("disable quiesces a gated real phone capture before closing and prevents la
     control.captureGate.resolve();
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.deepEqual(runtime.screenshots.getState().items, []);
+  } finally {
+    control.captureGate.resolve();
+    control.commandGate.resolve();
+    try { socket?.close(); } catch { /* test cleanup */ }
+    await disposeRealRuntime(runtime);
+  }
+});
+
+test("disable detaches a phone capture whose native source remains pending after timeout", { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "fluely-phone-timeout-stop-"));
+  temporaryDirectories.push(root);
+  const control = { captureGate: deferred(), commandGate: deferred(), sourceTimeoutMs: 5 };
+  const runtime = await createRealCommandRuntime(root, control);
+  let socket;
+  try {
+    const ready = await runtime.gateway.start();
+    const port = Number(new URL(ready.origin).port);
+    const cookie = await pair(runtime, port);
+    const phone = await openWebSocket(port, cookie, ready.origin);
+    socket = phone.socket;
+    await phone.nextFrame();
+    socket.send(JSON.stringify({
+      type: "command",
+      command: { type: "capture", requestId: "capture-timeout-stop" },
+    }));
+    await waitFor(() => runtime.screenshots.getState().capturing === true);
+    await waitFor(() => phone.frames.some((frame) => frame.type === "error" && frame.requestId === "capture-timeout-stop"));
+
+    await Promise.race([
+      runtime.gateway.stop(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("gateway stop waited for native capture")), 500)),
+    ]);
+    assert.equal(runtime.screenshots.getState().capturing, false);
+    assert.deepEqual(runtime.screenshots.getState().items, []);
+    await assertPortCanBind(port);
   } finally {
     control.captureGate.resolve();
     control.commandGate.resolve();

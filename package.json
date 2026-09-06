@@ -15,7 +15,7 @@
     "dev": "npm run build && electron .",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p electron/tsconfig.json --noEmit",
     "test": "npm run build:electron && npm run build:phone && node --test",
-    "package:dir": "npm run build && electron-builder --dir",
+    "package:dir": "npm run build && electron-builder --dir && node scripts/check-package-allowlist.mjs",
     "smoke:packaged": "node scripts/smoke-packaged.mjs"
   },
   "devDependencies": {

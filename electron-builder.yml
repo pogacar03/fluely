@@ -12,8 +12,13 @@ files:
   - assets/icon.svg
   - '!**/*.map'
   - '!**/*.test.*'
-  - '!**/.env'
-  - '!**/.env.*'
+  - '!**/coverage{,/**}'
+  - '!**/*.env'
+  - '!**/.env{,.*}'
+  - '!**/.npmrc'
+  - '!**/*.{pem,key}'
+  - '!**/credentials*'
+  - '!**/secret*'
 asar: true
 mac:
   category: public.app-category.productivity

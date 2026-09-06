@@ -2,6 +2,7 @@ import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, posix, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import { extractFile } from "@electron/asar";
 
 const root = process.cwd();
 const configPath = join(root, "electron-builder.yml");
@@ -59,7 +60,7 @@ const APP_RUNTIME_FILES = new Set([
 const APP_OWNED_PREFIXES = ["/assets", "/dist", "/dist-electron", "/dist-phone"];
 const GLOBAL_SENSITIVE_PATTERNS = [
   /\.map$/i,
-  /(?:^|\/)\.env(?:\..*)?$/i,
+  /(?:^|\/)(?:\.env(?:\..*)?|[^/]+\.env)$/i,
   /(?:^|\/)\.npmrc$/i,
   /\.(?:pem|key)$/i,
   /(?:^|\/)(?:credentials|secret)[^/]*$/i,
@@ -188,6 +189,11 @@ export function validatePackageContents(
   for (const requiredEntry of REQUIRED_PACKAGE_ENTRIES) {
     if (!entrySet.has(requiredEntry)) errors.push(`required runtime entry is missing from app.asar: ${requiredEntry}`);
   }
+  for (const rendererAssetPath of allowedRendererAssets) {
+    if (!entrySet.has(rendererAssetPath)) {
+      errors.push(`renderer index asset is missing from app.asar: ${rendererAssetPath}`);
+    }
+  }
 
   const packageMain = typeof packageJson?.main === "string"
     ? `/${packageJson.main.replace(/^\/+/, "")}`
@@ -235,8 +241,9 @@ function readPackageLock() {
 
 /**
  * Production dependencies are allowed by package root, including their own
- * test/coverage files when electron-builder retains them. App-owned paths are
- * strict; dependency-owned test files are not blanket-rejected.
+ * test files when electron-builder retains them. App-owned paths are strict;
+ * dependency-owned test files are not blanket-rejected, while the global
+ * sensitive-file policy applies to every package path.
  */
 export function getRuntimePackageRoots(packageJson = {}, packageLock = {}) {
   const roots = new Set();
@@ -328,11 +335,9 @@ export function runPackageAllowlistCheck() {
   }
 
   const packageJson = readPackageJson();
-  const rendererIndex = spawnSync(asarCommand, ["extract-file", asarPath, "dist/index.html"], { encoding: "utf8" });
   let rendererAssetPaths = [];
   try {
-    if (rendererIndex.status !== 0) throw new Error("renderer index could not be inspected.");
-    rendererAssetPaths = rendererAssetsFromIndex(rendererIndex.stdout);
+    rendererAssetPaths = rendererAssetsFromIndex(extractFile(asarPath, "dist/index.html").toString("utf8"));
   } catch (error) {
     errors.push(error instanceof Error ? error.message : "renderer index could not be inspected.");
   }

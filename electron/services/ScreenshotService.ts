@@ -200,6 +200,7 @@ export class ScreenshotService {
   private disposed = false;
   private permission: ScreenshotPermission = "unavailable";
   private cancelCapture: ((error: ScreenshotServiceError) => void) | null = null;
+  private detachCapture: (() => void) | null = null;
   private activeCapture: Promise<void> | null = null;
 
   public constructor(private readonly options: ScreenshotServiceOptions) {
@@ -267,7 +268,12 @@ export class ScreenshotService {
     const cancellationNotice = new Promise<never>((_, reject) => {
       cancelCapture = reject;
     });
+    let detachCapture!: () => void;
+    const detachNotice = new Promise<void>((resolve) => {
+      detachCapture = resolve;
+    });
     this.cancelCapture = cancelCapture;
+    this.detachCapture = detachCapture;
 
     const operation = this.enqueueMutation(async () => {
       let pendingSource: Promise<void> | undefined;
@@ -334,7 +340,7 @@ export class ScreenshotService {
         throw captureFailed();
       } finally {
         if (pendingSource) {
-          await pendingSource;
+          await Promise.race([pendingSource, detachNotice]);
         }
         this.capturing = false;
         this.emitState();
@@ -346,6 +352,7 @@ export class ScreenshotService {
       if (this.activeCapture === activeCapture) {
         this.activeCapture = null;
         this.cancelCapture = null;
+        this.detachCapture = null;
       }
     });
     return Promise.race([operation, timeoutNotice, cancellationNotice]);
@@ -354,6 +361,7 @@ export class ScreenshotService {
   /** Cancels the current capture boundary and waits until it can no longer persist queue state. */
   public async cancelPending(): Promise<void> {
     this.cancelCapture?.(captureFailed());
+    this.detachCapture?.();
     await this.activeCapture;
   }
 

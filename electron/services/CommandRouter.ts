@@ -24,6 +24,7 @@ export interface CommandRouterScreenshotPort {
   delete(id: string): Promise<ScreenshotState>;
   clear(): Promise<ScreenshotState>;
   cancelPending?(): Promise<void>;
+  whenIdle?(): Promise<void>;
 }
 
 export interface CommandRouterAttachmentPort {
@@ -139,6 +140,7 @@ export class CommandRouter {
   private readonly scopes = new Set<CommandScope>();
   private phoneGeneration = 0;
   private globalGeneration = 0;
+  private captureOwner: "desktop" | "phone" | null = null;
 
   public constructor(options: CommandRouterOptions) {
     this.screenshots = options.screenshots;
@@ -167,9 +169,10 @@ export class CommandRouter {
     );
     for (const target of targets) target.cancel(cancellation);
 
-    const activeCommand = this.activeCommand;
-    if (activeCommand && (scope === "all" || activeCommand.source === "phone")) {
+    const ownedCapture = this.captureOwner;
+    if (ownedCapture && (scope === "all" || ownedCapture === "phone")) {
       await this.screenshots.cancelPending?.();
+      if (this.captureOwner === ownedCapture) this.captureOwner = null;
     }
     const activeRun = this.activeRun;
     if (activeRun && (scope === "all" || activeRun.source === "phone")) {
@@ -190,7 +193,7 @@ export class CommandRouter {
   private async executeOnce(command: WorkspaceCommand, source: "desktop" | "phone", scope: CommandScope): Promise<CommandResult> {
     switch (command.type) {
       case "capture":
-        await this.screenshots.capture();
+        await this.capture(source);
         this.assertCurrent(scope);
         return this.result();
       case "remove":
@@ -209,7 +212,7 @@ export class CommandRouter {
       case "send":
         return this.send(command.prompt, source, scope);
       case "capture-and-send":
-        await this.screenshots.capture();
+        await this.capture(source);
         this.assertCurrent(scope);
         return this.send(command.prompt, source, scope);
     }
@@ -393,6 +396,26 @@ export class CommandRouter {
       conversation: this.conversation.snapshot(),
       analysis: this.analysis.getState(),
     };
+  }
+
+  private async capture(source: "desktop" | "phone"): Promise<ContextScreenshot> {
+    this.captureOwner = source;
+    try {
+      return await this.screenshots.capture();
+    } finally {
+      if (!this.screenshots.getState().capturing) {
+        if (this.captureOwner === source) this.captureOwner = null;
+      } else {
+        const idle = this.screenshots.whenIdle?.();
+        if (idle) {
+          void idle.finally(() => {
+            if (!this.screenshots.getState().capturing && this.captureOwner === source) {
+              this.captureOwner = null;
+            }
+          }).catch(() => undefined);
+        }
+      }
+    }
   }
 
   private executeScoped(command: WorkspaceCommand, source: "desktop" | "phone"): Promise<CommandResult> {

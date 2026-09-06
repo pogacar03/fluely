@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
@@ -61,6 +62,12 @@ test("renderer assets must be hashed files referenced by the packaged index", ()
     () => packageAllowlist.rendererAssetsFromIndex('<script src="./assets/dev.js"></script>'),
     /unexpected asset/i,
   );
+
+  const missingErrors = packageAllowlist.validatePackageContents(REQUIRED_ENTRIES.join("\n"), {
+    packageJson: { main: "dist-electron/electron/main.js" },
+    rendererAssetPaths: [referenced],
+  });
+  assert.ok(missingErrors.some((error) => error.includes(referenced) && /missing/i.test(error)));
 });
 
 test("manifest rejects app-owned malicious fixtures while allowing a runtime dependency test file", () => {
@@ -79,6 +86,7 @@ test("manifest rejects app-owned malicious fixtures while allowing a runtime dep
     "/node_modules/pkg/credentials.json",
     "/node_modules/pkg/private.key",
     "/node_modules/pkg/coverage/report.json",
+    "/node_modules/pkg/config.env",
   ].join("\n");
 
   const errors = packageAllowlist.validatePackageContents(listing, {
@@ -99,10 +107,32 @@ test("manifest rejects app-owned malicious fixtures while allowing a runtime dep
     "/node_modules/pkg/credentials.json",
     "/node_modules/pkg/private.key",
     "/node_modules/pkg/coverage/report.json",
+    "/node_modules/pkg/config.env",
   ]) {
     assert.ok(errors.some((error) => error.includes(fixture)), fixture);
   }
   assert.equal(errors.some((error) => error.includes("/node_modules/pkg/test.js")), false);
+});
+
+test("package:dir runs the strict checker after electron-builder with fail-fast propagation", () => {
+  const packageJson = JSON.parse(readFileSync(path.resolve(__dirname, "../../package.json"), "utf8"));
+  const builderConfig = readFileSync(path.resolve(__dirname, "../../electron-builder.yml"), "utf8");
+  assert.equal(
+    packageJson.scripts["package:dir"],
+    "npm run build && electron-builder --dir && node scripts/check-package-allowlist.mjs",
+  );
+  assert.equal(packageJson.scripts["package:dir"].includes("npm run package:dir"), false);
+  for (const pattern of [
+    "!**/coverage{,/**}",
+    "!**/*.env",
+    "!**/.env{,.*}",
+    "!**/.npmrc",
+    "!**/*.{pem,key}",
+    "!**/credentials*",
+    "!**/secret*",
+  ]) {
+    assert.ok(builderConfig.includes(pattern), pattern);
+  }
 });
 
 test("manifest rejects unknown dependencies, unsafe paths, and unpacked sensitive entries", () => {

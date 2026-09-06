@@ -681,3 +681,53 @@ test("phone quiesce cancels phone-owned streaming but preserves desktop-owned st
     }
   }
 });
+
+test("phone cancel and clear-conversation intentionally cancel shared desktop analysis", async () => {
+  const harness = await makeHarness({
+    provider: {
+      stream: async function* (_path, options) {
+        yield "partial";
+        await new Promise((resolve) => options.signal.addEventListener("abort", resolve, { once: true }));
+      },
+    },
+  });
+
+  await harness.router.execute({ type: "send", requestId: "desktop-before-phone-cancel", prompt: "Question" }, "desktop");
+  while (harness.analysis.getState().status !== "running") await new Promise((resolve) => setImmediate(resolve));
+  await harness.router.execute({ type: "cancel", requestId: "phone-shared-cancel" }, "phone");
+  await harness.router.whenIdle();
+  assert.equal(harness.conversation.snapshot().messages.at(-1).status, "cancelled");
+
+  await harness.router.execute({ type: "send", requestId: "desktop-before-phone-clear", prompt: "Again" }, "desktop");
+  while (harness.analysis.getState().status !== "running") await new Promise((resolve) => setImmediate(resolve));
+  await harness.router.execute({ type: "clear-conversation", requestId: "phone-shared-clear" }, "phone");
+  await harness.router.whenIdle();
+  assert.deepEqual(harness.conversation.snapshot().messages, []);
+});
+
+test("quiesce retains timed-out capture ownership and cancels only the requested source", async () => {
+  for (const source of ["phone", "desktop"]) {
+    const harness = await makeHarness({
+      provider: { stream: async function* () { yield "unused"; } },
+    });
+    let cancelCalls = 0;
+    let capturing = true;
+    harness.screenshots.capture = async () => {
+      throw Object.assign(new Error("capture timed out"), { code: "SCREEN_CAPTURE_FAILED" });
+    };
+    harness.screenshots.getState = () => ({ items: [], capturing, permission: "granted" });
+    harness.screenshots.cancelPending = async () => {
+      cancelCalls += 1;
+      capturing = false;
+    };
+    harness.screenshots.whenIdle = async () => undefined;
+
+    await assert.rejects(harness.router.execute({ type: "capture", requestId: `${source}-timed-out-capture` }, source));
+    await harness.router.quiesce("phone");
+    assert.equal(cancelCalls, source === "phone" ? 1 : 0, source);
+    if (source === "desktop") {
+      await harness.router.quiesce("all");
+      assert.equal(cancelCalls, 1);
+    }
+  }
+});

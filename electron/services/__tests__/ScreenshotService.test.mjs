@@ -163,6 +163,43 @@ test("ScreenshotService cancellation is bounded and a late native source cannot 
   assert.deepEqual(await readdir(directory), []);
 });
 
+test("ScreenshotService detaches a native source that never settles after capture timeout", async () => {
+  for (const lateOutcome of ["resolve", "reject"]) {
+    const directory = await makeDirectory();
+    let settleSources;
+    const adapters = makeAdapters({
+      getSources: () => new Promise((resolve, reject) => {
+        settleSources = lateOutcome === "resolve"
+          ? () => resolve([{ display_id: "42", thumbnail: makeThumbnail("late") }])
+          : () => reject(new Error("late native rejection"));
+      }),
+    });
+    const service = makeService(directory, adapters, { sourceTimeoutMs: 5 });
+    let unhandled;
+    const onUnhandled = (error) => { unhandled = error; };
+    process.once("unhandledRejection", onUnhandled);
+    try {
+      await assert.rejects(service.capture(), (error) => error?.code === "SCREEN_CAPTURE_FAILED");
+      assert.equal(service.getState().capturing, true, lateOutcome);
+      await Promise.race([
+        service.cancelPending(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("cancelPending was unbounded")), 100)),
+      ]);
+      assert.equal(service.getState().capturing, false, lateOutcome);
+      assert.deepEqual(service.getState().items, [], lateOutcome);
+
+      settleSources();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(unhandled, undefined, lateOutcome);
+      assert.deepEqual(service.getState().items, [], lateOutcome);
+      assert.deepEqual(await readdir(directory), [], lateOutcome);
+    } finally {
+      process.removeListener("unhandledRejection", onUnhandled);
+    }
+  }
+});
+
 test("ScreenshotService returns an actionable first-use permission timeout", async () => {
   const directory = await makeDirectory();
   let releaseSources;

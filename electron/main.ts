@@ -365,6 +365,7 @@ function getCommandRouter(settings: SettingsService): CommandRouter {
         delete: (id) => screenshots.delete(id),
         clear: () => screenshots.clear(),
         cancelPending: () => screenshots.cancelPending(),
+        whenIdle: () => screenshots.whenIdle(),
       },
       attachments: getAttachmentStore(),
       conversation: getConversationStore(),
