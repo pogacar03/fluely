@@ -193,6 +193,8 @@ interface PhoneCommandInFlight {
   fingerprint: string;
   response: Promise<string>;
   commandSerializedBytes: number;
+  scope?: PhoneCommandScope;
+  scopeInvalidated: boolean;
   waiters: Map<PhoneClient, number>;
   waiterCount: number;
 }
@@ -967,6 +969,7 @@ export class PhoneGateway {
       }
       removed = true;
       this.phoneClients.delete(client);
+      this.unregisterPhoneClientWaiters(client);
       void client.commandScope?.invalidate().catch(() => undefined);
       if (this.phoneClients.size === 0) {
         this.clearHeartbeatTimer();
@@ -1113,8 +1116,9 @@ export class PhoneGateway {
     }
     timestamps.push(now);
 
+    let entry!: PhoneCommandInFlight;
     const response = Promise.resolve().then(async () => {
-      if (!this.isCurrentPhoneClient(client)) {
+      if (!this.hasOnlineWaiter(entry)) {
         return serializeSessionRevoked(command.requestId);
       }
       if (!this.commandRouter) {
@@ -1126,8 +1130,8 @@ export class PhoneGateway {
         });
       }
       try {
-        await this.commandRouter.execute(command, "phone", client.commandScope);
-        if (!this.isCurrentPhoneClient(client)) {
+        await this.commandRouter.execute(command, "phone", entry.scope);
+        if (!this.hasOnlineWaiter(entry)) {
           return serializeSessionRevoked(command.requestId);
         }
         return serializeLedgerFrame({ type: "ack", requestId: command.requestId });
@@ -1142,15 +1146,19 @@ export class PhoneGateway {
         } catch {
           // Local diagnostics must not affect the phone protocol.
         }
-        return this.isCurrentPhoneClient(client)
+        return this.hasOnlineWaiter(entry)
           ? serializePhoneCommandError(command.requestId, safeError)
           : serializeSessionRevoked(command.requestId);
       }
     });
-    const entry: PhoneCommandInFlight = {
+    entry = {
       fingerprint,
       response,
       commandSerializedBytes,
+      scope: client.sessionKey !== undefined
+        ? this.commandRouter?.createScope?.("phone")
+        : client.commandScope,
+      scopeInvalidated: false,
       waiters: new Map([[client, 1]]),
       waiterCount: 1,
     };
@@ -1242,6 +1250,37 @@ export class PhoneGateway {
     return created;
   }
 
+  private hasOnlineWaiter(entry: PhoneCommandInFlight): boolean {
+    for (const [client, count] of entry.waiters) {
+      if (count > 0 && this.isCurrentPhoneClient(client)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private unregisterPhoneClientWaiters(client: PhoneClient): void {
+    for (const entry of client.commandSession.inFlight.values()) {
+      const count = entry.waiters.get(client);
+      if (count === undefined) {
+        continue;
+      }
+      entry.waiters.delete(client);
+      entry.waiterCount = Math.max(0, entry.waiterCount - count);
+      if (entry.waiterCount === 0) {
+        this.invalidatePhoneCommandScope(entry);
+      }
+    }
+  }
+
+  private invalidatePhoneCommandScope(entry: PhoneCommandInFlight): void {
+    if (!entry.scope || entry.scopeInvalidated) {
+      return;
+    }
+    entry.scopeInvalidated = true;
+    void entry.scope.invalidate().catch(() => undefined);
+  }
+
   private isCurrentPhoneClient(client: PhoneClient): boolean {
     if (!this.phoneClients.has(client) || client.revoked || client.commandSession.revoked) {
       return false;
@@ -1283,6 +1322,7 @@ export class PhoneGateway {
     session.revoked = true;
     for (const entry of session.inFlight.values()) {
       entry.waiters.clear();
+      this.invalidatePhoneCommandScope(entry);
     }
     session.inFlight.clear();
     session.inFlightSerializedBytes = 0;

@@ -114,6 +114,260 @@ function comparableCanonicalProjection(snapshot) {
   };
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
+function openPhoneFrameSocket(port, cookieHeader, origin) {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket("ws://127.0.0.1:" + port + "/ws", {
+      headers: { Cookie: cookieHeader },
+      origin,
+    });
+    const received = [];
+    const buffered = [];
+    const waiters = [];
+    let opened = false;
+    const next = () => {
+      if (buffered.length > 0) {
+        return Promise.resolve(buffered.shift());
+      }
+      return new Promise((nextResolve, nextReject) => {
+        const timer = setTimeout(() => {
+          const index = waiters.findIndex((waiter) => waiter.resolve === nextResolve);
+          if (index >= 0) waiters.splice(index, 1);
+          nextReject(new Error("Timed out waiting for a phone frame."));
+        }, 4_000);
+        waiters.push({
+          resolve: (frame) => {
+            clearTimeout(timer);
+            nextResolve(frame);
+          },
+          reject: (error) => {
+            clearTimeout(timer);
+            nextReject(error);
+          },
+        });
+      });
+    };
+    socket.on("message", (data) => {
+      const frame = JSON.parse(String(data));
+      received.push(frame);
+      const waiter = waiters.shift();
+      if (waiter) waiter.resolve(frame);
+      else buffered.push(frame);
+    });
+    socket.once("open", () => {
+      opened = true;
+      resolve({ socket, received, next });
+    });
+    socket.once("error", (error) => {
+      if (!opened) reject(error);
+    });
+  });
+}
+
+test("real PhoneGateway and CommandRouter keep a shared-session waiter alive while a unique stale Ask stays uncommitted", { timeout: 30_000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "fluely-phone-command-scope-integration-"));
+  const queueListeners = new Set();
+  const screenshotIds = [
+    SCREENSHOT_ID,
+    "22222222-2222-4222-8222-222222222222",
+  ];
+  const attachmentIds = [
+    ATTACHMENT_ID,
+    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  ];
+  let screenshotIndex = 0;
+  let attachmentIndex = 0;
+  let gateway;
+  let projection;
+  let screenshots;
+  let attachments;
+  let conversation;
+  let analysis;
+  let router;
+  const sockets = [];
+  const analysisStarts = [];
+
+  try {
+    screenshots = new ScreenshotService({
+      directory: path.join(root, "screenshots"),
+      platform: "linux",
+      desktopCapturer: {
+        getSources: async () => [{
+          display_id: "1",
+          thumbnail: {
+            toPNG: () => PNG_BYTES,
+            getSize: () => ({ width: 1920, height: 1080 }),
+          },
+        }],
+      },
+      screen: {
+        getCursorScreenPoint: () => ({ x: 10, y: 10 }),
+        getDisplayNearestPoint: () => ({ id: 1, bounds: { width: 1920, height: 1080 }, scaleFactor: 1 }),
+      },
+      idFactory: () => screenshotIds[screenshotIndex++],
+      now: () => new Date(100),
+      onStateChanged: (state) => {
+        for (const listener of queueListeners) listener(state);
+      },
+    });
+    attachments = new AttachmentStore({
+      rootDirectory: path.join(root, "session-attachments"),
+      sessionId: "session-phone-command-scope",
+      idFactory: () => attachmentIds[attachmentIndex++],
+      now: () => 200,
+    });
+    await Promise.all([screenshots.whenIdle(), attachments.whenReady()]);
+    conversation = new ConversationStore({
+      sessionId: attachments.sessionId,
+      now: () => 300,
+      idFactory: (() => {
+        let sequence = 0;
+        return () => "scope-message-" + (++sequence);
+      })(),
+    });
+    analysis = new AnalysisService({
+      provider: {
+        stream: async function* () {
+          yield "unreachable";
+        },
+      },
+      screenshots,
+      codex: {
+        enabled: true,
+        path: "codex",
+        model: "test-model",
+        fastModel: "fast-model",
+        timeoutMs: 1_000,
+        sandboxMode: "read-only",
+        modelReasoningEffort: "medium",
+      },
+      now: () => new Date(400),
+    });
+    analysis.start = () => {
+      const pending = deferred();
+      analysisStarts.push(pending);
+      return pending.promise;
+    };
+    router = new CommandRouter({
+      screenshots: {
+        getState: () => screenshots.getState(),
+        getManagedPaths: (ids) => screenshots.getManagedPaths(ids),
+        capture: (source) => screenshots.capture(source),
+        delete: (id) => screenshots.delete(id),
+        clear: () => screenshots.clear(),
+        cancelPending: (source) => screenshots.cancelPending(source),
+        whenIdle: () => screenshots.whenIdle(),
+      },
+      attachments,
+      conversation,
+      analysis,
+    });
+    projection = new SessionProjectionStore({
+      conversation,
+      queue: {
+        getState: () => screenshots.getState(),
+        onStateChanged(listener) {
+          queueListeners.add(listener);
+          return () => queueListeners.delete(listener);
+        },
+      },
+    });
+    const qrUrls = [];
+    gateway = new PhoneGateway({
+      networkInterfaces: () => ({ en0: [{ address: "192.168.50.8", family: "IPv4", internal: false }] }),
+      portCandidates: [0],
+      projection,
+      commandRouter: router,
+      context: {
+        getManagedPaths: (ids) => screenshots.getManagedPaths(ids),
+        getManagedRoot: () => screenshots.getManagedRoot(),
+      },
+      attachments: {
+        getPath: (id) => attachments.getPath(id),
+        getManagedRoot: () => attachments.directory,
+      },
+      qrCode: {
+        toDataURL: async (url) => {
+          qrUrls.push(url);
+          return "data:qr";
+        },
+      },
+    });
+    await screenshots.capture("phone");
+    await screenshots.whenIdle();
+    const ready = await gateway.start();
+    const port = Number(new URL(ready.origin).port);
+    const host = new URL(ready.origin).host;
+    const secret = new URL(qrUrls[0]).searchParams.get("secret");
+    const exchange = await requestOnce(port, `/pair?secret=${encodeURIComponent(secret)}`, { Host: host });
+    const cookieHeader = exchange.headers["set-cookie"]?.[0]?.match(/^(fluely_phone_session=[^;]+)/)?.[1];
+    assert.ok(cookieHeader);
+    const sessionKey = cookieHeader.match(/^fluely_phone_session=(.+)$/)?.[1];
+    assert.ok(sessionKey);
+
+    const first = await openPhoneFrameSocket(port, cookieHeader, ready.origin);
+    const second = await openPhoneFrameSocket(port, cookieHeader, ready.origin);
+    sockets.push(first.socket, second.socket);
+    assert.equal((await first.next()).type, "snapshot");
+    assert.equal((await second.next()).type, "snapshot");
+
+    const sharedCommand = { type: "ask", requestId: "shared-session-ask", prompt: "Question" };
+    first.socket.send(JSON.stringify({ type: "command", command: sharedCommand }));
+    await waitFor(() => analysisStarts.length === 1);
+    second.socket.send(JSON.stringify({ type: "command", command: sharedCommand }));
+    await waitFor(() => gateway.phoneSessions.get(sessionKey)?.inFlight.get(sharedCommand.requestId)?.waiterCount === 2);
+    const sharedEntry = gateway.phoneSessions.get(sessionKey).inFlight.get(sharedCommand.requestId);
+    assert.ok(sharedEntry.scope);
+
+    first.socket.close();
+    await waitFor(() => sharedEntry.waiterCount === 1);
+    assert.equal(sharedEntry.scope.isCurrent(), true);
+    analysisStarts[0].resolve();
+    analysis.emit("completed");
+    await waitFor(() => second.received.some((frame) => frame.type === "ack" && frame.requestId === sharedCommand.requestId));
+    await router.whenIdle();
+    assert.deepEqual(screenshots.getState().items, []);
+    assert.equal(second.received.some((frame) => frame.code === "SESSION_REVOKED"), false);
+
+    await screenshots.capture("phone");
+    await screenshots.whenIdle();
+    const staleCommand = { type: "ask", requestId: "unique-stale-ask", prompt: "Stale question" };
+    second.socket.send(JSON.stringify({ type: "command", command: staleCommand }));
+    await waitFor(() => analysisStarts.length === 2);
+    const staleEntry = gateway.phoneSessions.get(sessionKey).inFlight.get(staleCommand.requestId);
+    assert.equal(staleEntry.waiterCount, 1);
+    const receivedBeforeClose = second.received.length;
+    second.socket.close();
+    await waitFor(() => staleEntry.waiterCount === 0);
+    analysisStarts[1].reject(Object.assign(new Error("stale analysis"), { code: "ANALYSIS_FAILED" }));
+    await router.whenIdle();
+    assert.deepEqual(screenshots.getState().items.map((item) => item.id), [screenshotIds[1]]);
+    assert.equal(second.received.slice(receivedBeforeClose).some((frame) => frame.type === "ack" && frame.requestId === staleCommand.requestId), false);
+  } finally {
+    for (const pending of analysisStarts) pending.resolve();
+    for (const socket of sockets) {
+      try { socket.close(); } catch { /* test cleanup */ }
+    }
+    await gateway?.stop();
+    await router?.whenIdle().catch(() => undefined);
+    projection?.dispose();
+    screenshots?.dispose();
+    await analysis?.whenIdle().catch(() => undefined);
+    await conversation?.dispose();
+    await attachments?.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("real components stream canonical snapshots/events over PhoneGateway HTTP+WS and serve identical media bytes", { timeout: 15_000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "fluely-phone-real-components-"));
   const screenshotDirectory = path.join(root, "screenshots");

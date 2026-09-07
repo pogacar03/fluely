@@ -350,20 +350,18 @@ export class CommandRouter {
       // Give a provider terminal callback already racing startup one event-loop
       // turn to win. A genuine start failure still propagates to the caller.
       await new Promise<void>((resolve) => setImmediate(resolve));
-      if (activeRun.terminal) {
-        settle();
-        return;
+      if (!activeRun.terminal) {
+        const message = error instanceof Error && error.message ? error.message : "Codex CLI analysis failed.";
+        try {
+          this.conversation.finishAssistant(messageId, "error", "", {
+            code: (error as { code?: string })?.code ?? "ANALYSIS_FAILED",
+            message,
+          });
+        } catch {
+          // A terminal provider event may have won the race.
+        }
+        this.markRunTerminal(messageId);
       }
-      const message = error instanceof Error && error.message ? error.message : "Codex CLI analysis failed.";
-      try {
-        this.conversation.finishAssistant(messageId, "error", "", {
-          code: (error as { code?: string })?.code ?? "ANALYSIS_FAILED",
-          message,
-        });
-      } catch {
-        // A terminal provider event may have won the race.
-      }
-      this.markRunTerminal(messageId);
       settle();
       throw error;
     }

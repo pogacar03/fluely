@@ -775,7 +775,7 @@ test("an async start rejection releases the router for a successful later send",
   assert.equal(snapshot.activeMessageId, undefined);
 });
 
-test("terminal analysis callbacks racing start rejection produce one terminal without unhandled rejection", async () => {
+test("terminal analysis callbacks racing start rejection still fail Ask without acknowledging or clearing the draft", async () => {
   for (const order of ["terminal-first", "reject-first"]) {
     const harness = await makeHarness({
       provider: {
@@ -818,11 +818,16 @@ test("terminal analysis callbacks racing start rejection produce one terminal wi
         harness.analysis.emit("error");
       }
 
-      const result = await sendPromise;
+      await assert.rejects(
+        sendPromise,
+        (error) => error?.code === "ANALYSIS_FAILED",
+        order,
+      );
       await harness.router.whenIdle();
       await new Promise((resolve) => setImmediate(resolve));
 
-      assert.equal(result.conversation.messages.at(-1).status, "error", order);
+      assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID], order);
+      assert.equal(harness.conversation.snapshot().messages.at(-1).status, "error", order);
       assert.equal(harness.conversation.snapshot().activeMessageId, undefined, order);
       assert.equal(terminalEvents.length, 1, order);
       assert.deepEqual(unhandledRejections, [], order);
