@@ -269,6 +269,11 @@ test("authenticated bootstrap returns the complete opaque phone projection witho
           attachmentIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
           status: "completed",
           createdAt: 1,
+          error: {
+            code: "INTERNAL_ERROR",
+            message: "raw /Users/private/provider failure",
+            stack: "Error at /Users/private/provider.js:1:1",
+          },
         }],
         attachments: [{
           id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -277,6 +282,7 @@ test("authenticated bootstrap returns the complete opaque phone projection witho
           height: 10,
           byteLength: 4,
           createdAt: 1,
+          path: "/Users/private/attachment.png",
         }],
       },
       queue: [{
@@ -312,7 +318,7 @@ test("authenticated bootstrap returns the complete opaque phone projection witho
   assert.equal(response.headers["content-type"], "application/json; charset=utf-8");
   assert.equal(JSON.parse(response.body).revision, 7);
   assert.match(response.body, /Answer/);
-  assert.doesNotMatch(response.body, /Users\/private|pairingSecret|fluely_phone_session|secret=/i);
+  assert.doesNotMatch(response.body, /Users\/private|raw provider|INTERNAL_ERROR|stack|pairingSecret|fluely_phone_session|secret=/i);
 });
 
 function request(port, requestPath, headers = {}) {
@@ -1706,6 +1712,66 @@ test("disconnecting during an active phone command does not cancel or invent an 
   await flushMicrotasks();
 
   assert.deepEqual(socket.sent, []);
+});
+
+test("closing one phone client invalidates only its command scope", async () => {
+  const scopes = [];
+  const pending = new Map();
+  const router = {
+    createScope: () => {
+      let current = true;
+      const scope = {
+        isCurrent: () => current,
+        invalidate: async () => {
+          current = false;
+        },
+      };
+      scopes.push(scope);
+      return scope;
+    },
+    execute: async (command, source, scope) => {
+      pending.set(command.requestId, { source, scope });
+      return new Promise((resolve) => pending.get(command.requestId).resolve = resolve);
+    },
+  };
+  const projection = makeProjection({
+    revision: 0,
+    conversation: { sessionId: "session-phone-client-scope", revision: 0, messages: [], attachments: [] },
+    queue: [],
+  });
+  const { gateway } = makeGateway({ projection, commandRouter: router });
+  const first = makeGatewaySocket();
+  const second = makeGatewaySocket();
+  gateway.acceptWebSocket(first);
+  gateway.acceptWebSocket(second);
+  first.sent = [];
+  second.sent = [];
+
+  first.emit("message", Buffer.from(JSON.stringify({
+    type: "command",
+    command: { type: "ask", requestId: "phone-client-one", prompt: "first" },
+  })));
+  second.emit("message", Buffer.from(JSON.stringify({
+    type: "command",
+    command: { type: "ask", requestId: "phone-client-two", prompt: "second" },
+  })));
+  await flushMicrotasks();
+  assert.equal(pending.size, 2);
+  assert.equal(scopes.length, 2);
+
+  first.emit("close");
+  assert.equal(scopes[0].isCurrent(), false);
+  assert.equal(scopes[1].isCurrent(), true);
+  pending.get("phone-client-two").resolve(commandResult());
+  await waitForSentFrame(second, (frame) => frame.type === "ack" && frame.requestId === "phone-client-two");
+
+  assert.deepEqual(first.sent, []);
+  assert.deepEqual(second.sent.map((value) => JSON.parse(value)), [{
+    type: "ack",
+    requestId: "phone-client-two",
+  }]);
+  assert.equal(pending.get("phone-client-two").source, "phone");
+  assert.equal(pending.get("phone-client-two").scope, scopes[1]);
 });
 
 test("a revoked pairing cannot dispatch a command that was already queued before replacement", async () => {

@@ -140,8 +140,18 @@ export interface PhoneGatewayOptions {
 }
 
 export interface PhoneGatewayCommandRouter {
-  execute(command: WorkspaceCommand, source: "desktop" | "phone"): Promise<CommandResult>;
+  createScope?(source: "desktop" | "phone"): PhoneCommandScope;
+  execute(
+    command: WorkspaceCommand,
+    source: "desktop" | "phone",
+    scope?: PhoneCommandScope,
+  ): Promise<CommandResult>;
   quiesce?(scope: "phone" | "all"): Promise<void>;
+}
+
+export interface PhoneCommandScope {
+  isCurrent(): boolean;
+  invalidate(): Promise<void>;
 }
 
 export interface PhoneCommandFailureDiagnostic {
@@ -158,6 +168,7 @@ interface ListeningServer {
 interface PhoneClient {
   socket: WebSocket;
   sessionKey?: string;
+  commandScope?: PhoneCommandScope;
   commandSession: PhoneCommandSession;
   missedHeartbeats: number;
   revoked: boolean;
@@ -904,7 +915,7 @@ export class PhoneGateway {
   }
 
   private sendSerializedFrame(client: PhoneClient, serialized: string): void {
-    if (client.socket.readyState !== WebSocket.OPEN) {
+    if (!this.phoneClients.has(client) || client.socket.readyState !== WebSocket.OPEN) {
       return;
     }
     if (client.socket.bufferedAmount > PHONE_GATEWAY_MAX_BUFFERED_AMOUNT_BYTES) {
@@ -934,20 +945,29 @@ export class PhoneGateway {
     const client: PhoneClient = {
       socket,
       ...(sessionKey ? { sessionKey } : {}),
+      ...(this.commandRouter?.createScope ? { commandScope: this.commandRouter.createScope("phone") } : {}),
       commandSession: sessionKey ? this.getPhoneCommandSession(sessionKey) : this.createPhoneCommandSession(),
       missedHeartbeats: 0,
       revoked: false,
     };
+    this.phoneClients.add(client);
     if (!this.isCurrentPhoneClient(client)) {
+      this.phoneClients.delete(client);
+      void client.commandScope?.invalidate().catch(() => undefined);
       socket.close(1008, "Pairing revoked.");
       return;
     }
-    this.phoneClients.add(client);
     if (this.heartbeatTimer === null) {
       this.scheduleHeartbeat();
     }
+    let removed = false;
     const remove = () => {
+      if (removed) {
+        return;
+      }
+      removed = true;
       this.phoneClients.delete(client);
+      void client.commandScope?.invalidate().catch(() => undefined);
       if (this.phoneClients.size === 0) {
         this.clearHeartbeatTimer();
       }
@@ -1106,7 +1126,7 @@ export class PhoneGateway {
         });
       }
       try {
-        await this.commandRouter.execute(command, "phone");
+        await this.commandRouter.execute(command, "phone", client.commandScope);
         if (!this.isCurrentPhoneClient(client)) {
           return serializeSessionRevoked(command.requestId);
         }
@@ -1223,7 +1243,7 @@ export class PhoneGateway {
   }
 
   private isCurrentPhoneClient(client: PhoneClient): boolean {
-    if (client.revoked || client.commandSession.revoked) {
+    if (!this.phoneClients.has(client) || client.revoked || client.commandSession.revoked) {
       return false;
     }
     // Direct in-process test sockets do not have an issued pairing. Every

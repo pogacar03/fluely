@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { EMPTY_CONTEXT_PROMPT } from "../../src/shared/context-queue";
 import type { WorkspaceCommand } from "../../src/shared/ipc";
 import type { ShortcutActionHandlers } from "./ShortcutManager";
 
@@ -29,7 +28,7 @@ export function createShortcutCommandHandlers(
   const command = <T extends WorkspaceCommand["type"]>(type: T): Extract<WorkspaceCommand, { type: T }> => ({
     type,
     requestId: requestIdFactory(type),
-    ...(type === "ask" ? { prompt: EMPTY_CONTEXT_PROMPT } : {}),
+    ...(type === "ask" ? { prompt: "" } : {}),
   } as Extract<WorkspaceCommand, { type: T }>);
 
   return {

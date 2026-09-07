@@ -30,7 +30,7 @@ test("shortcut actions enter the desktop CommandRouter and keep clear explicit",
       command: {
         type: "ask",
         requestId: "shortcut-ask-2",
-        prompt: "Analyze the attached screenshots.",
+        prompt: "",
       },
       source: "desktop",
     },

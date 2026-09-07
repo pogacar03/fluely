@@ -28,6 +28,7 @@ export interface CommandRouterScreenshotPort {
 }
 
 export interface CommandRouterAttachmentPort {
+  getPath(id: string): string | undefined;
   addFromScreenshot(
     screenshot: Pick<ContextScreenshot, "width" | "height">,
     sourcePath: string,
@@ -63,7 +64,7 @@ export interface CommandRouterConversationPort extends ConversationPort {
 }
 
 export interface CommandRouterAnalysisPort {
-  start(request: AnalysisRequest): Promise<void>;
+  start(request: AnalysisRequest, imagePaths?: readonly string[]): Promise<void>;
   cancel(): AnalysisState | Promise<AnalysisState>;
   getState(): AnalysisState;
   onStateChanged(listener: (event: AnalysisStateChangedEvent) => void): () => void;
@@ -75,6 +76,11 @@ export interface CommandRouterOptions {
   attachments: CommandRouterAttachmentPort;
   conversation: CommandRouterConversationPort;
   analysis: CommandRouterAnalysisPort;
+}
+
+export interface CommandScope {
+  isCurrent(): boolean;
+  invalidate(): Promise<void>;
 }
 
 export type CommandRouterErrorCode =
@@ -92,12 +98,22 @@ export interface CommandRouterError extends Error {
 interface ActiveRun {
   messageId: string;
   source: "desktop" | "phone";
+  scope: CommandScopeController;
   providerSettled: Promise<void>;
   terminal: boolean;
 }
 
-interface CommandScope {
+interface CommandScopeController extends CommandScope {
   source: "desktop" | "phone";
+  globalGeneration: number;
+  phoneGeneration: number;
+  current: boolean;
+  operations: Set<CommandOperationScope>;
+}
+
+interface CommandOperationScope {
+  source: "desktop" | "phone";
+  owner: CommandScopeController;
   generation: number;
   globalGeneration: number;
   started: boolean;
@@ -164,8 +180,8 @@ export class CommandRouter {
   private readonly requestDeduper = createRequestIdDeduper<CommandResult>();
   private commandTail: Promise<void> = Promise.resolve();
   private activeRun: ActiveRun | null = null;
-  private activeCommand: CommandScope | null = null;
-  private readonly scopes = new Set<CommandScope>();
+  private activeCommand: CommandOperationScope | null = null;
+  private readonly scopes = new Set<CommandOperationScope>();
   private phoneGeneration = 0;
   private globalGeneration = 0;
 
@@ -177,11 +193,19 @@ export class CommandRouter {
     this.analysis.onStateChanged((event) => this.handleAnalysisEvent(event));
   }
 
-  public execute(command: WorkspaceCommand, source: "desktop" | "phone"): Promise<CommandResult> {
+  public createScope(source: "desktop" | "phone"): CommandScope {
+    return this.createScopeController(source);
+  }
+
+  public execute(
+    command: WorkspaceCommand,
+    source: "desktop" | "phone",
+    scope?: CommandScope,
+  ): Promise<CommandResult> {
     return this.requestDeduper.run(
       command.requestId,
       JSON.stringify(command),
-      () => this.executeScoped(command, source),
+      () => this.executeScoped(command, source, scope as CommandScopeController | undefined),
     );
   }
 
@@ -213,7 +237,7 @@ export class CommandRouter {
     await this.conversation.whenIdle?.();
   }
 
-  private async executeOnce(command: WorkspaceCommand, source: "desktop" | "phone", scope: CommandScope): Promise<CommandResult> {
+  private async executeOnce(command: WorkspaceCommand, source: "desktop" | "phone", scope: CommandOperationScope): Promise<CommandResult> {
     switch (command.type) {
       case "capture":
         await this.screenshots.capture(source);
@@ -237,7 +261,7 @@ export class CommandRouter {
     }
   }
 
-  private async ask(prompt: string | undefined, source: "desktop" | "phone", scope: CommandScope): Promise<CommandResult> {
+  private async ask(prompt: string | undefined, source: "desktop" | "phone", scope: CommandOperationScope): Promise<CommandResult> {
     this.ensureAnalysisAvailable();
     const queue = this.screenshots.getState();
     const hasPrompt = typeof prompt === "string" && prompt.trim().length > 0;
@@ -253,6 +277,7 @@ export class CommandRouter {
     const conversationContext = buildConversationContext(this.conversation.snapshot());
 
     const materialized: ConversationAttachment[] = [];
+    const imagePaths: string[] = [];
     try {
       for (const screenshot of queue.items) {
         const sourcePath = this.screenshots.getManagedPaths([screenshot.id])[0];
@@ -263,7 +288,17 @@ export class CommandRouter {
             "Refresh the screenshot queue and try again.",
           );
         }
-        materialized.push(await this.attachments.addFromScreenshot(screenshot, sourcePath));
+        const attachment = await this.attachments.addFromScreenshot(screenshot, sourcePath);
+        const attachmentPath = this.attachments.getPath(attachment.id);
+        if (!attachmentPath) {
+          throw createError(
+            "SCREENSHOT_NOT_FOUND",
+            "The copied screenshot attachment is no longer available.",
+            "Refresh the screenshot queue and try again.",
+          );
+        }
+        materialized.push(attachment);
+        imagePaths.push(attachmentPath);
         this.assertCurrent(scope);
       }
     } catch (error) {
@@ -277,13 +312,13 @@ export class CommandRouter {
         materialized,
       );
       this.assertCurrent(scope);
-      await this.startAnalysis(turn.assistant.id, source, {
+      await this.startAnalysis(turn.assistant.id, source, scope, {
         prompt: normalizedPrompt,
         screenshotIds: queue.items.map((item) => item.id),
         intent: "answer",
         fast: false,
         ...(conversationContext ? { conversationContext } : {}),
-      });
+      }, imagePaths);
       this.assertCurrent(scope);
       return this.result(await this.screenshots.clear());
     } catch (error) {
@@ -292,28 +327,45 @@ export class CommandRouter {
     }
   }
 
-  private async startAnalysis(messageId: string, source: "desktop" | "phone", request: AnalysisRequest): Promise<void> {
+  private async startAnalysis(
+    messageId: string,
+    source: "desktop" | "phone",
+    scope: CommandOperationScope,
+    request: AnalysisRequest,
+    imagePaths: readonly string[],
+  ): Promise<void> {
     let settle!: () => void;
     const providerSettled = new Promise<void>((resolve) => { settle = resolve; });
-    const activeRun: ActiveRun = { messageId, source, providerSettled, terminal: false };
+    const activeRun: ActiveRun = {
+      messageId,
+      source,
+      scope: scope.owner,
+      providerSettled,
+      terminal: false,
+    };
     this.activeRun = activeRun;
     try {
-      await this.analysis.start(request);
+      await this.analysis.start(request, imagePaths);
     } catch (error) {
+      // Give a provider terminal callback already racing startup one event-loop
+      // turn to win. A genuine start failure still propagates to the caller.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (activeRun.terminal) {
+        settle();
+        return;
+      }
       const message = error instanceof Error && error.message ? error.message : "Codex CLI analysis failed.";
-      if (!activeRun.terminal) {
-        try {
-          this.conversation.finishAssistant(messageId, "error", "", {
-            code: (error as { code?: string })?.code ?? "ANALYSIS_FAILED",
-            message,
-          });
-        } catch {
-          // A terminal provider event may have won the race.
-        }
+      try {
+        this.conversation.finishAssistant(messageId, "error", "", {
+          code: (error as { code?: string })?.code ?? "ANALYSIS_FAILED",
+          message,
+        });
+      } catch {
+        // A terminal provider event may have won the race.
       }
       this.markRunTerminal(messageId);
       settle();
-      return;
+      throw error;
     }
 
     const whenIdle = this.analysis.whenIdle?.();
@@ -423,17 +475,24 @@ export class CommandRouter {
     };
   }
 
-  private executeScoped(command: WorkspaceCommand, source: "desktop" | "phone"): Promise<CommandResult> {
+  private executeScoped(
+    command: WorkspaceCommand,
+    source: "desktop" | "phone",
+    owner: CommandScopeController | undefined,
+  ): Promise<CommandResult> {
+    const commandOwner = owner ?? this.createScopeController(source);
     let cancel!: (error: CommandRouterError) => void;
     const cancellation = new Promise<never>((_, reject) => { cancel = reject; });
-    const commandScope: CommandScope = {
+    const commandScope: CommandOperationScope = {
       source,
+      owner: commandOwner,
       generation: source === "phone" ? this.phoneGeneration : this.globalGeneration,
       globalGeneration: this.globalGeneration,
       started: false,
       cancellation,
       cancel,
     };
+    commandOwner.operations.add(commandScope);
     this.scopes.add(commandScope);
     const operation = this.enqueue(async () => {
       this.assertCurrent(commandScope);
@@ -447,14 +506,18 @@ export class CommandRouter {
     });
     commandScope.operation = operation;
     const exposed = Promise.race([operation, cancellation]);
-    void exposed.finally(() => this.scopes.delete(commandScope)).catch(() => undefined);
+    void operation.then(
+      () => this.releaseScopeOperation(commandScope),
+      () => this.releaseScopeOperation(commandScope),
+    );
     return exposed;
   }
 
-  private assertCurrent(scope: CommandScope): void {
-    const current = scope.globalGeneration === this.globalGeneration && (
-      scope.source !== "phone" || scope.generation === this.phoneGeneration
-    );
+  private assertCurrent(scope: CommandOperationScope): void {
+    const current = scope.owner.current &&
+      scope.globalGeneration === this.globalGeneration && (
+        scope.source !== "phone" || scope.generation === this.phoneGeneration
+      );
     if (!current) {
       throw createError(
         "COMMAND_CANCELLED",
@@ -468,5 +531,51 @@ export class CommandRouter {
     const next = this.commandTail.then(operation, operation);
     this.commandTail = next.then(() => undefined, () => undefined);
     return next;
+  }
+
+  private createScopeController(source: "desktop" | "phone"): CommandScopeController {
+    const controller: CommandScopeController = {
+      source,
+      globalGeneration: this.globalGeneration,
+      phoneGeneration: this.phoneGeneration,
+      current: true,
+      operations: new Set(),
+      isCurrent: () => controller.current &&
+        controller.globalGeneration === this.globalGeneration &&
+        (source !== "phone" || controller.phoneGeneration === this.phoneGeneration),
+      invalidate: async () => {
+        if (!controller.current) {
+          return;
+        }
+        controller.current = false;
+        const cancellation = createError(
+          "COMMAND_CANCELLED",
+          "The command was cancelled because its session ended.",
+          "Start a new session and try again.",
+        );
+        const operations = [...controller.operations];
+        for (const operation of operations) {
+          operation.cancel(cancellation);
+        }
+
+        const activeRun = this.activeRun;
+        if (activeRun?.scope === controller) {
+          await this.analysis.cancel();
+          await this.analysis.whenIdle?.();
+          await activeRun.providerSettled;
+        }
+        await Promise.allSettled(
+          operations
+            .map((operation) => operation.operation)
+            .filter((operation): operation is Promise<CommandResult> => operation !== undefined),
+        );
+      },
+    };
+    return controller;
+  }
+
+  private releaseScopeOperation(scope: CommandOperationScope): void {
+    this.scopes.delete(scope);
+    scope.owner.operations.delete(scope);
   }
 }

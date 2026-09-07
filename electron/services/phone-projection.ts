@@ -1,6 +1,11 @@
+import type { ContextScreenshot } from "../../src/shared/context-queue";
 import {
   cloneSessionProjectionEvent,
   cloneSessionProjectionSnapshot,
+  type ConversationAttachment,
+  type ConversationEvent,
+  type ConversationMessage,
+  type ConversationSnapshot,
   type SessionProjectionEvent,
   type SessionProjectionPort,
   type SessionProjectionSnapshot,
@@ -32,14 +37,106 @@ export function phoneAttachmentUrl(attachmentId: string, mediaCapability: string
   return `/api/attachments/${requireMediaCapability(mediaCapability)}/${encodeURIComponent(attachmentId)}`;
 }
 
+const SAFE_ANALYSIS_ERROR = {
+  code: "ANALYSIS_FAILED",
+  message: "Analysis failed.",
+} as const;
+
+function sanitizeAttachment(attachment: ConversationAttachment): ConversationAttachment {
+  return {
+    id: attachment.id,
+    mimeType: "image/png",
+    width: attachment.width,
+    height: attachment.height,
+    byteLength: attachment.byteLength,
+    createdAt: attachment.createdAt,
+  };
+}
+
+function sanitizeMessage(message: ConversationMessage): ConversationMessage {
+  const sanitized: ConversationMessage = {
+    id: message.id,
+    sequence: message.sequence,
+    role: message.role,
+    text: message.text,
+    attachmentIds: [...message.attachmentIds],
+    status: message.status,
+    createdAt: message.createdAt,
+    ...(typeof message.finishedAt === "number" ? { finishedAt: message.finishedAt } : {}),
+    ...(message.error ? { error: { ...SAFE_ANALYSIS_ERROR } } : {}),
+  };
+  return sanitized;
+}
+
+function sanitizeConversation(snapshot: ConversationSnapshot): ConversationSnapshot {
+  return {
+    sessionId: snapshot.sessionId,
+    revision: snapshot.revision,
+    messages: snapshot.messages.map(sanitizeMessage),
+    attachments: snapshot.attachments.map(sanitizeAttachment),
+    ...(typeof snapshot.activeMessageId === "string"
+      ? { activeMessageId: snapshot.activeMessageId }
+      : {}),
+  };
+}
+
+function sanitizeQueue(
+  items: readonly ContextScreenshot[],
+  mediaCapability: string,
+): ContextScreenshot[] {
+  const capability = requireMediaCapability(mediaCapability);
+  return items.map((item) => ({
+    id: item.id,
+    capturedAt: item.capturedAt,
+    width: item.width,
+    height: item.height,
+    mimeType: "image/png",
+    previewUrl: phoneContextUrl(item.id, capability),
+  }));
+}
+
+function sanitizeConversationEvent(event: ConversationEvent): ConversationEvent {
+  if (event.type === "attachment-added") {
+    return {
+      type: "attachment-added",
+      revision: event.revision,
+      activeMessageId: event.activeMessageId,
+      attachment: sanitizeAttachment(event.attachment),
+    };
+  }
+  if (event.type === "message-added" || event.type === "message-updated") {
+    return {
+      type: event.type,
+      revision: event.revision,
+      activeMessageId: event.activeMessageId,
+      message: sanitizeMessage(event.message),
+    };
+  }
+  if (event.type === "cleared") {
+    return {
+      type: "cleared",
+      revision: event.revision,
+      activeMessageId: null,
+      snapshot: sanitizeConversation(event.snapshot),
+    };
+  }
+  return {
+    type: "turn-evicted",
+    revision: event.revision,
+    activeMessageId: event.activeMessageId,
+    messageIds: [...event.messageIds],
+    attachmentIds: [...event.attachmentIds],
+    snapshot: sanitizeConversation(event.snapshot),
+  };
+}
+
 function mapPhoneQueue(snapshot: SessionProjectionSnapshot, mediaCapability: string): SessionProjectionSnapshot {
   const capability = requireMediaCapability(mediaCapability);
   return {
-    ...snapshot,
-    queue: snapshot.queue.map((item) => ({
-      ...item,
-      previewUrl: phoneContextUrl(item.id, capability),
-    })),
+    revision: snapshot.revision,
+    conversation: sanitizeConversation(snapshot.conversation),
+    queue: sanitizeQueue(snapshot.queue, capability),
+    ...(typeof snapshot.capturing === "boolean" ? { capturing: snapshot.capturing } : {}),
     mediaCapability: capability,
   };
 }
@@ -57,14 +154,17 @@ export function toPhoneProjectionEvent(
 ): SessionProjectionEvent {
   const cloned = cloneSessionProjectionEvent(event);
   if (cloned.type === "conversation") {
-    return cloned;
+    return {
+      type: "conversation",
+      revision: cloned.revision,
+      event: sanitizeConversationEvent(cloned.event),
+    };
   }
   return {
-    ...cloned,
-    queue: cloned.queue.map((item) => ({
-      ...item,
-      previewUrl: phoneContextUrl(item.id, mediaCapability),
-    })),
+    type: "queue-changed",
+    revision: cloned.revision,
+    queue: sanitizeQueue(cloned.queue, mediaCapability),
+    ...(typeof cloned.capturing === "boolean" ? { capturing: cloned.capturing } : {}),
   };
 }
 

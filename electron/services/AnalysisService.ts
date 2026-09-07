@@ -328,7 +328,7 @@ export class AnalysisService {
     };
   }
 
-  public async start(request: AnalysisRequest): Promise<void> {
+  public async start(request: AnalysisRequest, stableImagePaths?: readonly string[]): Promise<void> {
     if (this.active) {
       throw createServiceError(
         "ANALYSIS_IN_PROGRESS",
@@ -339,7 +339,7 @@ export class AnalysisService {
 
     const safeRequest: Record<string, unknown> = isRecord(request) ? request : {};
     const requestedIds = normalizeScreenshotIds(safeRequest.screenshotIds);
-    const selection = this.resolveSelection(requestedIds);
+    const selection = this.resolveSelection(requestedIds, stableImagePaths);
     const codex = this.codex;
     const model = safeRequest.fast === true ? codex.fastModel : codex.model;
     const timestamp = this.timestamp();
@@ -415,7 +415,18 @@ export class AnalysisService {
     }
   }
 
-  private resolveSelection(requestedIds: string[] | undefined): ResolvedSelection {
+  private resolveSelection(
+    requestedIds: string[] | undefined,
+    stableImagePaths?: readonly string[],
+  ): ResolvedSelection {
+    if (stableImagePaths !== undefined) {
+      const paths = stableImagePaths.filter((value): value is string => typeof value === "string" && value.length > 0);
+      return {
+        ids: (requestedIds ?? []).slice(0, paths.length),
+        paths: [...paths],
+      };
+    }
+
     const queuedIds = this.pathSource?.getState?.().items
       .map((item) => item.id)
       .filter((id) => SCREENSHOT_ID_PATTERN.test(id));

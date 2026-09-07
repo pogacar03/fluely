@@ -1,6 +1,6 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -138,6 +138,37 @@ test("ask materializes immutable attachments, clears the queue, and completes on
     "message-updated",
   ]);
   assert.equal(snapshot.activeMessageId, undefined);
+});
+
+test("ask provider reads the persistent attachment after the shared screenshot queue is cleared", async () => {
+  const queueCleared = deferred();
+  const queuePath = path.join("/managed", `${SCREENSHOT_ID}.png`);
+  let observedPath;
+  let observedBytes;
+  const harness = await makeHarness({
+    provider: {
+      stream: (_path, options) => (async function* () {
+        await queueCleared.promise;
+        observedPath = options.imagePaths[0];
+        observedBytes = new Uint8Array(await readFile(observedPath));
+        yield "stable answer";
+      })(),
+    },
+  });
+  const originalClear = harness.screenshots.clear;
+  harness.screenshots.clear = async () => {
+    const result = await originalClear();
+    queueCleared.resolve();
+    return result;
+  };
+
+  await harness.router.execute({ type: "ask", requestId: "persistent-attachment", prompt: "Question" }, "desktop");
+  await harness.router.whenIdle();
+
+  assert.notEqual(observedPath, queuePath);
+  assert.equal(observedPath, harness.attachments.getPath(ATTACHMENT_ID));
+  assert.deepEqual(observedBytes, PNG_BYTES);
+  assert.equal(harness.conversation.snapshot().messages.at(-1).text, "stable answer");
 });
 
 test("ask accepts a pure text prompt when no screenshots are queued", async () => {
@@ -311,6 +342,36 @@ test("a phone ask does not clear the shared draft queue after session invalidati
   const quiesce = harness.router.quiesce("phone");
   releaseProvider.resolve();
   await quiesce;
+
+  await assert.rejects(ask, (error) => error?.code === "COMMAND_CANCELLED");
+  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
+});
+
+test("invalidating one phone client scope cancels only its ask and preserves the shared draft queue", async () => {
+  const providerStarted = deferred();
+  const releaseProvider = deferred();
+  const harness = await makeHarness({
+    provider: {
+      stream: (_path, options) => (async function* () {
+        providerStarted.resolve();
+        await releaseProvider.promise;
+        if (!options.signal.aborted) {
+          yield "late answer";
+        }
+      })(),
+    },
+  });
+  const scope = harness.router.createScope("phone");
+  const ask = harness.router.execute({
+    type: "ask",
+    requestId: "phone-client-scope-ask",
+    prompt: "Question",
+  }, "phone", scope);
+  await providerStarted.promise;
+
+  const invalidating = scope.invalidate();
+  releaseProvider.resolve();
+  await invalidating;
 
   await assert.rejects(ask, (error) => error?.code === "COMMAND_CANCELLED");
   assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
@@ -623,7 +684,7 @@ test("send rolls back conversation attachment metadata and files when turn setup
   assert.deepEqual(harness.screenshots.getState(), queueBefore);
 });
 
-test("sync start throws and async start rejects both produce one error terminal and release the active turn", async () => {
+test("sync start throws and async start rejects without acknowledging or clearing the draft queue", async () => {
   const scenarios = [
     {
       name: "sync throw",
@@ -655,14 +716,18 @@ test("sync start throws and async start rejects both produce one error terminal 
     });
     harness.analysis.start = scenario.start;
 
-    const result = await harness.router.execute({
-      type: "ask",
-      requestId: `start-failure-${scenario.name}`,
-      prompt: "Question",
-    }, "desktop");
-
-    assert.equal(result.conversation.messages.at(-1).status, "error", scenario.name);
-    assert.equal(result.conversation.activeMessageId, undefined, scenario.name);
+    await assert.rejects(
+      harness.router.execute({
+        type: "ask",
+        requestId: `start-failure-${scenario.name}`,
+        prompt: "Question",
+      }, "desktop"),
+      (error) => error?.code === "ANALYSIS_FAILED",
+      scenario.name,
+    );
+    assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID], scenario.name);
+    assert.equal(harness.conversation.snapshot().messages.at(-1).status, "error", scenario.name);
+    assert.equal(harness.conversation.snapshot().activeMessageId, undefined, scenario.name);
     assert.equal(terminalEvents.length, 1, scenario.name);
     await harness.router.whenIdle();
   }
@@ -686,13 +751,15 @@ test("an async start rejection releases the router for a successful later send",
     return originalStart(request);
   };
 
-  const failed = await harness.router.execute({
+  await assert.rejects(
+    harness.router.execute({
       type: "ask",
-    requestId: "async-start-retry-first",
-    prompt: "First question",
-  }, "desktop");
-  assert.equal(failed.conversation.messages.at(-1).status, "error");
-  assert.equal(failed.conversation.activeMessageId, undefined);
+      requestId: "async-start-retry-first",
+      prompt: "First question",
+    }, "desktop"),
+    (error) => error?.code === "ANALYSIS_FAILED",
+  );
+  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
 
   await harness.router.execute({
     type: "ask",
