@@ -168,6 +168,7 @@ export interface AnalysisRequest {
   screenshotIds: string[];
   intent: AnalysisIntent;
   fast: boolean;
+  conversationContext?: string;
 }
 
 export type AnalysisStateEventType = "started" | "delta" | "completed" | "cancelled" | "error";
@@ -257,7 +258,10 @@ export type WorkspaceCommand =
   | { type: "remove"; requestId: string; screenshotId: string }
   | { type: "clear-queue"; requestId: string }
   | { type: "clear-conversation"; requestId: string }
+  | { type: "ask"; requestId: string; prompt?: string }
+  /** @deprecated Accepted only for the renderer compatibility bridge; runtime boundaries reject it. */
   | { type: "send"; requestId: string; prompt: string }
+  /** @deprecated Accepted only for the renderer compatibility bridge; runtime boundaries reject it. */
   | { type: "capture-and-send"; requestId: string; prompt: string }
   | { type: "cancel"; requestId: string };
 

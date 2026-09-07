@@ -97,20 +97,17 @@ function makeHarness({ captureFailure = null, withWorkspace = true } = {}) {
           return { queue: screenshots.getState(), conversation: { sessionId: "session", revision: 0, messages: [], attachments: [] } };
         case "cancel":
           return { queue: screenshots.getState(), conversation: { sessionId: "session", revision: 0, messages: [], attachments: [] }, analysis: await analysis.cancel() };
-        case "send":
-        case "capture-and-send": {
-          if (command.type === "capture-and-send") {
-            await screenshots.capture();
-          }
+        case "ask": {
           const queueSnapshot = screenshots.getState();
           const state = await analysis.start({
-            prompt: command.prompt.trim() || "Analyze the attached screenshots.",
+            prompt: command.prompt?.trim() || "Analyze the attached screenshots.",
             screenshotIds: queueSnapshot.items.map((item) => item.id),
             intent: "answer",
             fast: false,
           });
+          await screenshots.clear();
           return {
-            queue: queueSnapshot,
+            queue: screenshots.getState(),
             conversation: { sessionId: "session", revision: 0, messages: [], attachments: [] },
             analysis: state,
           };
@@ -153,7 +150,7 @@ test("preload exposes one shared workspace command method and forwards opaque co
     },
   });
 
-  const command = { type: "send", requestId: "request-1", prompt: "" };
+  const command = { type: "ask", requestId: "request-1", prompt: "" };
   await exposedApi.workspace.execute(command);
 
   assert.deepEqual(calls, [{ channel: "workspace:execute", args: [command] }]);
@@ -168,7 +165,9 @@ test("workspace IPC validates every command payload before touching queue or ana
     null,
     { type: "capture", requestId: "" },
     { type: "remove", requestId: "bad-remove", screenshotId: "../settings.json" },
-    { type: "send", requestId: "bad-send", prompt: 42 },
+    { type: "ask", requestId: "bad-ask", prompt: 42 },
+    { type: "send", requestId: "bad-send", prompt: "Question" },
+    { type: "capture-and-send", requestId: "bad-capture-send", prompt: "Question" },
     { type: "unknown", requestId: "bad-type" },
   ]) {
     const result = await execute({}, payload);
@@ -180,30 +179,30 @@ test("workspace IPC validates every command payload before touching queue or ana
   assert.deepEqual(harness.analysisCalls, []);
 });
 
-test("Send images sends all queued IDs, normalizes an empty prompt, and retains the draft queue", async () => {
+test("Ask sends all queued IDs, normalizes an empty prompt, and clears the draft queue", async () => {
   const harness = makeHarness();
   const execute = harness.registrations.get("workspace:execute");
-  const command = { type: "send", requestId: "send-1", prompt: "   " };
+  const command = { type: "ask", requestId: "ask-1", prompt: "   " };
 
   const result = await execute({}, command);
 
   assert.equal(result.ok, true);
-  assert.deepEqual(harness.calls, ["send"]);
+  assert.deepEqual(harness.calls, ["send", "clear-queue"]);
   assert.deepEqual(harness.analysisCalls, [{
     prompt: "Analyze the attached screenshots.",
     screenshotIds: [FIRST_ID, SECOND_ID],
     intent: "answer",
     fast: false,
   }]);
-  assert.deepEqual(result.value.queue.items.map((item) => item.id), [FIRST_ID, SECOND_ID]);
-  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [FIRST_ID, SECOND_ID]);
+  assert.deepEqual(result.value.queue.items, []);
+  assert.deepEqual(harness.screenshots.getState().items, []);
 });
 
-test("workspace IPC refuses direct sends when the canonical CommandRouter is absent", async () => {
+test("workspace IPC refuses direct asks when the canonical CommandRouter is absent", async () => {
   const harness = makeHarness({ withWorkspace: false });
   const execute = harness.registrations.get("workspace:execute");
 
-  const result = await execute({}, { type: "send", requestId: "send-without-router", prompt: "Question" });
+  const result = await execute({}, { type: "ask", requestId: "ask-without-router", prompt: "Question" });
 
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "INTERNAL_ERROR");
@@ -214,15 +213,15 @@ test("workspace IPC refuses direct sends when the canonical CommandRouter is abs
 test("duplicate workspace request IDs share one result and do not repeat a send", async () => {
   const harness = makeHarness();
   const execute = harness.registrations.get("workspace:execute");
-  const command = { type: "send", requestId: "send-duplicate", prompt: "Read these screens" };
+  const command = { type: "ask", requestId: "ask-duplicate", prompt: "Read these screens" };
 
   const first = await execute({}, command);
   const duplicate = await execute({}, { ...command });
 
   assert.deepEqual(duplicate, first);
-  assert.deepEqual(harness.calls, ["send"]);
+  assert.deepEqual(harness.calls, ["send", "clear-queue"]);
   assert.equal((await execute({}, { ...command, prompt: "Different request" })).ok, false);
-  assert.deepEqual(harness.calls, ["send"]);
+  assert.deepEqual(harness.calls, ["send", "clear-queue"]);
 });
 
 test("a renderer reload uses a new session nonce and cannot receive a stale capture result", async () => {
@@ -248,7 +247,7 @@ test("a renderer reload uses a new session nonce and cannot receive a stale capt
   assert.equal(afterReload.value.queue.items.length, 4);
 });
 
-test("Capture & ask captures first and sends only after a successful capture", async () => {
+test("The removed capture-and-send command cannot capture or ask through workspace IPC", async () => {
   const harness = makeHarness();
   const execute = harness.registrations.get("workspace:execute");
 
@@ -258,25 +257,10 @@ test("Capture & ask captures first and sends only after a successful capture", a
     prompt: "What changed?",
   });
 
-  assert.equal(result.ok, true);
-  assert.deepEqual(harness.calls, ["capture", "send"]);
-  assert.deepEqual(harness.analysisCalls[0].screenshotIds, [FIRST_ID, SECOND_ID, THIRD_ID]);
-  assert.equal(harness.analysisCalls[0].prompt, "What changed?");
-  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [FIRST_ID, SECOND_ID, THIRD_ID]);
-
-  const failed = makeHarness({ captureFailure: {
-    code: "SCREEN_CAPTURE_DENIED",
-    message: "permission denied",
-    action: "Enable screen recording.",
-  } });
-  const failedResult = await failed.registrations.get("workspace:execute")({}, {
-    type: "capture-and-send",
-    requestId: "capture-send-failed",
-    prompt: "Do not send",
-  });
-  assert.equal(failedResult.ok, false);
-  assert.deepEqual(failed.calls, ["capture"]);
-  assert.deepEqual(failed.analysisCalls, []);
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "INVALID_ARGUMENT");
+  assert.deepEqual(harness.calls, []);
+  assert.deepEqual(harness.analysisCalls, []);
 });
 
 test("cancel, remove, and clear-queue are explicit queue-preserving or queue-only commands", async () => {

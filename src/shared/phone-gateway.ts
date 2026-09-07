@@ -124,10 +124,12 @@ function parseWorkspaceCommand(value: unknown): WorkspaceCommand | null {
       return hasExactKeys(command, ["type", "requestId", "screenshotId"]) && isScreenshotId(command.screenshotId)
         ? { type: "remove", requestId: command.requestId, screenshotId: command.screenshotId }
         : null;
-    case "send":
-    case "capture-and-send":
+    case "ask":
+      if (hasExactKeys(command, ["type", "requestId"])) {
+        return { type: "ask", requestId: command.requestId };
+      }
       return hasExactKeys(command, ["type", "requestId", "prompt"]) && isPrompt(command.prompt)
-        ? { type: command.type, requestId: command.requestId, prompt: command.prompt }
+        ? { type: "ask", requestId: command.requestId, prompt: command.prompt }
         : null;
     default:
       return null;

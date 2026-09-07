@@ -29,13 +29,13 @@ export function createShortcutCommandHandlers(
   const command = <T extends WorkspaceCommand["type"]>(type: T): Extract<WorkspaceCommand, { type: T }> => ({
     type,
     requestId: requestIdFactory(type),
-    ...(type === "send" || type === "capture-and-send" ? { prompt: EMPTY_CONTEXT_PROMPT } : {}),
+    ...(type === "ask" ? { prompt: EMPTY_CONTEXT_PROMPT } : {}),
   } as Extract<WorkspaceCommand, { type: T }>);
 
   return {
     captureScreenshot: () => execute(command("capture")),
-    analyzeQueue: () => execute(command("send")),
-    captureAndAnalyze: () => execute(command("capture-and-send")),
+    analyzeQueue: () => execute(command("ask")),
+    captureAndAnalyze: () => execute(command("ask")),
     cancelAndClear: async () => {
       await execute(command("cancel"));
       await execute(command("clear-queue"));

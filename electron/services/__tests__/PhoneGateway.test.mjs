@@ -1854,7 +1854,7 @@ test("phone commands enforce a hard transient count and exact serialized-byte bu
 
   const prompt = "🚀".repeat(1_500);
   for (let index = 0; index < 10; index += 1) {
-    const command = { type: "send", requestId: `transient-${index}`, prompt };
+    const command = { type: "ask", requestId: `transient-${index}`, prompt };
     socket.emit("message", Buffer.from(JSON.stringify({ type: "command", command })));
     await flushMicrotasks();
     now += 10_000;
@@ -1913,7 +1913,7 @@ test("concurrent duplicate failures share one execution and replay the same safe
   socket.sent = [];
   const frame = Buffer.from(JSON.stringify({
     type: "command",
-    command: { type: "send", requestId: "concurrent-error", prompt: "secret prompt" },
+    command: { type: "ask", requestId: "concurrent-error", prompt: "secret prompt" },
   }));
 
   socket.emit("message", frame);
@@ -2013,7 +2013,7 @@ test("default phone command diagnostics contain only stable safe fields", async 
 
   socket.emit("message", Buffer.from(JSON.stringify({
     type: "command",
-    command: { type: "send", requestId: "safe-log", prompt: secret },
+    command: { type: "ask", requestId: "safe-log", prompt: secret },
   })));
   await waitForSentFrame(socket, (frame) => frame.type === "error" && frame.requestId === "safe-log");
 
@@ -2021,7 +2021,7 @@ test("default phone command diagnostics contain only stable safe fields", async 
     "Phone command failed.",
     {
       event: "phone_command_failed",
-      commandType: "send",
+      commandType: "ask",
       code: "COMMAND_FAILED",
     },
   ]]);
@@ -2144,7 +2144,7 @@ test("phone command failures use a fixed safe error and keep the authenticated c
 
   socket.emit("message", Buffer.from(JSON.stringify({
     type: "command",
-    command: { type: "send", requestId: "phone-safe-error-1", prompt: "Question" },
+    command: { type: "ask", requestId: "phone-safe-error-1", prompt: "Question" },
   })));
   await waitForSentFrame(socket, (frame) => frame.type === "error" && frame.requestId === "phone-safe-error-1", 2_000, 0);
 
@@ -2158,7 +2158,7 @@ test("phone command failures use a fixed safe error and keep the authenticated c
 
   socket.emit("message", Buffer.from(JSON.stringify({
     type: "command",
-    command: { type: "send", requestId: "phone-safe-error-2", prompt: "Question" },
+    command: { type: "ask", requestId: "phone-safe-error-2", prompt: "Question" },
   })));
   await waitForSentFrame(socket, (frame) => frame.type === "error" && frame.requestId === "phone-safe-error-2", 2_000, 1);
   assert.equal(socket.readyState, WebSocket.OPEN);
@@ -2166,7 +2166,7 @@ test("phone command failures use a fixed safe error and keep the authenticated c
 
   socket.emit("message", Buffer.from(JSON.stringify({
     type: "command",
-    command: { type: "send", requestId: "phone-safe-error-prototype", prompt: "Question" },
+    command: { type: "ask", requestId: "phone-safe-error-prototype", prompt: "Question" },
   })));
   await waitForSentFrame(socket, (frame) => frame.type === "error" && frame.requestId === "phone-safe-error-prototype", 2_000, 2);
   assert.deepEqual(JSON.parse(socket.sent[2]), {

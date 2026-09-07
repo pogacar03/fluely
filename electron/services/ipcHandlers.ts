@@ -568,16 +568,18 @@ export function normalizeWorkspaceCommand(
         return { error: invalidWorkspaceCommand("Remove commands must identify a managed screenshot.") };
       }
       return { command: { type: "remove", requestId, screenshotId: input.screenshotId } };
-    case "send":
-    case "capture-and-send":
-      if (typeof input.prompt !== "string" || input.prompt.length > MAX_ANALYSIS_PROMPT_LENGTH) {
+    case "ask":
+      if (input.prompt !== undefined &&
+        (typeof input.prompt !== "string" || input.prompt.length > MAX_ANALYSIS_PROMPT_LENGTH)) {
         return {
           error: invalidWorkspaceCommand(
             `Workspace prompts must be a string no longer than ${MAX_ANALYSIS_PROMPT_LENGTH} characters.`,
           ),
         };
       }
-      return { command: { type: input.type, requestId, prompt: input.prompt } };
+      return input.prompt === undefined
+        ? { command: { type: "ask", requestId } }
+        : { command: { type: "ask", requestId, prompt: input.prompt } };
     default:
       return { error: invalidWorkspaceCommand("Workspace command type is not supported.") };
   }

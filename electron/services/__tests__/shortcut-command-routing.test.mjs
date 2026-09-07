@@ -29,16 +29,16 @@ test("shortcut actions enter the desktop CommandRouter and keep clear explicit",
     },
     {
       command: {
-        type: "send",
-        requestId: "shortcut-send-2",
+        type: "ask",
+        requestId: "shortcut-ask-2",
         prompt: "Analyze the attached screenshots.",
       },
       source: "desktop",
     },
     {
       command: {
-        type: "capture-and-send",
-        requestId: "shortcut-capture-and-send-3",
+        type: "ask",
+        requestId: "shortcut-ask-3",
         prompt: "Analyze the attached screenshots.",
       },
       source: "desktop",

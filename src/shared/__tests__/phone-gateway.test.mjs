@@ -56,11 +56,11 @@ test("B2 accepts only exact typed resync and ping client frames and serializes s
   }), JSON.stringify({ type: "pong", at: 123 }));
 });
 
-test("B3 accepts every exact workspace command frame and preserves blank prompts for the router", () => {
+test("B3 accepts the capture and ask workspace command frames", () => {
   const commands = [
     { type: "capture", requestId: "phone-capture-1" },
-    { type: "send", requestId: "phone-send-1", prompt: "  " },
-    { type: "capture-and-send", requestId: "phone-capture-send-1", prompt: "Question" },
+    { type: "ask", requestId: "phone-ask-1" },
+    { type: "ask", requestId: "phone-ask-2", prompt: "Question" },
     {
       type: "remove",
       requestId: "phone-remove-1",
@@ -80,7 +80,7 @@ test("B3 accepts every exact workspace command frame and preserves blank prompts
   }
 });
 
-test("B3 rejects unknown command fields and types, invalid IDs, and prompt lengths", () => {
+test("B3 rejects old and unknown command types, invalid IDs, and prompt lengths", () => {
   const validRemove = {
     type: "command",
     command: {
@@ -92,15 +92,16 @@ test("B3 rejects unknown command fields and types, invalid IDs, and prompt lengt
   const invalidFrames = [
     { ...validRemove, extra: true },
     { type: "command", command: { ...validRemove.command, extra: true } },
+    { type: "command", command: { type: "send", requestId: "phone-send-1", prompt: "Question" } },
+    { type: "command", command: { type: "capture-and-send", requestId: "phone-capture-send-1", prompt: "Question" } },
     { type: "command", command: { type: "unknown", requestId: "phone-unknown" } },
     { type: "command", command: { type: "capture", requestId: "" } },
     { type: "command", command: { type: "capture", requestId: " leading" } },
     { type: "command", command: { type: "capture", requestId: "trailing " } },
     { type: "command", command: { type: "capture", requestId: 1 } },
     { type: "command", command: { type: "remove", requestId: "phone-remove-3", screenshotId: "not-an-id" } },
-    { type: "command", command: { type: "send", requestId: "phone-send-2" } },
-    { type: "command", command: { type: "send", requestId: "phone-send-3", prompt: 1 } },
-    { type: "command", command: { type: "send", requestId: "phone-send-4", prompt: "x".repeat(3001) } },
+    { type: "command", command: { type: "ask", requestId: "phone-ask-3", prompt: 1 } },
+    { type: "command", command: { type: "ask", requestId: "phone-ask-4", prompt: "x".repeat(3001) } },
   ];
 
   for (const invalid of invalidFrames) {

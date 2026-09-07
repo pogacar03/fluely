@@ -187,6 +187,10 @@ interface PhoneCommandInFlight {
 }
 
 const PHONE_SAFE_COMMAND_ERROR_MESSAGES: Readonly<Record<string, { code: string; message: string }>> = {
+  INVALID_ARGUMENT: {
+    code: "INVALID_ARGUMENT",
+    message: "Add a question or capture a screen before asking.",
+  },
   ANALYSIS_IN_PROGRESS: {
     code: "ANALYSIS_IN_PROGRESS",
     message: "An analysis is already running.",
@@ -198,6 +202,26 @@ const PHONE_SAFE_COMMAND_ERROR_MESSAGES: Readonly<Record<string, { code: string;
   SCREENSHOT_NOT_FOUND: {
     code: "SCREENSHOT_NOT_FOUND",
     message: "No queued screenshots are available.",
+  },
+  SCREEN_CAPTURE_DENIED: {
+    code: "SCREEN_CAPTURE_DENIED",
+    message: "Screen capture permission was denied. Allow screen capture for Fluely and try again.",
+  },
+  SCREEN_CAPTURE_RESTRICTED: {
+    code: "SCREEN_CAPTURE_RESTRICTED",
+    message: "Screen capture is restricted. Check device privacy settings or ask your administrator, then try again.",
+  },
+  SCREEN_CAPTURE_PERMISSION_REQUIRED: {
+    code: "SCREEN_CAPTURE_PERMISSION_REQUIRED",
+    message: "Fluely needs screen capture permission. Allow screen capture for Fluely and try again.",
+  },
+  SCREEN_CAPTURE_FAILED: {
+    code: "SCREEN_CAPTURE_FAILED",
+    message: "Fluely could not capture the selected display. Check that a display is available and try again.",
+  },
+  CAPTURE_IN_PROGRESS: {
+    code: "CAPTURE_IN_PROGRESS",
+    message: "A screen capture is already in progress. Wait for it to finish and try again.",
   },
   COMMAND_UNAVAILABLE: {
     code: "COMMAND_UNAVAILABLE",

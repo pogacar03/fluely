@@ -95,7 +95,7 @@ afterEach(async () => {
   }
 });
 
-test("send materializes immutable attachments, preserves the queue, and completes one canonical turn", async () => {
+test("ask materializes immutable attachments, clears the queue, and completes one canonical turn", async () => {
   const calls = [];
   const harness = await makeHarness({
     provider: {
@@ -108,7 +108,7 @@ test("send materializes immutable attachments, preserves the queue, and complete
   const events = [];
   harness.conversation.subscribe((event) => events.push(event));
 
-  const result = await harness.router.execute({ type: "send", requestId: "send-1", prompt: "Question" }, "desktop");
+  const result = await harness.router.execute({ type: "ask", requestId: "ask-1", prompt: "Question" }, "desktop");
   await harness.analysis.whenIdle();
 
   const snapshot = harness.conversation.snapshot();
@@ -119,7 +119,8 @@ test("send materializes immutable attachments, preserves the queue, and complete
   ]);
   assert.deepEqual(snapshot.messages[0].attachmentIds, [ATTACHMENT_ID]);
   assert.equal(snapshot.attachments[0].id, ATTACHMENT_ID);
-  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
+  assert.deepEqual(harness.screenshots.getState().items, []);
+  assert.notEqual(harness.attachments.getPath(ATTACHMENT_ID), undefined);
   assert.equal(calls[0].imagePaths.length, 1);
   assert.deepEqual(events.map((event) => event.type), [
     "attachment-added",
@@ -129,6 +130,99 @@ test("send materializes immutable attachments, preserves the queue, and complete
     "message-updated",
   ]);
   assert.equal(snapshot.activeMessageId, undefined);
+});
+
+test("ask accepts a pure text prompt when no screenshots are queued", async () => {
+  const calls = [];
+  const harness = await makeHarness({
+    queueItems: 0,
+    provider: {
+      stream: async function* (_path, options) {
+        calls.push(options);
+        yield "text answer";
+      },
+    },
+  });
+
+  await harness.router.execute({ type: "ask", requestId: "text-only", prompt: "Question" }, "desktop");
+  await harness.router.whenIdle();
+
+  assert.deepEqual(calls[0].imagePaths, []);
+  assert.match(calls[0].prompt, /Question: Question$/);
+  assert.deepEqual(harness.conversation.snapshot().messages.map((message) => [message.text, message.attachmentIds]), [
+    ["Question", []],
+    ["text answer", []],
+  ]);
+  assert.deepEqual(harness.screenshots.getState().items, []);
+});
+
+test("ask accepts pure screenshots, supplies the default prompt, and keeps copied attachments readable", async () => {
+  const calls = [];
+  const harness = await makeHarness({
+    provider: {
+      stream: async function* (_path, options) {
+        calls.push(options);
+        yield "image answer";
+      },
+    },
+  });
+
+  await harness.router.execute({ type: "ask", requestId: "screenshots-only" }, "phone");
+  await harness.router.whenIdle();
+
+  assert.match(calls[0].prompt, /Question: Analyze the attached screenshots\.$/);
+  assert.deepEqual(calls[0].imagePaths.length, 1);
+  const snapshot = harness.conversation.snapshot();
+  assert.equal(snapshot.messages[0].text, "Analyze the attached screenshots.");
+  assert.deepEqual(harness.screenshots.getState().items, []);
+  assert.notEqual(harness.attachments.getPath(snapshot.attachments[0].id), undefined);
+});
+
+test("ask rejects only when both prompt and screenshot queue are empty", async () => {
+  let providerCalls = 0;
+  const harness = await makeHarness({
+    queueItems: 0,
+    provider: {
+      stream: async function* () {
+        providerCalls += 1;
+        yield "unreachable";
+      },
+    },
+  });
+
+  await assert.rejects(
+    harness.router.execute({ type: "ask", requestId: "empty-ask", prompt: "  \n\t" }, "phone"),
+    (error) => error?.code === "INVALID_ARGUMENT",
+  );
+  assert.equal(providerCalls, 0);
+  assert.deepEqual(harness.conversation.snapshot().messages, []);
+  assert.deepEqual(harness.screenshots.getState().items, []);
+});
+
+test("a follow-up ask passes bounded prior user and assistant text once without local paths", async () => {
+  const calls = [];
+  const harness = await makeHarness({
+    provider: {
+      stream: async function* (_path, options) {
+        calls.push(options);
+        yield calls.length === 1 ? "First answer" : "Second answer";
+      },
+    },
+  });
+
+  await harness.router.execute({ type: "ask", requestId: "context-first", prompt: "First question" }, "desktop");
+  await harness.router.whenIdle();
+  await harness.router.execute({ type: "ask", requestId: "context-follow-up", prompt: "Follow-up question" }, "desktop");
+  await harness.router.whenIdle();
+
+  const followUpPrompt = calls[1].prompt;
+  assert.match(followUpPrompt, /Conversation context:/);
+  assert.match(followUpPrompt, /user: First question/);
+  assert.match(followUpPrompt, /assistant: First answer/);
+  assert.match(followUpPrompt, /Question: Follow-up question$/);
+  assert.equal(followUpPrompt.match(/Follow-up question/g)?.length, 1);
+  assert.doesNotMatch(followUpPrompt, /\/Users\/|\/tmp\/|\.png/);
+  assert.deepEqual(calls[1].imagePaths, []);
 });
 
 test("source does not change command semantics and duplicate request IDs execute once", async () => {
@@ -142,7 +236,7 @@ test("source does not change command semantics and duplicate request IDs execute
     },
   });
 
-  const command = { type: "send", requestId: "same-request", prompt: "Question" };
+  const command = { type: "ask", requestId: "same-request", prompt: "Question" };
   const [first, duplicate] = await Promise.all([
     harness.router.execute(command, "desktop"),
     harness.router.execute(command, "phone"),
@@ -154,7 +248,7 @@ test("source does not change command semantics and duplicate request IDs execute
   assert.equal(harness.conversation.snapshot().messages.length, 2);
 });
 
-test("phone send uses the desktop prompt normalization and canonical attachment order without clearing the draft queue", async () => {
+test("phone ask uses the shared prompt normalization and canonical attachment order before clearing the draft queue", async () => {
   const calls = [];
   const harness = await makeHarness({
     queueItems: 2,
@@ -167,7 +261,7 @@ test("phone send uses the desktop prompt normalization and canonical attachment 
   });
 
   const result = await harness.router.execute({
-    type: "send",
+    type: "ask",
     requestId: "phone-empty-prompt",
     prompt: "   \n\t",
   }, "phone");
@@ -180,14 +274,11 @@ test("phone send uses the desktop prompt normalization and canonical attachment 
     "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
   ]);
-  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [
-    SCREENSHOT_ID,
-    "22222222-2222-4222-8222-222222222221",
-  ]);
+  assert.deepEqual(harness.screenshots.getState().items, []);
   assert.deepEqual(harness.conversation.snapshot().messages.map((message) => message.role), ["user", "assistant"]);
 });
 
-test("phone clear-conversation and cancel preserve the canonical draft queue", async () => {
+test("phone clear-conversation and cancel preserve the already-consumed draft queue", async () => {
   let release;
   const harness = await makeHarness({
     provider: {
@@ -199,7 +290,7 @@ test("phone clear-conversation and cancel preserve the canonical draft queue", a
     },
   });
 
-  await harness.router.execute({ type: "send", requestId: "phone-cancel-send", prompt: "Question" }, "desktop");
+  await harness.router.execute({ type: "ask", requestId: "phone-cancel-send", prompt: "Question" }, "desktop");
   const cancelPromise = harness.router.execute({ type: "cancel", requestId: "phone-cancel" }, "phone");
   while (typeof release !== "function") {
     await new Promise((resolve) => setImmediate(resolve));
@@ -207,11 +298,11 @@ test("phone clear-conversation and cancel preserve the canonical draft queue", a
   release();
   await cancelPromise;
   await harness.router.whenIdle();
-  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
+  assert.deepEqual(harness.screenshots.getState().items, []);
 
   await harness.router.execute({ type: "clear-conversation", requestId: "phone-clear" }, "phone");
   assert.deepEqual(harness.conversation.snapshot().messages, []);
-  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
+  assert.deepEqual(harness.screenshots.getState().items, []);
 });
 
 test("provider failure with zero visible delta produces an error assistant terminal state", async () => {
@@ -225,7 +316,7 @@ test("provider failure with zero visible delta produces an error assistant termi
       },
     },
   });
-  await harness.router.execute({ type: "send", requestId: "error-1", prompt: "Question" }, "desktop");
+  await harness.router.execute({ type: "ask", requestId: "error-1", prompt: "Question" }, "desktop");
   await harness.analysis.whenIdle();
 
   const snapshot = harness.conversation.snapshot();
@@ -244,7 +335,7 @@ test("child completion with no visible answer is not reported as a successful co
       },
     },
   });
-  await harness.router.execute({ type: "send", requestId: "empty-1", prompt: "Question" }, "desktop");
+  await harness.router.execute({ type: "ask", requestId: "empty-1", prompt: "Question" }, "desktop");
   await harness.analysis.whenIdle();
 
   const assistant = harness.conversation.snapshot().messages[1];
@@ -264,7 +355,7 @@ test("cancellation clears the canonical active message while preserving partial 
     })(),
   };
   const harness = await makeHarness({ provider });
-  await harness.router.execute({ type: "send", requestId: "cancel-send", prompt: "Question" }, "desktop");
+  await harness.router.execute({ type: "ask", requestId: "cancel-send", prompt: "Question" }, "desktop");
   for (let attempt = 0; attempt < 20 && typeof release !== "function"; attempt += 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
@@ -296,7 +387,7 @@ test("cancel waits for the provider to settle before acknowledging and permits a
     })(),
   };
   const harness = await makeHarness({ provider });
-  await harness.router.execute({ type: "send", requestId: "cancel-wait-send", prompt: "Question" }, "desktop");
+  await harness.router.execute({ type: "ask", requestId: "cancel-wait-send", prompt: "Question" }, "desktop");
   for (let attempt = 0; attempt < 20 && typeof release !== "function"; attempt += 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
@@ -311,14 +402,14 @@ test("cancel waits for the provider to settle before acknowledging and permits a
   const cancelled = await cancelPromise;
   assert.equal(cancelled.conversation.messages[1].status, "cancelled");
 
-  const retried = await harness.router.execute({ type: "send", requestId: "cancel-retry", prompt: "Retry" }, "desktop");
+  const retried = await harness.router.execute({ type: "ask", requestId: "cancel-retry", prompt: "Retry" }, "desktop");
   await harness.analysis.whenIdle();
   assert.equal(retried.conversation.messages.at(-1).status, "streaming");
   assert.equal(harness.conversation.snapshot().messages.at(-1).status, "completed");
   assert.equal(harness.conversation.snapshot().messages.at(-1).text, "retry answer");
 });
 
-test("clear cancels settled work and removes conversation attachment files without clearing the draft queue", async () => {
+test("clear cancels settled work and removes conversation attachment files after ask consumes the draft queue", async () => {
   const harness = await makeHarness({
     provider: {
       stream: async function* () {
@@ -326,7 +417,7 @@ test("clear cancels settled work and removes conversation attachment files witho
       },
     },
   });
-  await harness.router.execute({ type: "send", requestId: "clear-send", prompt: "Question" }, "desktop");
+  await harness.router.execute({ type: "ask", requestId: "clear-send", prompt: "Question" }, "desktop");
   await harness.analysis.whenIdle();
   const attachmentId = harness.conversation.snapshot().attachments[0].id;
   assert.notEqual(harness.attachments.getPath(attachmentId), undefined);
@@ -335,7 +426,7 @@ test("clear cancels settled work and removes conversation attachment files witho
 
   assert.deepEqual(result.conversation.messages, []);
   assert.equal(harness.attachments.getPath(attachmentId), undefined);
-  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
+  assert.deepEqual(harness.screenshots.getState().items, []);
 });
 
 test("a conversation clear racing provider completion releases the router for a later retry", async () => {
@@ -355,13 +446,13 @@ test("a conversation clear racing provider completion releases the router for a 
     }
   });
 
-  await harness.router.execute({ type: "send", requestId: "race-send", prompt: "Question" }, "desktop");
+  await harness.router.execute({ type: "ask", requestId: "race-send", prompt: "Question" }, "desktop");
   await harness.analysis.whenIdle();
   await clearPromise;
   await harness.router.whenIdle();
   unsubscribe();
 
-  const retry = await harness.router.execute({ type: "send", requestId: "race-retry", prompt: "Retry" }, "phone");
+  const retry = await harness.router.execute({ type: "ask", requestId: "race-retry", prompt: "Retry" }, "phone");
   await harness.analysis.whenIdle();
 
   assert.equal(retry.conversation.activeMessageId !== undefined, true);
@@ -411,7 +502,7 @@ test("real service terminal events remain one canonical error/cancelled/complete
     const events = [];
     harness.conversation.subscribe((event) => events.push(event));
 
-    await harness.router.execute({ type: "send", requestId: `terminal-${scenario.name}`, prompt: "Question" }, "desktop");
+    await harness.router.execute({ type: "ask", requestId: `terminal-${scenario.name}`, prompt: "Question" }, "desktop");
     await harness.router.whenIdle();
 
     const snapshot = harness.conversation.snapshot();
@@ -456,7 +547,7 @@ test("different request IDs execute workspace commands in fair FIFO order while 
     return originalCancel();
   };
 
-  const sendPromise = harness.router.execute({ type: "send", requestId: "fifo-send", prompt: "Question" }, "desktop");
+  const sendPromise = harness.router.execute({ type: "ask", requestId: "fifo-send", prompt: "Question" }, "desktop");
   await materializationStarted;
   const clearPromise = harness.router.execute({ type: "clear-conversation", requestId: "fifo-clear" }, "phone");
   const cancelPromise = harness.router.execute({ type: "cancel", requestId: "fifo-cancel" }, "phone");
@@ -484,7 +575,7 @@ test("send rolls back conversation attachment metadata and files when turn setup
   const queueBefore = harness.screenshots.getState();
 
   await assert.rejects(
-    harness.router.execute({ type: "send", requestId: "transaction-failure", prompt: "Question" }, "desktop"),
+    harness.router.execute({ type: "ask", requestId: "transaction-failure", prompt: "Question" }, "desktop"),
     /conversation turn is already active/i,
   );
 
@@ -527,7 +618,7 @@ test("sync start throws and async start rejects both produce one error terminal 
     harness.analysis.start = scenario.start;
 
     const result = await harness.router.execute({
-      type: "send",
+      type: "ask",
       requestId: `start-failure-${scenario.name}`,
       prompt: "Question",
     }, "desktop");
@@ -558,7 +649,7 @@ test("an async start rejection releases the router for a successful later send",
   };
 
   const failed = await harness.router.execute({
-    type: "send",
+      type: "ask",
     requestId: "async-start-retry-first",
     prompt: "First question",
   }, "desktop");
@@ -566,7 +657,7 @@ test("an async start rejection releases the router for a successful later send",
   assert.equal(failed.conversation.activeMessageId, undefined);
 
   await harness.router.execute({
-    type: "send",
+    type: "ask",
     requestId: "async-start-retry-second",
     prompt: "Second question",
   }, "phone");
@@ -604,7 +695,7 @@ test("terminal analysis callbacks racing start rejection produce one terminal wi
 
     try {
       const sendPromise = harness.router.execute({
-        type: "send",
+        type: "ask",
         requestId: `terminal-reject-race-${order}`,
         prompt: "Question",
       }, "desktop");
@@ -670,7 +761,7 @@ test("phone quiesce cancels phone-owned streaming but preserves desktop-owned st
         },
       },
     });
-    await harness.router.execute({ type: "send", requestId: `${source}-stream-quiesce`, prompt: "Question" }, source);
+    await harness.router.execute({ type: "ask", requestId: `${source}-stream-quiesce`, prompt: "Question" }, source);
     while (harness.analysis.getState().status !== "running") await new Promise((resolve) => setImmediate(resolve));
 
     await harness.router.quiesce("phone");
@@ -692,13 +783,13 @@ test("phone cancel and clear-conversation intentionally cancel shared desktop an
     },
   });
 
-  await harness.router.execute({ type: "send", requestId: "desktop-before-phone-cancel", prompt: "Question" }, "desktop");
+  await harness.router.execute({ type: "ask", requestId: "desktop-before-phone-cancel", prompt: "Question" }, "desktop");
   while (harness.analysis.getState().status !== "running") await new Promise((resolve) => setImmediate(resolve));
   await harness.router.execute({ type: "cancel", requestId: "phone-shared-cancel" }, "phone");
   await harness.router.whenIdle();
   assert.equal(harness.conversation.snapshot().messages.at(-1).status, "cancelled");
 
-  await harness.router.execute({ type: "send", requestId: "desktop-before-phone-clear", prompt: "Again" }, "desktop");
+  await harness.router.execute({ type: "ask", requestId: "desktop-before-phone-clear", prompt: "Again" }, "desktop");
   while (harness.analysis.getState().status !== "running") await new Promise((resolve) => setImmediate(resolve));
   await harness.router.execute({ type: "clear-conversation", requestId: "phone-shared-clear" }, "phone");
   await harness.router.whenIdle();

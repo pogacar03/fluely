@@ -78,6 +78,7 @@ export interface CommandRouterOptions {
 }
 
 export type CommandRouterErrorCode =
+  | "INVALID_ARGUMENT"
   | "ANALYSIS_IN_PROGRESS"
   | "SCREENSHOT_NOT_FOUND"
   | "ANALYSIS_FAILED"
@@ -122,6 +123,33 @@ function getAnalysisError(event: AnalysisStateChangedEvent): { code: string; mes
     code: event.error?.code ?? "ANALYSIS_FAILED",
     message: event.error?.message ?? "Codex CLI analysis failed.",
   };
+}
+
+const MAX_CONVERSATION_CONTEXT_LENGTH = 3000;
+
+function buildConversationContext(snapshot: ReturnType<ConversationPort["snapshot"]>): string | undefined {
+  const entries = snapshot.messages
+    .filter((message) => (message.role === "user" || message.role === "assistant") && message.text.trim())
+    .map((message) => `${message.role}: ${message.text.trim()}`);
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  const selected: string[] = [];
+  let length = 0;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const remaining = MAX_CONVERSATION_CONTEXT_LENGTH - length - (selected.length > 0 ? 1 : 0);
+    if (remaining <= 0) {
+      break;
+    }
+    const entry = entries[index].slice(0, remaining);
+    selected.unshift(entry);
+    length += entry.length + (selected.length > 1 ? 1 : 0);
+    if (entry.length < entries[index].length) {
+      break;
+    }
+  }
+  return selected.join("\n") || undefined;
 }
 
 /**
@@ -204,25 +232,32 @@ export class CommandRouter {
         await this.analysis.whenIdle?.();
         await this.activeRun?.providerSettled;
         return this.result();
+      case "ask":
+        return this.ask(command.prompt, source, scope);
       case "send":
-        return this.send(command.prompt, source, scope);
       case "capture-and-send":
-        await this.screenshots.capture(source);
-        this.assertCurrent(scope);
-        return this.send(command.prompt, source, scope);
+        throw createError(
+          "INVALID_ARGUMENT",
+          "That workspace command is no longer supported.",
+          "Use Capture or Ask and try again.",
+        );
     }
   }
 
-  private async send(prompt: string, source: "desktop" | "phone", scope: CommandScope): Promise<CommandResult> {
+  private async ask(prompt: string | undefined, source: "desktop" | "phone", scope: CommandScope): Promise<CommandResult> {
     this.ensureAnalysisAvailable();
     const queue = this.screenshots.getState();
-    if (queue.items.length === 0) {
+    const hasPrompt = typeof prompt === "string" && prompt.trim().length > 0;
+    if (queue.items.length === 0 && !hasPrompt) {
       throw createError(
-        "SCREENSHOT_NOT_FOUND",
-        "There are no screenshots in the context queue to send.",
-        "Capture a screen before selecting Send images.",
+        "INVALID_ARGUMENT",
+        "Ask requires a question or at least one queued screenshot.",
+        "Enter a question or capture a screen before asking.",
       );
     }
+
+    const normalizedPrompt = normalizeContextPrompt(prompt);
+    const conversationContext = buildConversationContext(this.conversation.snapshot());
 
     const materialized: ConversationAttachment[] = [];
     try {
@@ -245,17 +280,18 @@ export class CommandRouter {
 
     try {
       const turn = this.conversation.addAttachmentsAndStartTurn(
-        normalizeContextPrompt(prompt),
+        normalizedPrompt,
         materialized,
       );
       this.assertCurrent(scope);
       await this.startAnalysis(turn.assistant.id, source, {
-        prompt: normalizeContextPrompt(prompt),
+        prompt: normalizedPrompt,
         screenshotIds: queue.items.map((item) => item.id),
         intent: "answer",
         fast: false,
+        ...(conversationContext ? { conversationContext } : {}),
       });
-      return this.result(queue);
+      return this.result(await this.screenshots.clear());
     } catch (error) {
       await this.deleteMaterialized(materialized);
       throw error;

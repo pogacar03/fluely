@@ -246,24 +246,45 @@ function basenameWithoutPng(value: string): string | null {
   return SCREENSHOT_ID_PATTERN.test(id) ? id : null;
 }
 
+const MAX_CONVERSATION_CONTEXT_LENGTH = 3000;
+
+function normalizeConversationContext(value: unknown): string {
+  return typeof value === "string" ? value.trim().slice(0, MAX_CONVERSATION_CONTEXT_LENGTH) : "";
+}
+
 /**
  * Builds a bounded prompt while keeping queue IDs separate from filesystem
  * paths. The paths are passed to the provider's image arguments only.
  */
 export function buildAnalysisPrompt(
-  request: Pick<AnalysisRequest, "prompt" | "intent"> | { prompt?: unknown; intent?: unknown },
+  request: Pick<AnalysisRequest, "prompt" | "intent" | "conversationContext"> | {
+    prompt?: unknown;
+    intent?: unknown;
+    conversationContext?: unknown;
+  },
   screenshotIds: readonly string[],
 ): string {
   const intent = normalizeIntent(request.intent);
   const question = normalizeQuestion(request.prompt);
   const ids = screenshotIds.filter((id) => SCREENSHOT_ID_PATTERN.test(id));
   const screenshotLine = ids.length > 0 ? ids.join(", ") : "none";
-  const prompt = [
+  const header = [
     `Intent: ${intent}`,
     `Screenshots: ${screenshotLine}`,
-    `Question: ${question || "Please analyze the selected screenshots."}`,
-  ].join("\n");
-  return prompt.slice(0, MAX_PROMPT_LENGTH);
+  ];
+  const questionLine = `Question: ${question || "Please analyze the selected screenshots."}`;
+  const context = normalizeConversationContext(request.conversationContext);
+  if (!context) {
+    return [...header, questionLine].join("\n").slice(0, MAX_PROMPT_LENGTH);
+  }
+
+  const contextLabel = "Conversation context:";
+  const framingLength = [...header, contextLabel, questionLine].join("\n").length;
+  const available = MAX_PROMPT_LENGTH - framingLength - 1;
+  if (available <= 0) {
+    return [...header, questionLine].join("\n").slice(0, MAX_PROMPT_LENGTH);
+  }
+  return [...header, contextLabel, context.slice(0, available), questionLine].join("\n");
 }
 
 export class AnalysisService {
