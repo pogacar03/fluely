@@ -26,8 +26,7 @@ const settingsValue = {
   shortcuts: {
     toggleVisibility: "CommandOrControl+B",
     captureScreenshot: "CommandOrControl+Shift+8",
-    analyzeQueue: "CommandOrControl+Enter",
-    captureAndAnalyze: "CommandOrControl+Shift+Enter",
+    ask: "CommandOrControl+Enter",
     cancelAndClear: "CommandOrControl+R",
   },
   window: { width: 960, height: 720, opacity: 0.92 },

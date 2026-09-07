@@ -8,7 +8,7 @@ import type {
   ServerFrame,
 } from "../../src/shared/phone-gateway";
 import type { WorkspaceCommand } from "../../src/shared/ipc";
-import { getCanonicalWorkspaceBusyState } from "../../src/shared/workspace-state";
+import { getAskAvailability, getCanonicalWorkspaceBusyState } from "../../src/shared/workspace-state";
 
 export type PhoneConnectionState = "connecting" | "connected" | "disconnected" | "error" | "revoked";
 
@@ -256,8 +256,7 @@ export type PhoneCommandInput =
   | { type: "remove"; screenshotId: string }
   | { type: "clear-queue" }
   | { type: "clear-conversation" }
-  | { type: "send"; prompt: string }
-  | { type: "capture-and-send"; prompt: string }
+  | { type: "ask"; prompt: string }
   | { type: "cancel" };
 
 export interface PhoneActionState {
@@ -265,15 +264,14 @@ export interface PhoneActionState {
   isCapturing: boolean;
   isBusy: boolean;
   canCapture: boolean;
-  canSendImages: boolean;
-  canCaptureAndSend: boolean;
+  canAsk: boolean;
   canRemove: boolean;
   canClearQueue: boolean;
   canClearConversation: boolean;
   canCancel: boolean;
 }
 
-export function getPhoneActionState(state: PhoneClientState): PhoneActionState {
+export function getPhoneActionState(state: PhoneClientState, prompt = ""): PhoneActionState {
   const canonical = getCanonicalWorkspaceBusyState({
     capturing: state.snapshot?.capturing,
     conversation: state.snapshot?.conversation,
@@ -289,8 +287,12 @@ export function getPhoneActionState(state: PhoneClientState): PhoneActionState {
     isCapturing,
     isBusy,
     canCapture: connected && !isBusy,
-    canSendImages: connected && !isBusy && queueCount > 0,
-    canCaptureAndSend: connected && !isBusy,
+    canAsk: connected && getAskAvailability({
+      prompt,
+      queueCount,
+      isBusy,
+      isHydrating: state.snapshot === null,
+    }),
     canRemove: connected && !isBusy && queueCount > 0,
     canClearQueue: connected && !isBusy && queueCount > 0,
     canClearConversation: connected && !isBusy,
@@ -417,7 +419,7 @@ function renderPhoneClient(
   if (state.commandMessage) {
     appendText(controls, "p", state.commandMessage, state.commandError ? "phone-error" : "phone-command-status");
   }
-  const actionState = getPhoneActionState(state);
+  const actionState = getPhoneActionState(state, promptValue);
   const fieldset = document.createElement("fieldset");
   fieldset.disabled = state.connection !== "connected";
   fieldset.setAttribute("aria-busy", String(actionState.isBusy));
@@ -442,7 +444,7 @@ function renderPhoneClient(
     button.disabled = disabled || Boolean(state.commandPending && !loading);
     button.setAttribute("aria-busy", String(loading));
     button.addEventListener("click", () => {
-      const nextCommand = command.type === "send" || command.type === "capture-and-send"
+      const nextCommand = command.type === "ask"
         ? { ...command, prompt: prompt.value }
         : command;
       onCommand(nextCommand);
@@ -451,8 +453,7 @@ function renderPhoneClient(
     return button;
   };
   addCommandButton("Capture", { type: "capture" }, !actionState.canCapture);
-  addCommandButton("Send images", { type: "send", prompt: promptValue }, !actionState.canSendImages);
-  addCommandButton("Capture & ask", { type: "capture-and-send", prompt: promptValue }, !actionState.canCaptureAndSend);
+  addCommandButton("Ask", { type: "ask", prompt: promptValue }, !actionState.canAsk);
   addCommandButton("Clear queue", { type: "clear-queue" }, !actionState.canClearQueue);
   addCommandButton("Clear conversation", { type: "clear-conversation" }, !actionState.canClearConversation);
   addCommandButton("Cancel", { type: "cancel" }, !actionState.canCancel);
@@ -593,8 +594,12 @@ export function startPhoneClient(root: HTMLElement, options: PhoneClientOptions 
       publish();
       return;
     }
+    const pending = state.commandPending;
     const applied = applyPhoneServerFrame(state, frame);
     state = applied.state;
+    if (frame.type === "ack" && pending?.requestId === frame.requestId && pending.type === "ask") {
+      promptValue = "";
+    }
     publish();
     if (applied.effect?.type === "resync") {
       sendResync(applied.effect.afterRevision);

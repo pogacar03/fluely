@@ -77,8 +77,7 @@ interface FluelySettings {
 interface ShortcutSettings {
   toggleVisibility: string;
   captureScreenshot: string;
-  analyzeQueue: string;
-  captureAndAnalyze: string;
+  ask: string;
   cancelAndClear: string;
 }
 ```
@@ -90,8 +89,7 @@ Defaults:
   shortcuts: {
     toggleVisibility: "CommandOrControl+B",
     captureScreenshot: "CommandOrControl+Shift+8",
-    analyzeQueue: "CommandOrControl+Enter",
-    captureAndAnalyze: "CommandOrControl+Shift+Enter",
+    ask: "CommandOrControl+Enter",
     cancelAndClear: "CommandOrControl+R"
   },
   window: { width: 960, height: 720 }

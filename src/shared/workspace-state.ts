@@ -46,6 +46,23 @@ export function getQueueIds(
   return items?.map((item) => item.id) ?? [];
 }
 
+export interface AskAvailabilityInput {
+  prompt?: string;
+  queueCount: number;
+  isBusy: boolean;
+  isHydrating: boolean;
+}
+
+/** Keeps the desktop and phone Ask affordance identical at the shared boundary. */
+export function getAskAvailability({
+  prompt = "",
+  queueCount,
+  isBusy,
+  isHydrating,
+}: AskAvailabilityInput): boolean {
+  return !isBusy && !isHydrating && (prompt.trim().length > 0 || queueCount > 0);
+}
+
 /** Builds a deduplicated analysis selection from the refreshed queue and capture result. */
 export function getAnalysisScreenshotIds(
   value: Pick<ScreenshotState, "items"> | readonly ScreenshotItem[] | null | undefined,
@@ -56,11 +73,10 @@ export function getAnalysisScreenshotIds(
 
 export interface AnalysisActionState {
   isRunning: boolean;
-  canCaptureAsk: boolean;
-  canAskQueue: boolean;
+  canAsk: boolean;
   canCancel: boolean;
   captureLabel: string;
-  queueLabel: string;
+  askLabel: string;
   cancelLabel: string;
 }
 
@@ -68,15 +84,16 @@ export interface AnalysisActionState {
 export function getAnalysisActionState(
   status: AnalysisStatus | null | undefined,
   queueCount: number,
+  prompt = "",
+  isHydrating = false,
 ): AnalysisActionState {
   const isRunning = status === "running";
   return {
     isRunning,
-    canCaptureAsk: !isRunning,
-    canAskQueue: !isRunning && queueCount > 0,
+    canAsk: getAskAvailability({ prompt, queueCount, isBusy: isRunning, isHydrating }),
     canCancel: isRunning,
-    captureLabel: "Capture & ask",
-    queueLabel: "Send images",
+    captureLabel: "Capture",
+    askLabel: "Ask",
     cancelLabel: "Cancel",
   };
 }
@@ -85,12 +102,10 @@ export interface WorkspaceActionState {
   isRunning: boolean;
   isBusy: boolean;
   canCapture: boolean;
-  canSendImages: boolean;
-  canCaptureAndSend: boolean;
+  canAsk: boolean;
   canCancel: boolean;
   captureLabel: string;
-  sendImagesLabel: string;
-  captureAndSendLabel: string;
+  askLabel: string;
   cancelLabel: string;
 }
 
@@ -132,6 +147,8 @@ export function getWorkspaceActionState(
   commandBusy = false,
   capturing = false,
   conversation?: ConversationSnapshot | null,
+  prompt = "",
+  isHydrating = false,
 ): WorkspaceActionState {
   const isRunning = status === "running";
   const canonical = getCanonicalWorkspaceBusyState({
@@ -144,12 +161,15 @@ export function getWorkspaceActionState(
     isRunning: isRunning || canonical.isRunning,
     isBusy: canonical.isBusy,
     canCapture: !canonical.isBusy,
-    canSendImages: !canonical.isBusy && queueCount > 0,
-    canCaptureAndSend: !canonical.isBusy,
+    canAsk: getAskAvailability({
+      prompt,
+      queueCount,
+      isBusy: canonical.isBusy,
+      isHydrating,
+    }),
     canCancel,
     captureLabel: "Capture",
-    sendImagesLabel: "Send images",
-    captureAndSendLabel: "Capture & ask",
+    askLabel: "Ask",
     cancelLabel: "Cancel",
   };
 }

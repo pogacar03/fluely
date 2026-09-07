@@ -380,8 +380,7 @@ test("settings update reapplies persisted shortcuts after a successful save", as
   const requested = {
     toggleVisibility: "CommandOrControl+K",
     captureScreenshot: "CommandOrControl+Shift+9",
-    analyzeQueue: "CommandOrControl+L",
-    captureAndAnalyze: "CommandOrControl+Shift+L",
+    ask: "CommandOrControl+L",
     cancelAndClear: "CommandOrControl+R",
   };
 
@@ -436,8 +435,7 @@ test("settings update returns shortcut registration failure instead of saved suc
   const requested = {
     toggleVisibility: "CommandOrControl+K",
     captureScreenshot: "CommandOrControl+Shift+9",
-    analyzeQueue: "CommandOrControl+L",
-    captureAndAnalyze: "CommandOrControl+Shift+L",
+    ask: "CommandOrControl+L",
     cancelAndClear: "CommandOrControl+R",
   };
   const failure = {
@@ -607,7 +605,7 @@ test("renderer-facing IPC errors sanitize filesystem paths, tokens, and commands
   });
 
   const workspaceResult = await registrations.get("workspace:execute")({}, {
-    type: "send",
+    type: "ask",
     requestId: "sanitize-error",
     prompt: "Question",
   });

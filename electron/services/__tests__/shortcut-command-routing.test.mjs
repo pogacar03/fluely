@@ -18,8 +18,7 @@ test("shortcut actions enter the desktop CommandRouter and keep clear explicit",
   }, (action) => `shortcut-${action}-${++nextRequest}`);
 
   await handlers.captureScreenshot();
-  await handlers.analyzeQueue();
-  await handlers.captureAndAnalyze();
+  await handlers.ask();
   await handlers.cancelAndClear();
 
   assert.deepEqual(calls, [
@@ -36,19 +35,11 @@ test("shortcut actions enter the desktop CommandRouter and keep clear explicit",
       source: "desktop",
     },
     {
-      command: {
-        type: "ask",
-        requestId: "shortcut-ask-3",
-        prompt: "Analyze the attached screenshots.",
-      },
+      command: { type: "cancel", requestId: "shortcut-cancel-3" },
       source: "desktop",
     },
     {
-      command: { type: "cancel", requestId: "shortcut-cancel-4" },
-      source: "desktop",
-    },
-    {
-      command: { type: "clear-queue", requestId: "shortcut-clear-queue-5" },
+      command: { type: "clear-queue", requestId: "shortcut-clear-queue-4" },
       source: "desktop",
     },
   ]);

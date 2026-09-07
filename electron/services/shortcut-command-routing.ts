@@ -23,7 +23,7 @@ function createDefaultRequestIdFactory(): ShortcutRequestIdFactory {
 export function createShortcutCommandHandlers(
   router: ShortcutCommandExecutor,
   requestIdFactory: ShortcutRequestIdFactory = createDefaultRequestIdFactory(),
-): Required<Pick<ShortcutActionHandlers, "captureScreenshot" | "analyzeQueue" | "captureAndAnalyze" | "cancelAndClear">> {
+): Required<Pick<ShortcutActionHandlers, "captureScreenshot" | "ask" | "cancelAndClear">> {
   const execute = (command: WorkspaceCommand): Promise<void> =>
     Promise.resolve(router.execute(command, "desktop")).then(() => undefined);
   const command = <T extends WorkspaceCommand["type"]>(type: T): Extract<WorkspaceCommand, { type: T }> => ({
@@ -34,8 +34,7 @@ export function createShortcutCommandHandlers(
 
   return {
     captureScreenshot: () => execute(command("capture")),
-    analyzeQueue: () => execute(command("ask")),
-    captureAndAnalyze: () => execute(command("ask")),
+    ask: () => execute(command("ask")),
     cancelAndClear: async () => {
       await execute(command("cancel"));
       await execute(command("clear-queue"));

@@ -49,7 +49,7 @@ The product contract and acceptance criteria are intentionally kept separate fro
 See something → Capture context → Ask → Receive a useful answer → Continue
 ```
 
-Fluely keeps capture, analysis, and visibility as separate actions. Taking a screenshot should not unexpectedly send it. Asking for an answer should not unexpectedly change whether the window is visible.
+Fluely keeps Capture, Ask, and visibility as separate actions. Capture only adds context to the shared queue; Ask sends the current question and/or queued screenshots. Asking for an answer does not unexpectedly change whether the window is visible.
 
 ### Explicit boundaries
 
@@ -78,8 +78,7 @@ The renderer does not get filesystem, shell, or secret access. Provider adapters
 | --- | --- | --- |
 | Show / hide | `⌘ B` | Changes visibility only |
 | Capture screenshot | `⌘ ⇧ 8` | Adds a screenshot to the queue |
-| Send images | `⌘ Enter` | Sends queued screenshots and the current question |
-| Capture and analyze | `⌘ ⇧ Enter` | Captures first, then starts analysis |
+| Ask | `⌘ Enter` | Sends the current question and/or queued screenshots; a successful request clears the shared queue |
 | Cancel / clear | `⌘ R` | Cancels the request and clears the queue |
 
 Shortcuts will be configurable, validated on registration, and surfaced when the operating system reports a conflict.
@@ -124,7 +123,7 @@ The optional phone companion is enabled from Settings with **Start phone compani
 
 The first LAN slice uses HTTP and WebSocket without TLS. Use it only on a trusted private network; anyone who can observe that network may observe the companion traffic. Pairing codes expire after two minutes, are single-use, and are never retained across restart. Restarting Fluely intentionally starts a new empty session: queued screenshots, conversation messages, attachments, capture/streaming state, and transient phone command state are cleared.
 
-Desktop and phone project one canonical session. **Capture** adds a computer screenshot to the shared draft queue, **Send images** sends the queue without capturing or clearing it, **Capture & ask** performs both actions, and **Cancel**, **Clear queue**, **Clear conversation**, and **Remove** remain explicit controls. The desktop Settings and Work views are two mutually exclusive views in one window; Settings starts the workspace and Work returns to Settings.
+Desktop and phone project one canonical session. **Capture** adds a computer screenshot to the shared draft queue without starting analysis, and **Ask** sends the current question and/or queued screenshots; a successful request clears the shared queue. **Cancel**, **Clear queue**, **Clear conversation**, and **Remove** remain explicit controls. The desktop Settings and Work views are two mutually exclusive views in one window; Settings starts the workspace and Work returns to Settings.
 
 Phone-issued **Cancel** and **Clear conversation** are intentional remote controls of the shared conversation, so they may stop the current analysis even when it was started on the desktop. Lifecycle shutdown is narrower: disabling the phone companion cancels only phone-origin work, while quitting or restarting Fluely globally quiesces all work before transient state is cleared.
 

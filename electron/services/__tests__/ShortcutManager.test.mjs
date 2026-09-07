@@ -28,7 +28,7 @@ function makeManager({ failAccelerator, throwAccelerator, throwAlways = false, v
       return captureActive;
     },
   };
-  const actions = { analyze: 0, capture: 0, cancel: 0 };
+  const actions = { ask: 0, capture: 0, cancel: 0 };
   const adapter = {
     failAccelerator,
     throwAccelerator,
@@ -55,8 +55,7 @@ function makeManager({ failAccelerator, throwAccelerator, throwAlways = false, v
   };
   const manager = new ShortcutManager(adapter, window, {
     captureScreenshot: () => { actions.capture += 1; },
-    analyzeQueue: () => { actions.analyze += 1; },
-    captureAndAnalyze: () => undefined,
+    ask: () => { actions.ask += 1; },
     cancelAndClear: () => { actions.cancel += 1; },
   });
 
@@ -68,8 +67,7 @@ test("duplicate accelerators are rejected before registration", () => {
   const result = manager.registerAll({
     toggleVisibility: "CommandOrControl+B",
     captureScreenshot: "CommandOrControl+B",
-    analyzeQueue: "CommandOrControl+Enter",
-    captureAndAnalyze: "CommandOrControl+Shift+Enter",
+    ask: "CommandOrControl+Enter",
     cancelAndClear: "CommandOrControl+R",
   });
 
@@ -84,13 +82,12 @@ test("successful registration exposes each configured shortcut", () => {
   const result = manager.registerAll(DEFAULT_SETTINGS.shortcuts);
 
   assert.equal(result.ok, true);
-  assert.equal(result.value.entries.length, 5);
+  assert.equal(result.value.entries.length, 4);
   assert.deepEqual(registerCalls, Object.values(DEFAULT_SETTINGS.shortcuts));
   assert.equal(result.value.entries.find((entry) => entry.action === "toggleVisibility").available, true);
   assert.equal(result.value.entries.find((entry) => entry.action === "captureScreenshot").available, true);
   assert.equal(result.value.entries.find((entry) => entry.action === "cancelAndClear").available, true);
-  assert.equal(result.value.entries.find((entry) => entry.action === "analyzeQueue").available, true);
-  assert.equal(result.value.entries.find((entry) => entry.action === "captureAndAnalyze").available, true);
+  assert.equal(result.value.entries.find((entry) => entry.action === "ask").available, true);
 });
 
 test("OS conflicts are reported without changing the requested accelerator", () => {
@@ -99,7 +96,7 @@ test("OS conflicts are reported without changing the requested accelerator", () 
   const result = manager.registerAll(DEFAULT_SETTINGS.shortcuts);
 
   assert.equal(result.ok, true);
-  const entry = result.value.entries.find((item) => item.action === "analyzeQueue");
+  const entry = result.value.entries.find((item) => item.action === "ask");
   assert.equal(entry.accelerator, "CommandOrControl+Enter");
   assert.equal(entry.registered, false);
   assert.equal(entry.available, false);
@@ -125,7 +122,7 @@ test("toggle shortcut changes visibility without invoking analysis", () => {
   callbacks.get(DEFAULT_SETTINGS.shortcuts.toggleVisibility)();
 
   assert.equal(window.visible, true);
-  assert.equal(actions.analyze, 0);
+  assert.equal(actions.ask, 0);
 });
 
 test("toggle shortcut does not show a hidden window during an active capture", () => {
@@ -143,14 +140,12 @@ test("all command shortcuts invoke supplied handlers", () => {
 
   callbacks.get(DEFAULT_SETTINGS.shortcuts.captureScreenshot)();
   callbacks.get(DEFAULT_SETTINGS.shortcuts.cancelAndClear)();
-  callbacks.get(DEFAULT_SETTINGS.shortcuts.analyzeQueue)();
-  callbacks.get(DEFAULT_SETTINGS.shortcuts.captureAndAnalyze)();
+  callbacks.get(DEFAULT_SETTINGS.shortcuts.ask)();
 
   assert.equal(actions.capture, 1);
   assert.equal(actions.cancel, 1);
-  assert.equal(actions.analyze, 1);
-  assert.equal(manager.getStatus().entries.find((entry) => entry.action === "analyzeQueue").available, true);
-  assert.equal(manager.getStatus().entries.find((entry) => entry.action === "captureAndAnalyze").available, true);
+  assert.equal(actions.ask, 1);
+  assert.equal(manager.getStatus().entries.find((entry) => entry.action === "ask").available, true);
 });
 
 test("dispose unregisters every active shortcut", () => {

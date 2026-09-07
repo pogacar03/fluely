@@ -88,7 +88,7 @@ test("SettingsService rejects invalid update payloads without writing", async ()
   const service = new SettingsService(directory);
   await service.load();
 
-  const result = await service.update({ shortcuts: { analyzeQueue: 42 } });
+  const result = await service.update({ shortcuts: { ask: 42 } });
 
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "INVALID_ARGUMENT");

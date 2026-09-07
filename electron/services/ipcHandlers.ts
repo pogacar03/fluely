@@ -164,7 +164,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function invalidShortcutPayload(): IpcError {
   return {
     code: "INVALID_ARGUMENT",
-    message: "Shortcut settings must include five non-empty accelerator strings.",
+    message: "Shortcut settings must include four non-empty accelerator strings.",
     action: "Enter each shortcut once and try again.",
   };
 }
@@ -178,8 +178,7 @@ function isShortcutSettings(input: unknown): input is ShortcutSettings {
   return [
     "toggleVisibility",
     "captureScreenshot",
-    "analyzeQueue",
-    "captureAndAnalyze",
+    "ask",
     "cancelAndClear",
   ].every((key) => typeof settings[key] === "string" && settings[key].trim().length > 0);
 }

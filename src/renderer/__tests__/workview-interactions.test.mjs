@@ -68,8 +68,9 @@ function analysisState(status = "idle", screenshotIds = []) {
 
 function createBackend({
   initialAnalysisStatus = "idle",
-  failedSends = 0,
+  failedAsks = 0,
   holdCapture = false,
+  initialQueue = [screenshot(FIRST_ID, 1), screenshot(SECOND_ID, 2)],
   conversationSnapshot,
   conversationUnavailableUntilCommand = false,
 } = {}) {
@@ -77,10 +78,10 @@ function createBackend({
   const calls = [];
   const analysisRequests = [];
   const workspaceCommands = [];
-  let queue = [screenshot(FIRST_ID, 1), screenshot(SECOND_ID, 2)];
+  let queue = initialQueue.map((item) => ({ ...item }));
   let currentAnalysis = analysisState(initialAnalysisStatus, initialAnalysisStatus === "running" ? [FIRST_ID] : []);
   let captureCount = 0;
-  let remainingFailedSends = failedSends;
+  let remainingFailedAsks = failedAsks;
   let conversationAvailable = !conversationUnavailableUntilCommand;
   let conversationEventListener;
   let releaseCapture = () => undefined;
@@ -127,10 +128,10 @@ function createBackend({
   };
   const analysis = {
     start: async (request) => {
-      calls.push("send");
+      calls.push("ask");
       analysisRequests.push({ ...request, screenshotIds: [...request.screenshotIds] });
-      if (remainingFailedSends > 0) {
-        remainingFailedSends -= 1;
+      if (remainingFailedAsks > 0) {
+        remainingFailedAsks -= 1;
         throw {
           code: "ANALYSIS_FAILED",
           message: "Deterministic provider failure.",
@@ -180,20 +181,16 @@ function createBackend({
             conversation: structuredClone(canonicalConversation),
             analysis: await analysis.cancel(),
           };
-        case "send":
-        case "capture-and-send": {
-          if (command.type === "capture-and-send") {
-            await screenshots.capture();
-          }
+        case "ask": {
           const queueSnapshot = screenshots.getState();
           const state = await analysis.start({
-            prompt: command.prompt.trim() || "Analyze the attached screenshots.",
+            prompt: command.prompt?.trim() || "Analyze the attached screenshots.",
             screenshotIds: queueSnapshot.items.map((item) => item.id),
             intent: "answer",
             fast: false,
           });
           return {
-            queue: queueSnapshot,
+            queue: await screenshots.clear(),
             conversation: structuredClone(canonicalConversation),
             analysis: state,
           };
@@ -298,10 +295,10 @@ async function renderApp(backend) {
   await act(async () => {
     root.render(React.createElement(App));
   });
-  for (let attempt = 0; attempt < 10 && !findButton("Capture screenshot without sending"); attempt += 1) {
+  for (let attempt = 0; attempt < 10 && !findButton("Capture") && !findButton("Capture screenshot without sending"); attempt += 1) {
     await flushRenderer();
   }
-  assert.ok(findButton("Capture screenshot without sending"), "WorkView did not mount");
+  assert.ok(findButton("Capture") || findButton("Capture screenshot without sending"), "WorkView did not mount");
   return backend;
 }
 
@@ -323,6 +320,21 @@ async function clickAndSettle(label) {
   });
 }
 
+async function setPrompt(value) {
+  const input = document.querySelector(".composer-input");
+  assert.ok(input, "Missing desktop prompt input");
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value").set;
+    setter.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+}
+
+function promptValue() {
+  return document.querySelector(".composer-input")?.value;
+}
+
 afterEach(async () => {
   while (roots.length > 0) {
     const root = roots.pop();
@@ -334,50 +346,91 @@ afterEach(async () => {
 test("the actual Capture control appends context without invoking analysis", async () => {
   const backend = await renderApp(createBackend());
 
-  await clickAndSettle("Capture screenshot without sending");
+  await clickAndSettle("Capture");
 
   assert.deepEqual(backend.calls, ["capture"]);
   assert.deepEqual(backend.analysisRequests, []);
   assert.equal(queueCountText(), "3/5");
 });
 
-test("the actual Send images control sends every queued screenshot with the exact empty prompt", async () => {
+test("the desktop Ask control sends pure text without capturing and clears the prompt", async () => {
+  const backend = await renderApp(createBackend({ initialQueue: [] }));
+
+  await setPrompt("What is on screen?");
+  await clickAndSettle("Ask Fluely");
+
+  assert.deepEqual(backend.calls, ["ask"]);
+  assert.deepEqual(backend.analysisRequests, [{
+    prompt: "What is on screen?",
+    screenshotIds: [],
+    intent: "answer",
+    fast: false,
+  }]);
+  assert.equal(queueCountText(), "0/5");
+  assert.equal(promptValue(), "");
+});
+
+test("the desktop Ask control sends pure screenshots without capturing and clears the shared queue", async () => {
   const backend = await renderApp(createBackend());
 
-  await clickAndSettle("Send all queued screenshots");
+  await clickAndSettle("Ask Fluely");
 
-  assert.deepEqual(backend.calls, ["send"]);
+  assert.deepEqual(backend.calls, ["ask"]);
   assert.deepEqual(backend.analysisRequests, [{
     prompt: "Analyze the attached screenshots.",
     screenshotIds: [FIRST_ID, SECOND_ID],
     intent: "answer",
     fast: false,
   }]);
-  assert.equal(queueCountText(), "2/5");
+  assert.equal(queueCountText(), "0/5");
 });
 
-test("the actual Capture & ask control executes capture before sending the refreshed queue", async () => {
+test("the desktop Ask control sends the current prompt with the shared screenshot queue", async () => {
   const backend = await renderApp(createBackend());
 
-  await clickAndSettle("Capture screenshot and ask");
+  await setPrompt("Compare these screenshots");
+  await clickAndSettle("Ask Fluely");
 
-  assert.deepEqual(backend.calls, ["capture", "send"]);
-  assert.deepEqual(backend.analysisRequests[0].screenshotIds, [FIRST_ID, SECOND_ID, CAPTURE_IDS[0]]);
-  assert.equal(queueCountText(), "3/5");
+  assert.deepEqual(backend.calls, ["ask"]);
+  assert.deepEqual(backend.analysisRequests[0], {
+    prompt: "Compare these screenshots",
+    screenshotIds: [FIRST_ID, SECOND_ID],
+    intent: "answer",
+    fast: false,
+  });
+  assert.equal(queueCountText(), "0/5");
+  assert.equal(promptValue(), "");
+});
+
+test("the desktop Ask control is disabled when both prompt and queue are empty", async () => {
+  await renderApp(createBackend({ initialQueue: [] }));
+
+  assert.equal(findButton("Ask Fluely").disabled, true);
+  assert.match(document.querySelector(".composer-tip")?.textContent ?? "", /enter a question or capture a screen/i);
+});
+
+test("the desktop Work view exposes only Capture and Ask as its primary actions", async () => {
+  await renderApp(createBackend());
+
+  assert.ok(findButton("Capture"));
+  assert.ok(findButton("Ask Fluely"));
+  assert.equal(findButton("Send all queued screenshots"), undefined);
+  assert.equal(findButton("Capture screenshot and ask"), undefined);
+  assert.doesNotMatch(document.body.textContent ?? "", /Send images|Capture & ask/);
 });
 
 test("loading disables the actual controls and prevents duplicate Capture clicks", async () => {
   const backend = await renderApp(createBackend({ holdCapture: true }));
-  const captureButton = findButton("Capture screenshot without sending");
+  const captureButton = findButton("Capture");
 
   await act(async () => {
     captureButton.click();
     await Promise.resolve();
   });
-  assert.equal(findButton("Capture screenshot without sending").disabled, true);
+  assert.equal(findButton("Capture").disabled, true);
   assert.equal(document.querySelector(".composer-actions")?.getAttribute("aria-busy"), "true");
 
-  findButton("Capture screenshot without sending").click();
+  findButton("Capture").click();
   assert.deepEqual(backend.calls, ["capture"]);
 
   await act(async () => {
@@ -397,19 +450,15 @@ test("the actual Cancel control routes through the shared workspace command", as
   assert.equal(queueCountText(), "2/5");
 });
 
-test("a failed Send images click retains the queue and a second click retries with a new request ID", async () => {
-  const backend = await renderApp(createBackend({ failedSends: 1 }));
+test("a failed Ask retains the queue and the current prompt", async () => {
+  const backend = await renderApp(createBackend({ failedAsks: 1 }));
 
-  await clickAndSettle("Send all queued screenshots");
+  await setPrompt("Retry this question");
+  await clickAndSettle("Ask Fluely");
   assert.equal(queueCountText(), "2/5");
   assert.match(document.querySelector("[role=status]")?.textContent ?? "", /could not complete the analysis request/i);
-  assert.equal(findButton("Send all queued screenshots").disabled, false);
-
-  await clickAndSettle("Send all queued screenshots");
-
-  assert.deepEqual(backend.calls, ["send", "send"]);
-  assert.equal(backend.analysisRequests.length, 2);
-  assert.notEqual(backend.workspaceCommands[0].requestId, backend.workspaceCommands[1].requestId);
+  assert.equal(findButton("Ask Fluely").disabled, false);
+  assert.equal(promptValue(), "Retry this question");
   assert.deepEqual(backend.getQueue().map((item) => item.id), [FIRST_ID, SECOND_ID]);
   assert.equal(queueCountText(), "2/5");
 });
@@ -435,9 +484,8 @@ test("a streaming canonical conversation makes the desktop composer aria-busy an
   }));
 
   assert.equal(document.querySelector(".composer-actions")?.getAttribute("aria-busy"), "true");
-  assert.equal(findButton("Capture screenshot without sending").disabled, true);
-  assert.equal(findButton("Send all queued screenshots").disabled, true);
-  assert.equal(findButton("Capture screenshot and ask").disabled, true);
+  assert.equal(findButton("Capture").disabled, true);
+  assert.equal(findButton("Ask Fluely").disabled, true);
 });
 
 test("the actual Work view renders the canonical conversation snapshot and opaque attachment thumbnail", async () => {
@@ -489,7 +537,7 @@ test("the actual Work view renders the canonical conversation snapshot and opaqu
 test("a workspace fallback promotes failed conversation hydration before applying later events", async () => {
   const backend = await renderApp(createBackend({ conversationUnavailableUntilCommand: true }));
 
-  await clickAndSettle("Capture screenshot without sending");
+  await clickAndSettle("Capture");
   backend.emitConversationEvent({
     type: "message-added",
     revision: 1,

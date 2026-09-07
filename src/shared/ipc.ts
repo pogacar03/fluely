@@ -50,15 +50,13 @@ export type {
 export type ShortcutAction =
   | "toggleVisibility"
   | "captureScreenshot"
-  | "analyzeQueue"
-  | "captureAndAnalyze"
+  | "ask"
   | "cancelAndClear";
 
 export interface ShortcutSettings {
   toggleVisibility: string;
   captureScreenshot: string;
-  analyzeQueue: string;
-  captureAndAnalyze: string;
+  ask: string;
   cancelAndClear: string;
 }
 
@@ -259,10 +257,6 @@ export type WorkspaceCommand =
   | { type: "clear-queue"; requestId: string }
   | { type: "clear-conversation"; requestId: string }
   | { type: "ask"; requestId: string; prompt?: string }
-  /** @deprecated Accepted only for the renderer compatibility bridge; runtime boundaries reject it. */
-  | { type: "send"; requestId: string; prompt: string }
-  /** @deprecated Accepted only for the renderer compatibility bridge; runtime boundaries reject it. */
-  | { type: "capture-and-send"; requestId: string; prompt: string }
   | { type: "cancel"; requestId: string };
 
 /** @deprecated Use the shared CommandResult contract. */

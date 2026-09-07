@@ -290,7 +290,7 @@ async function createRealCommandRuntime(root, control) {
   const commandRouter = {
     execute: async (command, source) => {
       const result = await router.execute(command, source);
-      if (command.requestId === "restart-send") {
+      if (command.requestId === "restart-ask") {
         await control.commandGate.promise;
       }
       return result;
@@ -675,27 +675,27 @@ test("same storage paths and real command services clear active capture, streami
     const queueFrame = phone.frames.find((frame) => frame.type === "snapshot" && frame.payload.queue.length === 1);
     assert.ok(queueFrame);
     oldContextUrl = queueFrame.payload.queue[0].previewUrl;
+    const oldScreenshotPath = oldRuntime.screenshots.getManagedPaths([oldRuntime.screenshotId])[0];
+    assert.ok(oldScreenshotPath);
 
     oldSocket.send(JSON.stringify({
       type: "command",
-      command: { type: "send", requestId: "restart-send", prompt: "hold this real stream" },
+      command: { type: "ask", requestId: "restart-ask", prompt: "hold this real stream" },
     }));
     await waitFor(() => oldRuntime.analysis.getState().status === "running");
     await waitFor(() => oldRuntime.conversation.snapshot().messages.some((message) => message.status === "streaming"));
-    await waitFor(() => [...oldRuntime.gateway.phoneSessions.values()].some((session) => session.inFlight.has("restart-send")));
+    await waitFor(() => [...oldRuntime.gateway.phoneSessions.values()].some((session) => session.inFlight.has("restart-ask")));
     assert.equal(oldRuntime.projection.getSnapshot().conversation.activeMessageId !== undefined, true);
     assert.equal(oldRuntime.projection.getSnapshot().conversation.messages.some((message) => message.status === "streaming"), true);
     assert.equal(oldRuntime.analysis.getState().status, "running");
     assert.equal(oldRuntime.screenshots.getState().capturing, false);
+    assert.deepEqual(oldRuntime.screenshots.getState().items, []);
     assert.equal(oldRuntime.conversation.snapshot().attachments.length, 1);
     oldAttachmentUrl = oldContextUrl
       .replace("/api/context/", "/api/attachments/")
       .replace(oldRuntime.screenshotId, oldRuntime.attachmentId);
-    const oldScreenshotPath = oldRuntime.screenshots.getManagedPaths([oldRuntime.screenshotId])[0];
     const oldAttachmentPath = oldRuntime.attachments.getPath(oldRuntime.attachmentId);
-    assert.ok(oldScreenshotPath);
     assert.ok(oldAttachmentPath);
-    assert.deepEqual(await readFile(oldScreenshotPath), PNG_BYTES);
     assert.deepEqual(await readFile(oldAttachmentPath), PNG_BYTES);
 
     await abandonRuntime(oldRuntime);

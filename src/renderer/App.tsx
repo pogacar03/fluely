@@ -531,26 +531,16 @@ export function App() {
     }
   }
 
-  async function sendImages(request: WorkAnalysisRequest) {
+  async function ask(request: WorkAnalysisRequest): Promise<boolean> {
     const succeeded = await executeWorkspaceCommand({
-      type: "send",
-      requestId: nextWorkspaceRequestId("send"),
+      type: "ask",
+      requestId: nextWorkspaceRequestId("ask"),
       prompt: request.prompt,
     });
     if (succeeded && mountedRef.current) {
-      setNotice({ tone: "success", text: "Screenshots sent. Your context queue remains available." });
+      setNotice({ tone: "success", text: "Question sent. Your context queue was cleared." });
     }
-  }
-
-  async function captureAndAsk(request: WorkAnalysisRequest) {
-    const succeeded = await executeWorkspaceCommand({
-      type: "capture-and-send",
-      requestId: nextWorkspaceRequestId("capture-and-send"),
-      prompt: request.prompt,
-    });
-    if (succeeded && mountedRef.current) {
-      setNotice({ tone: "success", text: "Screenshot captured and sent. Your context queue remains available." });
-    }
+    return succeeded;
   }
 
   async function cancelAnalysis() {
@@ -660,13 +650,12 @@ export function App() {
       settings={settings}
       screenshotState={screenshotState ?? emptyScreenshotState()}
       analysisState={analysisState ?? emptyAnalysisState()}
-      conversation={conversationSnapshot ?? emptyConversationSnapshot()}
+      conversation={conversationSnapshot}
       codexStatus={codexStatus}
       notice={notice}
       busy={actionBusy}
       onCapture={captureScreenshot}
-      onSendImages={sendImages}
-      onCaptureAsk={captureAndAsk}
+      onAsk={ask}
       onCancel={cancelAnalysis}
       onOpacityChange={changeOpacity}
       onOpenSettings={navigation.openSettings}

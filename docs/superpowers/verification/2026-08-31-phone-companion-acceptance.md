@@ -147,7 +147,7 @@ process was left resident.
 - Unauthenticated, stale-cookie, forged Host/Origin, traversal, wrong-media-namespace, malformed-frame, oversized-frame, prompt-limit, attachment-limit, rate-limit, duplicate-ID, and backpressure paths fail closed with bounded safe responses.
 - Pairing secrets are one-use and expire after two minutes. Re-pairing closes the old phone session; disabling and quitting close listeners and sockets. Disable returns only after phone-origin router work is quiescent; quit globally quiesces shared router work.
 - Phone errors and default diagnostics contain stable public fields only; no local path, pairing secret, cookie, prompt, or provider detail is returned to the phone or renderer.
-- Desktop and phone consume one canonical revisioned projection. Capture, send, remove, clear, cancel, reconnect, and streaming are reflected by the same queue/conversation state.
+- Desktop and phone consume one canonical revisioned projection. Capture, Ask, remove, clear, cancel, reconnect, and streaming are reflected by the same queue/conversation state.
 - Restart creates a fresh session. Old cookies and old context/attachment capabilities/IDs do not authorize or resolve in the new runtime.
 
 ## Final physical-phone matrix
@@ -161,7 +161,7 @@ the user. The implementation agent must not leave the application running.
 | 2 | Enable **Start phone companion on LAN** | LAN warning, private URL, and one-time QR appear; disabled state shows no QR. |
 | 3 | Scan QR on a phone on the same trusted LAN | Pairing succeeds, URL is redirected to `/`, and the phone shows the canonical queue/chat. |
 | 4 | Capture on the computer | The screenshot appears in the desktop and phone draft queues; no chat turn is created. |
-| 5 | Send images / Capture & ask from either side | The same screenshot attachment, prompt, message order, and streaming answer appear on both sides. |
+| 5 | Ask from either side with text, screenshots, or both | The same prompt, screenshot attachment, message order, and streaming answer appear on both sides; a successful Ask clears the shared queue. |
 | 6 | Capture, Remove, Clear queue, Clear conversation, and Cancel from the phone | Each command affects the computer through the shared router; queue-retention and cancellation semantics match desktop. |
 | 7 | Disconnect/reconnect while an answer streams | The phone reconnects with a fresh canonical snapshot; desktop analysis continues. |
 | 8 | Pair a replacement phone | The old phone is revoked immediately; the replacement sees the current canonical session. |

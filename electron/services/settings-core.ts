@@ -16,16 +16,14 @@ import { DEFAULT_PHONE_GATEWAY_SETTINGS } from "../../src/shared/phone-gateway";
 const SHORTCUT_ACTIONS: readonly ShortcutAction[] = [
   "toggleVisibility",
   "captureScreenshot",
-  "analyzeQueue",
-  "captureAndAnalyze",
+  "ask",
   "cancelAndClear",
 ];
 
 const DEFAULT_SHORTCUTS: ShortcutSettings = {
   toggleVisibility: "CommandOrControl+B",
   captureScreenshot: "CommandOrControl+Shift+8",
-  analyzeQueue: "CommandOrControl+Enter",
-  captureAndAnalyze: "CommandOrControl+Shift+Enter",
+  ask: "CommandOrControl+Enter",
   cancelAndClear: "CommandOrControl+R",
 };
 

@@ -54,38 +54,20 @@ test("getQueueIds returns every managed queue ID in metadata order", () => {
   assert.deepEqual(workspaceState.getQueueIds(null), []);
 });
 
-test("getAnalysisScreenshotIds analyzes the refreshed queue plus the captured item", () => {
-  const state = {
-    items: [
-      { id: FIRST_ID, createdAt: "2026-08-30T00:00:00.000Z", width: 1280, height: 720 },
-      { id: "22222222-2222-4222-8222-222222222222", createdAt: "2026-08-30T00:01:00.000Z", width: 1440, height: 900 },
-    ],
-    capturing: false,
-    permission: "granted",
-  };
-  assert.deepEqual(workspaceState.getAnalysisScreenshotIds(state, FIRST_ID), [
-    FIRST_ID,
-    "22222222-2222-4222-8222-222222222222",
-  ]);
-  assert.deepEqual(workspaceState.getAnalysisScreenshotIds(state, "33333333-3333-4333-8333-333333333333"), [
-    FIRST_ID,
-    "22222222-2222-4222-8222-222222222222",
-    "33333333-3333-4333-8333-333333333333",
-  ]);
-});
-
-test("getAnalysisActionState disables asks while running and enables cancel", () => {
-  assert.deepEqual(workspaceState.getAnalysisActionState("running", 2), {
-    isRunning: true,
-    canCaptureAsk: false,
-    canAskQueue: false,
-    canCancel: true,
-    captureLabel: "Capture & ask",
-    queueLabel: "Send images",
-    cancelLabel: "Cancel",
+test("Ask availability requires a non-empty prompt or queue and excludes busy or hydrating state", () => {
+  const available = (input) => workspaceState.getAskAvailability({
+    prompt: "",
+    queueCount: 0,
+    isBusy: false,
+    isHydrating: false,
+    ...input,
   });
-  assert.equal(workspaceState.getAnalysisActionState("idle", 0).canAskQueue, false);
-  assert.equal(workspaceState.getAnalysisActionState("completed", 1).canAskQueue, true);
+
+  assert.equal(available({ prompt: "  What is shown?  " }), true);
+  assert.equal(available({ queueCount: 1 }), true);
+  assert.equal(available({ isBusy: true, prompt: "Question" }), false);
+  assert.equal(available({ isHydrating: true, queueCount: 1 }), false);
+  assert.equal(available({}), false);
 });
 
 test("canonical workspace busy state covers capture, pending, streaming, local pending, and restored idle", () => {
@@ -129,32 +111,32 @@ test("canonical workspace busy state covers capture, pending, streaming, local p
   }), { isCapturing: false, isRunning: false, isBusy: false });
 });
 
-test("workspace action state exposes separate capture/send actions and suppresses duplicates", () => {
+test("workspace action state exposes only Capture and Ask and suppresses duplicates", () => {
   assert.deepEqual(workspaceState.getWorkspaceActionState("idle", 2, false, false), {
     isRunning: false,
     isBusy: false,
     canCapture: true,
-    canSendImages: true,
-    canCaptureAndSend: true,
+    canAsk: true,
     canCancel: false,
     captureLabel: "Capture",
-    sendImagesLabel: "Send images",
-    captureAndSendLabel: "Capture & ask",
+    askLabel: "Ask",
     cancelLabel: "Cancel",
   });
 
   const running = workspaceState.getWorkspaceActionState("running", 2, false, false);
   assert.equal(running.isBusy, true);
   assert.equal(running.canCapture, false);
-  assert.equal(running.canSendImages, false);
-  assert.equal(running.canCaptureAndSend, false);
+  assert.equal(running.canAsk, false);
   assert.equal(running.canCancel, true);
 
   const duplicate = workspaceState.getWorkspaceActionState("idle", 2, true, false);
   assert.equal(duplicate.isBusy, true);
   assert.equal(duplicate.canCapture, false);
-  assert.equal(duplicate.canSendImages, false);
+  assert.equal(duplicate.canAsk, false);
   assert.equal(duplicate.canCancel, false);
+
+  assert.equal(workspaceState.getWorkspaceActionState("idle", 0, false, false, null, "", true).canAsk, false);
+  assert.equal(workspaceState.getWorkspaceActionState("idle", 0, false, false, null, "Question", false).canAsk, true);
 });
 
 test("analysis state subscription ignores stale events and unsubscribes once", () => {

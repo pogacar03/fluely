@@ -87,7 +87,7 @@ async function makeSession(provider) {
   return { screenshots, attachments, conversation, analysis, router };
 }
 
-test("real services capture, materialize, stream, complete, retain the queue, and serve the sent attachment", async () => {
+test("real services capture, materialize, stream, complete, clear the queue, and serve the sent attachment", async () => {
   const session = await makeSession({
     stream: async function* () {
       yield "streamed";
@@ -98,8 +98,8 @@ test("real services capture, materialize, stream, complete, retain the queue, an
   session.conversation.subscribe((event) => events.push(event));
 
   await session.router.execute({ type: "capture", requestId: "capture-integration" }, "desktop");
-  const started = await session.router.execute({ type: "send", requestId: "send-integration", prompt: "Question" }, "desktop");
-  assert.equal(started.conversation.activeMessageId !== undefined, true);
+  const started = await session.router.execute({ type: "ask", requestId: "ask-integration", prompt: "Question" }, "desktop");
+  assert.deepEqual(started.queue.items, []);
   await session.analysis.whenIdle();
 
   const snapshot = session.conversation.snapshot();
@@ -108,7 +108,7 @@ test("real services capture, materialize, stream, complete, retain the queue, an
     ["assistant", "completed", "streamed answer"],
   ]);
   assert.deepEqual(snapshot.messages[0].attachmentIds, [ATTACHMENT_ID]);
-  assert.deepEqual(session.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
+  assert.deepEqual(session.screenshots.getState().items.map((item) => item.id), []);
   assert.deepEqual(events.map((event) => event.type), [
     "attachment-added",
     "message-added",
@@ -139,7 +139,7 @@ test("real conversation projection replaces a stale desktop state after a revisi
   const projection = createConversationProjection(session.conversation.snapshot(), async () => session.conversation.snapshot());
 
   await session.router.execute({ type: "capture", requestId: "projection-capture" }, "desktop");
-  await session.router.execute({ type: "send", requestId: "projection-send", prompt: "Question" }, "desktop");
+  await session.router.execute({ type: "ask", requestId: "projection-ask", prompt: "Question" }, "desktop");
   await session.analysis.whenIdle();
 
   const gap = await projection.apply(emitted.at(-1));

@@ -292,8 +292,7 @@ test("visibility toggle remains hidden while the screenshot session is waiting o
   shortcuts.registerAll({
     toggleVisibility: "CommandOrControl+B",
     captureScreenshot: "CommandOrControl+Shift+8",
-    analyzeQueue: "CommandOrControl+Enter",
-    captureAndAnalyze: "CommandOrControl+Shift+Enter",
+    ask: "CommandOrControl+Enter",
     cancelAndClear: "CommandOrControl+R",
   });
 

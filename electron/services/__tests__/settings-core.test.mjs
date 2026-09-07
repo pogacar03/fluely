@@ -13,8 +13,7 @@ test("normalizeSettings returns Fluely defaults for empty input", () => {
     shortcuts: {
       toggleVisibility: "CommandOrControl+B",
       captureScreenshot: "CommandOrControl+Shift+8",
-      analyzeQueue: "CommandOrControl+Enter",
-      captureAndAnalyze: "CommandOrControl+Shift+Enter",
+      ask: "CommandOrControl+Enter",
       cancelAndClear: "CommandOrControl+R",
     },
     window: { width: 960, height: 720, opacity: 0.92 },
@@ -139,12 +138,12 @@ test("normalizeSettings returns defaults for non-object input", () => {
 
 test("validateSettingsPatch rejects malformed nested values", () => {
   const error = validateSettingsPatch({
-    shortcuts: { analyzeQueue: 42 },
+    shortcuts: { ask: 42 },
   });
 
   assert.deepEqual(error, {
     code: "INVALID_ARGUMENT",
-    message: "Shortcut analyzeQueue must be a non-empty string.",
+    message: "Shortcut ask must be a non-empty string.",
     action: "Enter a valid keyboard accelerator and try again.",
   });
 });

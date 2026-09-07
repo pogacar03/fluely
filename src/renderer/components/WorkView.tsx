@@ -28,8 +28,7 @@ export interface WorkViewProps {
   notice?: SetupNotice | null;
   busy?: boolean;
   onCapture: () => Promise<void> | void;
-  onSendImages: (request: WorkAnalysisRequest) => Promise<void> | void;
-  onCaptureAsk: (request: WorkAnalysisRequest) => Promise<void> | void;
+  onAsk: (request: WorkAnalysisRequest) => Promise<boolean> | boolean;
   onCancel: () => Promise<void> | void;
   onOpacityChange: (opacity: number) => Promise<void> | void;
   onOpenSettings: () => Promise<void> | void;
@@ -57,8 +56,7 @@ export function WorkView({
   notice,
   busy = false,
   onCapture,
-  onSendImages,
-  onCaptureAsk,
+  onAsk,
   onCancel,
   onOpacityChange,
   onOpenSettings,
@@ -75,6 +73,8 @@ export function WorkView({
     busy,
     screenshotState?.capturing ?? false,
     conversation,
+    prompt,
+    conversation === null,
   );
   const disabled = actionState.isBusy;
   const actionLabel = (label: string) => actionState.isBusy ? (
@@ -159,7 +159,11 @@ export function WorkView({
           />
 
           <div className="composer-actions" aria-busy={actionState.isBusy}>
-            <span className="composer-tip">Capture adds context only · Send images uses every queued screenshot</span>
+            <span className="composer-tip">
+              {actionState.canAsk
+                ? "Capture adds context · Ask uses your question and shared screenshots"
+                : "Enter a question or capture a screen before asking."}
+            </span>
             <div className="action-button-group">
               {actionState.canCancel && (
                 <button type="button" className="secondary-button cancel-button" onClick={() => void onCancel()} disabled={busy} aria-label="Cancel analysis">
@@ -170,30 +174,28 @@ export function WorkView({
               <button
                 type="button"
                 className="secondary-button"
-                onClick={() => void onSendImages({ prompt })}
-                disabled={!actionState.canSendImages}
-                aria-label="Send all queued screenshots"
-              >
-                {actionLabel(actionState.sendImagesLabel)}
-              </button>
-              <button
-                type="button"
-                className="secondary-button"
                 onClick={() => void onCapture()}
                 disabled={!actionState.canCapture}
-                aria-label="Capture screenshot without sending"
+                aria-label="Capture"
               >
                 {actionLabel(actionState.captureLabel)}
               </button>
               <button
                 type="button"
                 className="primary-button capture-button"
-                onClick={() => void onCaptureAsk({ prompt })}
-                disabled={!actionState.canCaptureAndSend}
-                aria-label="Capture screenshot and ask"
+                onClick={() => void (async () => {
+                  try {
+                    if (await onAsk({ prompt })) {
+                      setPrompt("");
+                    }
+                  } catch {
+                    // The owning handler reports the safe failure; failed asks retain the draft.
+                  }
+                })()}
+                disabled={!actionState.canAsk}
+                aria-label="Ask Fluely"
               >
-                <span className="capture-glyph" aria-hidden="true">＋</span>
-                {actionLabel(actionState.captureAndSendLabel)}
+                {actionLabel(actionState.askLabel)}
               </button>
             </div>
           </div>

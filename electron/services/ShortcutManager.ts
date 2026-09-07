@@ -23,16 +23,14 @@ export interface WindowAdapter {
 
 export interface ShortcutActionHandlers {
   captureScreenshot?: () => void | Promise<void>;
-  analyzeQueue?: () => void | Promise<void>;
-  captureAndAnalyze?: () => void | Promise<void>;
+  ask?: () => void | Promise<void>;
   cancelAndClear?: () => void | Promise<void>;
 }
 
 const SHORTCUT_ACTIONS: readonly ShortcutAction[] = [
   "toggleVisibility",
   "captureScreenshot",
-  "analyzeQueue",
-  "captureAndAnalyze",
+  "ask",
   "cancelAndClear",
 ];
 

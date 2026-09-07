@@ -728,10 +728,10 @@ test("desktop and phone commands share canonical order, idempotency, cancellatio
     prompt.value = "   ";
     prompt.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
     sentIndex = phoneSockets[0].sent.length;
-    getButton(phoneRoot, "Send images").click();
-    const sendFrame = await waitForCommandFrame(phoneSockets[0], sentIndex);
-    assert.equal(sendFrame.command.type, "send");
-    assert.equal(sendFrame.command.prompt, "   ");
+    getButton(phoneRoot, "Ask").click();
+    const askFrame = await waitForCommandFrame(phoneSockets[0], sentIndex);
+    assert.equal(askFrame.command.type, "ask");
+    assert.equal(askFrame.command.prompt, "   ");
     await waitFor(() => phoneClient.getState().snapshot?.conversation.messages.some((message) =>
       message.role === "user" && message.text === "Analyze the attached screenshots."));
     await waitFor(() => phoneClient.getState().snapshot?.conversation.messages.some((message) =>
@@ -741,26 +741,24 @@ test("desktop and phone commands share canonical order, idempotency, cancellatio
     assert.ok(activeMessageId);
     const userMessage = phoneClient.getState().snapshot.conversation.messages.find((message) => message.role === "user");
     assert.deepEqual(userMessage.attachmentIds, [ATTACHMENT_ID, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]);
-    assert.deepEqual(phoneClient.getState().snapshot.queue.map((item) => item.id), [
-      SCREENSHOT_ID,
-      "22222222-2222-4222-8222-222222222222",
-    ]);
+    await waitFor(() => phoneClient.getState().snapshot?.queue.length === 0);
+    assert.deepEqual(phoneClient.getState().snapshot.queue.map((item) => item.id), []);
 
     await waitFor(() => phoneSockets[0].received.some((frame) =>
-      frame.type === "ack" && frame.requestId === sendFrame.command.requestId));
+      frame.type === "ack" && frame.requestId === askFrame.command.requestId));
     const ackCountBeforeDuplicate = phoneSockets[0].received
-      .filter((frame) => frame.type === "ack" && frame.requestId === sendFrame.command.requestId).length;
+      .filter((frame) => frame.type === "ack" && frame.requestId === askFrame.command.requestId).length;
     const routerCallCountBeforeDuplicate = phoneRouterCalls.length;
-    const duplicate = JSON.stringify({ type: "command", command: sendFrame.command });
+    const duplicate = JSON.stringify({ type: "command", command: askFrame.command });
     phoneSockets[0].send(duplicate);
     await waitFor(() => phoneSockets[0].received
-      .filter((frame) => frame.type === "ack" && frame.requestId === sendFrame.command.requestId).length >= ackCountBeforeDuplicate + 1);
+      .filter((frame) => frame.type === "ack" && frame.requestId === askFrame.command.requestId).length >= ackCountBeforeDuplicate + 1);
     const duplicateAcks = phoneSockets[0].received
-      .filter((frame) => frame.type === "ack" && frame.requestId === sendFrame.command.requestId);
+      .filter((frame) => frame.type === "ack" && frame.requestId === askFrame.command.requestId);
     assert.equal(duplicateAcks.length, ackCountBeforeDuplicate + 1);
     assert.deepEqual(duplicateAcks.at(-1), duplicateAcks.at(-2));
     assert.equal(phoneRouterCalls.length, routerCallCountBeforeDuplicate);
-    assert.equal(phoneRouterCalls.filter(({ command }) => command.requestId === sendFrame.command.requestId).length, 1);
+    assert.equal(phoneRouterCalls.filter(({ command }) => command.requestId === askFrame.command.requestId).length, 1);
     assert.equal(phoneClient.getState().snapshot.revision >= streamingRevision, true);
 
     const errorSocket = phoneSockets.at(-1);
@@ -801,17 +799,11 @@ test("desktop and phone commands share canonical order, idempotency, cancellatio
     getButton(phoneRoot, "Cancel").click();
     await waitFor(() => phoneClient.getState().snapshot?.conversation.messages.some((message) =>
       message.role === "assistant" && message.status === "cancelled"));
-    assert.deepEqual(phoneClient.getState().snapshot.queue.map((item) => item.id), [
-      SCREENSHOT_ID,
-      "22222222-2222-4222-8222-222222222222",
-    ]);
+    assert.deepEqual(phoneClient.getState().snapshot.queue.map((item) => item.id), []);
 
     getButton(phoneRoot, "Clear conversation").click();
     await waitFor(() => phoneClient.getState().snapshot?.conversation.messages.length === 0);
-    assert.deepEqual(phoneClient.getState().snapshot.queue.map((item) => item.id), [
-      SCREENSHOT_ID,
-      "22222222-2222-4222-8222-222222222222",
-    ]);
+    assert.deepEqual(phoneClient.getState().snapshot.queue.map((item) => item.id), []);
     await assertDesktopPhoneConverged();
 
     const refreshed = await gateway.regeneratePairing();

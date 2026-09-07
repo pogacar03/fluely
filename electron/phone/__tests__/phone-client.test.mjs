@@ -626,7 +626,7 @@ test("phone and desktop share canonical busy inputs and the same localPending co
   assert.equal(phoneLocalPending.isBusy, sharedLocalPending.isBusy);
 });
 
-test("phone DOM controls send every workspace command, mirror canonical busy state, and keep ack state out of the conversation", () => {
+test("phone DOM exposes Capture and Ask, mirrors busy state, and clears Ask input only after ack", () => {
   const dom = new JSDOM("<div id=\"phone-app\"></div>", { url: "http://phone.test/" });
   const previousDocument = globalThis.document;
   globalThis.document = dom.window.document;
@@ -653,10 +653,12 @@ test("phone DOM controls send every workspace command, mirror canonical busy sta
       });
     };
 
-    for (const label of ["Capture", "Send images", "Capture & ask", "Remove", "Clear queue", "Clear conversation", "Cancel"]) {
+    for (const label of ["Capture", "Ask", "Remove", "Clear queue", "Clear conversation", "Cancel"]) {
       assert.ok(getButton(label), label);
     }
-    assert.equal(getButton("Send images").disabled, false);
+    assert.equal(getButton("Ask").disabled, false);
+    assert.equal(getButton("Send images"), undefined);
+    assert.equal(getButton("Capture & ask"), undefined);
     assert.equal(getButton("Capture").disabled, false);
     assert.equal(getButton("Cancel").disabled, true);
     assert.equal(root.querySelector("fieldset").getAttribute("aria-busy"), "false");
@@ -677,14 +679,12 @@ test("phone DOM controls send every workspace command, mirror canonical busy sta
     const prompt = root.querySelector("textarea");
     prompt.value = "Question from phone";
     prompt.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
-    getButton("Send images").click();
-    assert.deepEqual(getCommand().command.type, "send");
+    getButton("Ask").click();
+    assert.deepEqual(getCommand().command.type, "ask");
     assert.equal(getCommand().command.prompt, "Question from phone");
+    assert.equal(prompt.value, "Question from phone");
     acknowledge();
-
-    getButton("Capture & ask").click();
-    assert.deepEqual(getCommand().command.type, "capture-and-send");
-    acknowledge();
+    assert.equal(root.querySelector("textarea").value, "");
 
     getButton("Remove").click();
     assert.deepEqual(getCommand().command.type, "remove");
@@ -702,7 +702,7 @@ test("phone DOM controls send every workspace command, mirror canonical busy sta
     instances[0].emit("message", { data: JSON.stringify({ type: "snapshot", revision: 1, payload: controlSnapshot({ running: true }) }) });
     assert.equal(getButton("Cancel").disabled, false);
     assert.equal(getButton("Capture").disabled, true);
-    assert.equal(getButton("Send images").disabled, true);
+    assert.equal(getButton("Ask").disabled, true);
     assert.equal(getButton("Clear conversation").disabled, true);
     assert.equal(root.querySelector("fieldset").getAttribute("aria-busy"), "true");
     getButton("Cancel").click();
@@ -714,7 +714,7 @@ test("phone DOM controls send every workspace command, mirror canonical busy sta
   }
 });
 
-test("phone command errors clear only command loading and never invent messages or queue entries", () => {
+test("phone capture errors show the safe actionable core message and retain queue state", () => {
   const dom = new JSDOM("<div id=\"phone-app\"></div>", { url: "http://phone.test/" });
   const previousDocument = globalThis.document;
   globalThis.document = dom.window.document;
@@ -739,12 +739,53 @@ test("phone command errors clear only command loading and never invent messages 
       type: "error",
       requestId: command.requestId,
       code: "SCREEN_CAPTURE_FAILED",
-      message: "Capture failed.",
+      message: "Fluely could not capture the selected display. Check that a display is available and try again.",
     }) });
     assert.equal(client.getState().commandPending, undefined);
     assert.equal(client.getState().snapshot.queue.length, 1);
     assert.equal(client.getState().snapshot.conversation.messages.length, 0);
-    assert.match(root.textContent, /Capture failed/);
+    assert.match(root.textContent, /Check that a display is available and try again/);
+  } finally {
+    client.stop();
+    globalThis.document = previousDocument;
+    dom.window.close();
+  }
+});
+
+test("phone Ask errors retain the current prompt", () => {
+  const dom = new JSDOM("<div id=\"phone-app\"></div>", { url: "http://phone.test/" });
+  const previousDocument = globalThis.document;
+  globalThis.document = dom.window.document;
+  const timer = makeFakeTimer();
+  const { FakeSocket, instances } = makeFakeSocketClass();
+  const client = startUnitPhoneClient(dom.window.document.getElementById("phone-app"), {
+    WebSocket: FakeSocket,
+    fetch: async () => ({ status: 200, ok: true }),
+    setTimeout: timer.setTimeout,
+    clearTimeout: timer.clearTimeout,
+    location: { protocol: "http:", host: "phone.test" },
+  });
+
+  try {
+    instances[0].open();
+    instances[0].emit("message", { data: JSON.stringify({ type: "snapshot", revision: 0, payload: controlSnapshot() }) });
+    const root = dom.window.document.getElementById("phone-app");
+    const ask = [...root.querySelectorAll("button")].find((button) => button.textContent.includes("Ask"));
+    const prompt = root.querySelector("textarea");
+    prompt.value = "Keep this question";
+    prompt.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    ask.click();
+    const command = JSON.parse(instances[0].sent.at(-1)).command;
+    assert.equal(command.type, "ask");
+    instances[0].emit("message", { data: JSON.stringify({
+      type: "error",
+      requestId: command.requestId,
+      code: "ANALYSIS_FAILED",
+      message: "Analysis failed.",
+    }) });
+    assert.equal(root.querySelector("textarea").value, "Keep this question");
+    assert.match(root.textContent, /Analysis failed/);
+    assert.equal(client.getState().commandPending, undefined);
   } finally {
     client.stop();
     globalThis.document = previousDocument;

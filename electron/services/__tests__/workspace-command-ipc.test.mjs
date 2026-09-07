@@ -67,7 +67,7 @@ function makeHarness({ captureFailure = null, withWorkspace = true } = {}) {
   };
   const analysis = {
     start: async (request) => {
-      calls.push("send");
+      calls.push("ask");
       analysisCalls.push(request);
       return {
         ...analysisState,
@@ -187,7 +187,7 @@ test("Ask sends all queued IDs, normalizes an empty prompt, and clears the draft
   const result = await execute({}, command);
 
   assert.equal(result.ok, true);
-  assert.deepEqual(harness.calls, ["send", "clear-queue"]);
+  assert.deepEqual(harness.calls, ["ask", "clear-queue"]);
   assert.deepEqual(harness.analysisCalls, [{
     prompt: "Analyze the attached screenshots.",
     screenshotIds: [FIRST_ID, SECOND_ID],
@@ -219,9 +219,9 @@ test("duplicate workspace request IDs share one result and do not repeat a send"
   const duplicate = await execute({}, { ...command });
 
   assert.deepEqual(duplicate, first);
-  assert.deepEqual(harness.calls, ["send", "clear-queue"]);
+  assert.deepEqual(harness.calls, ["ask", "clear-queue"]);
   assert.equal((await execute({}, { ...command, prompt: "Different request" })).ok, false);
-  assert.deepEqual(harness.calls, ["send", "clear-queue"]);
+  assert.deepEqual(harness.calls, ["ask", "clear-queue"]);
 });
 
 test("a renderer reload uses a new session nonce and cannot receive a stale capture result", async () => {

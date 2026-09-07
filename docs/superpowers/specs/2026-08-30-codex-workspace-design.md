@@ -44,8 +44,8 @@ The work view contains:
 - an answer surface that renders streamed Markdown-like plain text safely as
   text, with an explicit empty/loading/error state;
 - a screenshot queue strip showing count, dimensions, and remove/clear actions;
-- a question composer with a multiline prompt and actions for **Capture & ask**,
-  **Ask queue**, and **Cancel**;
+  - a question composer with a multiline prompt and actions for **Capture**,
+  **Ask**, and **Cancel**;
 - intent chips: **Answer**, **Explain**, **Follow-up**, and **Recap**;
 - a route back to setup/settings without destroying the active conversation.
 
@@ -71,12 +71,12 @@ protocol unsupported by the installed CLI.
 
 Capture routes:
 
-- **Capture & ask** hides Fluely through the existing screenshot session,
-  captures the display, appends it to the managed queue, and starts analysis.
-- **Ask queue** analyzes the selected queued screenshots without changing
-  Fluely's visibility state.
-- `CommandOrControl+Shift+Enter` invokes Capture & ask.
-- `CommandOrControl+Enter` invokes Ask queue.
+- **Capture** hides Fluely through the existing screenshot session, captures the
+  display, and appends it to the managed queue without starting analysis.
+- **Ask** analyzes the current prompt and queued screenshots without changing
+  Fluely's visibility state; a successful request clears the shared queue.
+- `CommandOrControl+Shift+8` invokes Capture.
+- `CommandOrControl+Enter` invokes Ask.
 - `CommandOrControl+R` cancels the active request and clears the screenshot
   queue.
 

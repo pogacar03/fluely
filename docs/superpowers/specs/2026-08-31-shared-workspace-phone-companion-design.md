@@ -8,7 +8,7 @@
 
 1. Fluely runs as one application instance with one `BrowserWindow`.
 2. Settings and Work are mutually exclusive views in that window, with navigation in both directions.
-3. Screenshot capture and sending screenshots to the model are separate visible actions; `Capture & ask` remains as a convenience action.
+3. The desktop and phone expose only two primary actions: `Capture` adds context and `Ask` sends the current prompt and/or shared screenshot queue.
 4. Desktop and phone render the same ordered session conversation: prompts, screenshot attachments, streaming answers, completed answers, errors, and cancellations.
 5. A phone on the same LAN pairs by QR code, can see computer screenshots, submit questions, receive streaming answers, and trigger a computer screenshot.
 6. Screenshot paths and provider/process details remain confined to the Electron main process.
@@ -28,11 +28,10 @@
 ## 3. Accepted Product Decisions
 
 - Closing or restarting Fluely clears the full conversation and all attachment files.
-- The first implementation sends all current queue screenshots when the user selects **Send images**. Per-image selection is deferred.
-- An empty prompt is valid for **Send images**. The domain command supplies the deterministic prompt `Analyze the attached screenshots.` and records that prompt in the shared conversation.
+- The first implementation sends all current queue screenshots when the user selects **Ask**. Per-image selection is deferred.
+- An empty prompt is valid for **Ask** when the shared queue is non-empty. The domain command supplies the deterministic prompt `Analyze the attached screenshots.` and records that prompt in the shared conversation.
 - **Capture** adds a computer screenshot to the queue and does not start analysis.
-- **Send images** starts analysis using the current queue and does not capture, hide, clear, or mutate the queue.
-- **Capture & ask** executes capture → queue refresh → immutable attachment creation → analysis.
+- **Ask** starts analysis using the current prompt and queue, and clears the shared queue only after the core accepts the request.
 - Phone and desktop are projections of one main-process conversation; neither renderer owns canonical history.
 - A phone-triggered screenshot is captured on the computer and appears as the same visible draft-context item on both clients; after Send it appears as the same conversation attachment on both clients.
 
@@ -88,16 +87,15 @@ The renderer owns a session-only `WorkspaceView = "settings" | "work"`:
 - Revisiting Settings does not set `setupComplete` false and does not erase the current conversation or answer state.
 - A failed settings save/validation leaves the user in Settings and displays the specific error.
 
-## 6. Desktop Screenshot and Send UX
+## 6. Desktop Screenshot and Ask UX
 
-The Work action row contains four explicit operations:
+The Work action row contains three explicit operations:
 
 1. **Capture** — capture only; append to the working queue; no model call.
-2. **Send images** — send the current queue plus current prompt; no capture and no visibility change.
-3. **Capture & ask** — capture, append, materialize attachments, then start analysis.
-4. **Cancel** — cancel the active analysis. Queue clearing remains a separate explicit action.
+2. **Ask** — send the current prompt and/or queue; no capture and no visibility change. It is enabled only when the app is not busy or hydrating and either the trimmed prompt or queue is non-empty.
+3. **Cancel** — cancel the active analysis. Queue clearing remains a separate explicit action.
 
-`Ask queue` is renamed to **Send images**. The queue remains capped at five screenshots and initially treats all items as selected.
+The queue remains capped at five screenshots. A successful Ask clears the shared queue and the projection updates both clients.
 
 The Work view displays screenshot thumbnails for queued items and for conversation attachments. The phone displays the same current queue as a separate **Context to send** strip. Capture updates that shared draft queue on both clients but does not create a chat message. Sending materializes immutable attachments and creates the same chat message on both clients. Thumbnail rendering uses opaque IDs through a main-process-controlled scheme/API; no DOM attribute, IPC payload, log, or error includes a local path.
 
@@ -278,7 +276,7 @@ Phone commands are typed and carry a `requestId`:
 
 ```typescript
 type PhoneCommand =
-  | { type: "send"; requestId: string; prompt: string }
+  | { type: "ask"; requestId: string; prompt: string }
   | { type: "capture"; requestId: string }
   | { type: "clear"; requestId: string }
   | { type: "cancel"; requestId: string }
@@ -286,7 +284,7 @@ type PhoneCommand =
 ```
 
 - Duplicate `requestId` values are idempotently acknowledged and do not repeat the action.
-- Phone `send` uses the current main-process working queue, materializes immutable attachments, and enters the same `CommandRouter` path as desktop **Send images**.
+- Phone `ask` uses the current main-process working queue, materializes immutable attachments, and enters the same `CommandRouter` path as desktop **Ask**.
 - Phone `capture` runs the existing privacy-safe screenshot workflow and adds the screenshot to the shared working queue. Both clients display the updated draft context; no conversation message is created until a send command materializes the queue.
 - Phone never supplies a screenshot path, URL, model name, sandbox option, or provider credential.
 
@@ -310,8 +308,8 @@ type PhoneCommand =
 - Settings and Work roots are mutually exclusive.
 - First setup validates/saves; later navigation does not change `setupComplete` or erase conversation state.
 - Capture-only never calls analysis.
-- Send-images never captures or changes visibility and sends all queue IDs.
-- Capture & ask preserves capture → attachment → analysis order.
+- Ask never captures or changes visibility and sends the current prompt plus all queue IDs.
+- Ask clears the queue only after the core accepts the request.
 - Renderer contracts contain IDs/metadata only.
 
 ### 13.2 Conversation and attachments
@@ -360,7 +358,7 @@ This design is implemented as two plans with separate final reviews:
 1. Controlled Codex diagnosis and evidence-driven timeout fix.
 2. Single-instance application guard.
 3. Separation of onboarding state from Settings/Work navigation.
-4. Explicit Capture and Send images actions.
+4. Explicit Capture and Ask actions.
 5. Canonical `ConversationStore` and immutable `AttachmentStore`.
 6. Desktop conversation/attachment projection and full user gate.
 

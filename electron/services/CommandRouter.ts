@@ -234,13 +234,6 @@ export class CommandRouter {
         return this.result();
       case "ask":
         return this.ask(command.prompt, source, scope);
-      case "send":
-      case "capture-and-send":
-        throw createError(
-          "INVALID_ARGUMENT",
-          "That workspace command is no longer supported.",
-          "Use Capture or Ask and try again.",
-        );
     }
   }
 
