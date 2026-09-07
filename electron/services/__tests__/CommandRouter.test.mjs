@@ -95,6 +95,14 @@ afterEach(async () => {
   }
 });
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
+}
+
 test("ask materializes immutable attachments, clears the queue, and completes one canonical turn", async () => {
   const calls = [];
   const harness = await makeHarness({
@@ -276,6 +284,36 @@ test("phone ask uses the shared prompt normalization and canonical attachment or
   ]);
   assert.deepEqual(harness.screenshots.getState().items, []);
   assert.deepEqual(harness.conversation.snapshot().messages.map((message) => message.role), ["user", "assistant"]);
+});
+
+test("a phone ask does not clear the shared draft queue after session invalidation", async () => {
+  const providerStarted = deferred();
+  const releaseProvider = deferred();
+  const harness = await makeHarness({
+    provider: {
+      stream: (_path, options) => (async function* () {
+        providerStarted.resolve();
+        await releaseProvider.promise;
+        if (!options.signal.aborted) {
+          yield "late answer";
+        }
+      })(),
+    },
+  });
+
+  const ask = harness.router.execute({
+    type: "ask",
+    requestId: "phone-stale-ask",
+    prompt: "Question",
+  }, "phone");
+  await providerStarted.promise;
+
+  const quiesce = harness.router.quiesce("phone");
+  releaseProvider.resolve();
+  await quiesce;
+
+  await assert.rejects(ask, (error) => error?.code === "COMMAND_CANCELLED");
+  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
 });
 
 test("phone clear-conversation and cancel preserve the already-consumed draft queue", async () => {

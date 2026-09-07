@@ -2178,6 +2178,54 @@ test("phone command failures use a fixed safe error and keep the authenticated c
   assert.equal(socket.readyState, WebSocket.OPEN);
 });
 
+test("phone wire responses preserve every supported screen permission and capture error code", async () => {
+  const expectedErrors = new Map([
+    ["SCREEN_CAPTURE_DENIED", "Screen capture permission was denied. Allow screen capture for Fluely and try again."],
+    ["SCREEN_CAPTURE_RESTRICTED", "Screen capture is restricted. Check device privacy settings or ask your administrator, then try again."],
+    ["SCREEN_CAPTURE_PERMISSION_REQUIRED", "Fluely needs screen capture permission. Allow screen capture for Fluely and try again."],
+    ["SCREEN_CAPTURE_FAILED", "Fluely could not capture the selected display. Check that a display is available and try again."],
+    ["CAPTURE_IN_PROGRESS", "A screen capture is already in progress. Wait for it to finish and try again."],
+  ]);
+  const projection = makeProjection({
+    revision: 0,
+    conversation: { sessionId: "session-phone-screen-errors", revision: 0, messages: [], attachments: [] },
+    queue: [],
+  });
+  const router = {
+    execute: async (command) => {
+      const code = command.requestId.slice("screen-error-".length);
+      throw Object.assign(new Error("raw screen capture details /Users/private/display.json"), { code });
+    },
+  };
+  const { gateway } = makeGateway({ projection, commandRouter: router });
+  const socket = makeGatewaySocket();
+  gateway.acceptWebSocket(socket);
+  socket.sent = [];
+
+  for (const [code, message] of expectedErrors) {
+    const requestId = `screen-error-${code}`;
+    const startIndex = socket.sent.length;
+    socket.emit("message", Buffer.from(JSON.stringify({
+      type: "command",
+      command: { type: "capture", requestId },
+    })));
+    const frame = await waitForSentFrame(
+      socket,
+      (candidate) => candidate.type === "error" && candidate.requestId === requestId,
+      2_000,
+      startIndex,
+    );
+
+    assert.deepEqual(frame, {
+      type: "error",
+      requestId,
+      code,
+      message,
+    });
+    assert.equal(socket.readyState, WebSocket.OPEN);
+  }
+});
+
 test("raw HTTP request targets are matched before URL normalization and reject traversal, encoded separators, and query confusion", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "fluely-phone-route-test-"));
   temporaryDirectories.push(root);

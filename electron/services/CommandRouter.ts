@@ -291,6 +291,7 @@ export class CommandRouter {
         fast: false,
         ...(conversationContext ? { conversationContext } : {}),
       });
+      this.assertCurrent(scope);
       return this.result(await this.screenshots.clear());
     } catch (error) {
       await this.deleteMaterialized(materialized);
