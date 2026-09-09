@@ -229,6 +229,32 @@ test("AnalysisService reports provider failures without changing the screenshot 
   assert.deepEqual(events.map((event) => event.event), ["started", "delta", "error"]);
 });
 
+test("AnalysisService preserves safe provider classifications without leaking details", async () => {
+  const screenshots = makeScreenshots([FIRST_ID, SECOND_ID]);
+  const provider = {
+    stream: async function* () {
+      throw Object.assign(new Error("raw stderr /Users/private token=secret"), {
+        code: "USAGE_LIMIT",
+        action: "raw codex exec --model secret cookie=session",
+      });
+    },
+  };
+  const service = makeService({ provider, screenshots });
+  const before = screenshots.getState();
+
+  await service.start({ prompt: "Question", screenshotIds: undefined, intent: "recap", fast: false });
+  await service.whenIdle();
+
+  const after = screenshots.getState();
+  assert.deepEqual(after, before);
+  assert.deepEqual(service.getState().error, {
+    code: "USAGE_LIMIT",
+    message: "Codex usage limit reached. Restore your usage or switch to an available model, then retry.",
+    action: "Restore your Codex usage or switch to an available model, then retry.",
+  });
+  assert.doesNotMatch(JSON.stringify(service.getState().error), /raw stderr|\/Users\/private|secret|cookie/i);
+});
+
 test("AnalysisService turns a clean empty provider completion into a terminal error", async () => {
   const provider = {
     stream: async function* () {

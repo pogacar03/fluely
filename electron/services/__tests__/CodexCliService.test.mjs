@@ -205,6 +205,80 @@ test("extractText reads completed agent messages and exposes completed item erro
   );
 });
 
+test("stream classifies provider failures into safe actionable errors", async (t) => {
+  const cases = [
+    {
+      name: "usage quota and rate limit",
+      raw: JSON.stringify({ type: "error", message: "HTTP 429 rate limit: usage quota exceeded" }),
+      stderr: "Authorization: Bearer fake-token\ncodex exec --model gpt-secret /Users/yu/private",
+      code: "USAGE_LIMIT",
+      message: /Codex usage limit reached/i,
+      action: /restore.*usage|switch.*available model.*retry/i,
+    },
+    {
+      name: "authentication and login",
+      raw: JSON.stringify({ type: "error", message: "Not logged in; run codex login" }),
+      stderr: "Cookie: session=fake-cookie",
+      code: "AUTHENTICATION_REQUIRED",
+      message: /check.*Codex login/i,
+      action: /check.*Codex login/i,
+    },
+    {
+      name: "unavailable or invalid model",
+      raw: JSON.stringify({ type: "error", message: "model gpt-secret is invalid or unavailable" }),
+      stderr: "codex --model gpt-secret token=fake-token",
+      code: "MODEL_UNAVAILABLE",
+      message: /choose an available model/i,
+      action: /choose an available model/i,
+    },
+    {
+      name: "timeout",
+      timeout: true,
+      code: "CLI_START_TIMEOUT",
+      message: /timed out/i,
+      action: /retry/i,
+    },
+  ];
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      let error;
+      if (fixture.timeout) {
+        const timers = makeFakeTimers();
+        const child = makeClosingFakeProcess();
+        const service = makeDeadlineService(timers, child, { startupMs: 5, idleMs: 5, hardMs: 20 });
+        const run = runFakeStream(service, { timeoutMs: 1000 });
+        await flush();
+        timers.advance(5);
+        await flush();
+        await run.promise;
+        error = run.result.error;
+      } else {
+        const child = makeFakeProcess();
+        const service = new CodexCliService({
+          spawn: () => {
+            queueMicrotask(() => {
+              child.stdout.write(`${fixture.raw}\n`);
+              child.stderr.write(fixture.stderr);
+              child.emit("close", 1, null);
+            });
+            return child;
+          },
+        });
+        const run = runFakeStream(service);
+        await run.promise;
+        error = run.result.error;
+      }
+
+      assert.equal(error?.code, fixture.code);
+      assert.match(error?.message ?? "", fixture.message);
+      assert.match(error?.action ?? "", fixture.action);
+      const serialized = JSON.stringify({ code: error?.code, message: error?.message, action: error?.action });
+      assert.doesNotMatch(serialized, /fake-token|fake-cookie|codex exec|gpt-secret|\/Users\/yu\/private/i);
+    });
+  }
+});
+
 test("validateExecutable returns a resolved executable without throwing", async () => {
   const executable = await makeExecutable("exit 0");
   const child = makeFakeProcess();

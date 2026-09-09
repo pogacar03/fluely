@@ -137,6 +137,31 @@ test("phone projection redacts unsafe fields while preserving normal user and as
   });
 });
 
+test("phone projection preserves safe classified analysis errors without provider details", () => {
+  const snapshot = canonicalSnapshot();
+  snapshot.conversation.messages.push({
+    id: "message-usage",
+    sequence: 2,
+    role: "assistant",
+    text: "",
+    attachmentIds: [],
+    status: "error",
+    createdAt: 101,
+    error: {
+      code: "USAGE_LIMIT",
+      message: "raw stderr /Users/private token=secret",
+    },
+  });
+
+  const phone = phoneProjectionModule.toPhoneProjectionSnapshot(snapshot, MEDIA_CAPABILITY);
+  const error = phone.conversation.messages.at(-1).error;
+  assert.deepEqual(error, {
+    code: "USAGE_LIMIT",
+    message: "Codex usage limit reached. Restore your usage or switch to an available model, then retry.",
+  });
+  assert.doesNotMatch(JSON.stringify(error), /raw stderr|\/Users\/private|secret/i);
+});
+
 test("phone projection subscription preserves projection revisions and returns immutable channel-specific queue events", () => {
   assert.equal(typeof phoneProjectionModule.createPhoneProjection, "function");
   const canonical = canonicalSnapshot();

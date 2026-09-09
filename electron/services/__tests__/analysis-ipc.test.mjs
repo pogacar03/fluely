@@ -190,6 +190,34 @@ test("analysis state subscription forwards serializable snapshots to the rendere
   }]);
 });
 
+test("analysis IPC preserves only the safe classified provider error copy", () => {
+  const harness = makeHarness();
+  const notify = [...harness.analysisListeners][0];
+  notify({
+    event: "error",
+    status: "error",
+    text: "",
+    model: "gpt-5.6-sol",
+    screenshotIds: [],
+    startedAt: null,
+    updatedAt: "2026-08-30T00:00:01.000Z",
+    completedAt: "2026-08-30T00:00:01.000Z",
+    error: {
+      code: "USAGE_LIMIT",
+      message: "raw stderr /Users/private token=secret",
+      action: "raw codex exec cookie=session",
+    },
+  });
+
+  const error = harness.analysisNotifications.at(-1).error;
+  assert.deepEqual(error, {
+    code: "USAGE_LIMIT",
+    message: "Codex usage limit reached. Restore your usage or switch to an available model, then retry.",
+    action: "Restore your Codex usage or switch to an available model, then retry.",
+  });
+  assert.doesNotMatch(JSON.stringify(error), /raw stderr|\/Users\/private|secret|cookie/i);
+});
+
 test("settings updates refresh the next analysis provider call without changing an active request", async () => {
   const initialCodex = {
     ...settingsValue.codex,

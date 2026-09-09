@@ -42,7 +42,10 @@ export type CodexCliErrorCode =
   | "CLI_HARD_TIMEOUT"
   | "ABORTED"
   | "PROCESS_FAILED"
-  | "INVALID_OUTPUT";
+  | "INVALID_OUTPUT"
+  | "USAGE_LIMIT"
+  | "AUTHENTICATION_REQUIRED"
+  | "MODEL_UNAVAILABLE";
 
 export type CodexTimeoutStage = "startup_timeout" | "idle_timeout" | "hard_timeout";
 
@@ -448,6 +451,47 @@ function errorAsException(
     });
   }
   return exception;
+}
+
+function classifyProviderFailure(
+  rawOutput: string,
+  stderr: string,
+  providerError?: string,
+): CodexCliError {
+  const failureText = [providerError, rawOutput, stderr]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .join("\n")
+    .toLowerCase();
+
+  if (/\b(?:usage|quota)\s+(?:limit|exceeded|reached)\b|rate[\s_-]?limit|\b429\b|too many requests/.test(failureText)) {
+    return createError(
+      "USAGE_LIMIT",
+      "Codex usage limit reached. Restore your usage or switch to an available model, then retry.",
+      "Restore your Codex usage or switch to an available model, then retry.",
+    );
+  }
+
+  if (/not\s+logged\s+in|log(?:in|ged\s+in)|authentication|unauthori[sz]ed|credential/.test(failureText)) {
+    return createError(
+      "AUTHENTICATION_REQUIRED",
+      "Check your Codex login, then retry the request.",
+      "Check your Codex login, then retry the request.",
+    );
+  }
+
+  if (/\bmodel\b.*\b(?:unavailable|invalid|not found|does not exist|unsupported)\b|\b(?:unavailable|invalid|not found|does not exist|unsupported)\b.*\bmodel\b/.test(failureText)) {
+    return createError(
+      "MODEL_UNAVAILABLE",
+      "The selected Codex model is unavailable. Choose an available model, then retry.",
+      "Choose an available model, then retry the request.",
+    );
+  }
+
+  return createError(
+    "PROCESS_FAILED",
+    "Codex CLI exited before producing a complete answer.",
+    "Retry the request.",
+  );
 }
 
 /**
@@ -1085,14 +1129,10 @@ export class CodexCliService {
       ), diagnostics.snapshot(this.now()));
     }
     if (closeCode !== 0) {
-      const detail = CodexCliService.extractError(rawOutput, stderr);
-      throw errorAsException(createError(
-        "PROCESS_FAILED",
-        "Codex CLI exited before producing a complete answer.",
-        detail?.toLowerCase().includes("login")
-          ? "Run codex login in Terminal, then retry the request."
-          : "Check the Codex CLI output and retry the request.",
-      ), diagnostics.snapshot(this.now()));
+      throw errorAsException(
+        classifyProviderFailure(rawOutput, stderr, providerError),
+        diagnostics.snapshot(this.now()),
+      );
     }
     const extractedText = CodexCliService.extractText(rawOutput).trim();
     if (!extractedText && (stderr.trim() || providerError)) {

@@ -73,7 +73,10 @@ export type AnalysisServiceErrorCode =
   | "ANALYSIS_FAILED"
   | "CLI_START_TIMEOUT"
   | "CLI_IDLE_TIMEOUT"
-  | "CLI_HARD_TIMEOUT";
+  | "CLI_HARD_TIMEOUT"
+  | "USAGE_LIMIT"
+  | "AUTHENTICATION_REQUIRED"
+  | "MODEL_UNAVAILABLE";
 
 export interface AnalysisServiceError extends Error {
   code: AnalysisServiceErrorCode;
@@ -192,6 +195,10 @@ function cloneEvent(state: AnalysisState, event: AnalysisStateEventType): Analys
 
 function errorMessage(value: unknown): string {
   const code = errorCode(value);
+  const safeProviderError = isSafeProviderErrorCode(code) ? SAFE_PROVIDER_ERROR_COPY[code] : undefined;
+  if (safeProviderError) {
+    return safeProviderError.message;
+  }
   if (isCliTimeoutCode(code)) {
     return cliTimeoutMessage(code);
   }
@@ -208,8 +215,12 @@ function isCliTimeoutCode(value: unknown): value is "CLI_START_TIMEOUT" | "CLI_I
   return value === "CLI_START_TIMEOUT" || value === "CLI_IDLE_TIMEOUT" || value === "CLI_HARD_TIMEOUT";
 }
 
+function isSafeProviderErrorCode(value: unknown): value is "USAGE_LIMIT" | "AUTHENTICATION_REQUIRED" | "MODEL_UNAVAILABLE" {
+  return value === "USAGE_LIMIT" || value === "AUTHENTICATION_REQUIRED" || value === "MODEL_UNAVAILABLE";
+}
+
 function errorCode(value: unknown): AnalysisServiceErrorCode {
-  if (isRecord(value) && isCliTimeoutCode(value.code)) {
+  if (isRecord(value) && (isCliTimeoutCode(value.code) || isSafeProviderErrorCode(value.code))) {
     return value.code;
   }
   return "ANALYSIS_FAILED";
@@ -227,11 +238,34 @@ function cliTimeoutMessage(code: "CLI_START_TIMEOUT" | "CLI_IDLE_TIMEOUT" | "CLI
 }
 
 function errorAction(value: unknown): string {
+  const code = errorCode(value);
+  const safeProviderError = isSafeProviderErrorCode(code) ? SAFE_PROVIDER_ERROR_COPY[code] : undefined;
+  if (safeProviderError) {
+    return safeProviderError.action;
+  }
   if (isRecord(value) && typeof value.action === "string" && value.action.trim()) {
     return value.action.trim();
   }
   return "Check the Codex CLI configuration and try the request again.";
 }
+
+const SAFE_PROVIDER_ERROR_COPY: Record<
+  "USAGE_LIMIT" | "AUTHENTICATION_REQUIRED" | "MODEL_UNAVAILABLE",
+  { message: string; action: string }
+> = {
+  USAGE_LIMIT: {
+    message: "Codex usage limit reached. Restore your usage or switch to an available model, then retry.",
+    action: "Restore your Codex usage or switch to an available model, then retry.",
+  },
+  AUTHENTICATION_REQUIRED: {
+    message: "Check your Codex login, then retry the request.",
+    action: "Check your Codex login, then retry the request.",
+  },
+  MODEL_UNAVAILABLE: {
+    message: "The selected Codex model is unavailable. Choose an available model, then retry.",
+    action: "Choose an available model, then retry the request.",
+  },
+};
 
 function isAbortLike(value: unknown): boolean {
   if (value instanceof Error && value.name === "AbortError") {

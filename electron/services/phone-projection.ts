@@ -42,6 +42,37 @@ const SAFE_ANALYSIS_ERROR = {
   message: "Analysis failed.",
 } as const;
 
+const SAFE_ANALYSIS_ERRORS: Record<string, { code: string; message: string }> = {
+  USAGE_LIMIT: {
+    code: "USAGE_LIMIT",
+    message: "Codex usage limit reached. Restore your usage or switch to an available model, then retry.",
+  },
+  AUTHENTICATION_REQUIRED: {
+    code: "AUTHENTICATION_REQUIRED",
+    message: "Check your Codex login, then retry the request.",
+  },
+  MODEL_UNAVAILABLE: {
+    code: "MODEL_UNAVAILABLE",
+    message: "The selected Codex model is unavailable. Choose an available model, then retry.",
+  },
+  CLI_START_TIMEOUT: {
+    code: "CLI_START_TIMEOUT",
+    message: "Codex CLI startup timed out. Retry the request.",
+  },
+  CLI_IDLE_TIMEOUT: {
+    code: "CLI_IDLE_TIMEOUT",
+    message: "Codex CLI became idle. Retry the request.",
+  },
+  CLI_HARD_TIMEOUT: {
+    code: "CLI_HARD_TIMEOUT",
+    message: "Codex CLI timed out. Retry the request.",
+  },
+};
+
+function safeAnalysisError(error: { code: string; message: string }): { code: string; message: string } {
+  return SAFE_ANALYSIS_ERRORS[error.code] ?? SAFE_ANALYSIS_ERROR;
+}
+
 function sanitizeAttachment(attachment: ConversationAttachment): ConversationAttachment {
   return {
     id: attachment.id,
@@ -63,7 +94,7 @@ function sanitizeMessage(message: ConversationMessage): ConversationMessage {
     status: message.status,
     createdAt: message.createdAt,
     ...(typeof message.finishedAt === "number" ? { finishedAt: message.finishedAt } : {}),
-    ...(message.error ? { error: { ...SAFE_ANALYSIS_ERROR } } : {}),
+    ...(message.error ? { error: safeAnalysisError(message.error) } : {}),
   };
   return sanitized;
 }

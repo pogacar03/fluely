@@ -206,6 +206,9 @@ const IPC_ERROR_CODES = new Set<IpcError["code"]>([
   "CLI_START_TIMEOUT",
   "CLI_IDLE_TIMEOUT",
   "CLI_HARD_TIMEOUT",
+  "USAGE_LIMIT",
+  "AUTHENTICATION_REQUIRED",
+  "MODEL_UNAVAILABLE",
   "ANALYSIS_FAILED",
   "INTERNAL_ERROR",
 ]);
@@ -272,6 +275,18 @@ const SAFE_IPC_ERROR_COPY: Record<IpcError["code"], Pick<IpcError, "message" | "
   CLI_HARD_TIMEOUT: {
     message: "The Codex analysis exceeded its time limit.",
     action: "Try a shorter request or run the analysis again.",
+  },
+  USAGE_LIMIT: {
+    message: "Codex usage limit reached. Restore your usage or switch to an available model, then retry.",
+    action: "Restore your Codex usage or switch to an available model, then retry.",
+  },
+  AUTHENTICATION_REQUIRED: {
+    message: "Check your Codex login, then retry the request.",
+    action: "Check your Codex login, then retry the request.",
+  },
+  MODEL_UNAVAILABLE: {
+    message: "The selected Codex model is unavailable. Choose an available model, then retry.",
+    action: "Choose an available model, then retry the request.",
   },
   ANALYSIS_FAILED: {
     message: "Fluely could not complete the analysis request.",
