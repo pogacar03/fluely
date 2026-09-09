@@ -281,6 +281,55 @@ test("AnalysisService preserves safe provider classifications without leaking de
   assert.doesNotMatch(JSON.stringify(service.getState().error), /raw stderr|\/Users\/private|secret|cookie/i);
 });
 
+test("AnalysisService normalizes synchronous selection failures before activation", async () => {
+  const screenshots = makeScreenshots([FIRST_ID, SECOND_ID]);
+  const before = screenshots.getState();
+  screenshots.getManagedPaths = () => {
+    throw Object.assign(new Error("raw selection failure /private token=secret"), {
+      code: "PROCESS_FAILED",
+      action: "run codex --model private cookie=session",
+    });
+  };
+  const service = makeService({ screenshots });
+
+  await assert.rejects(
+    service.start({ prompt: "Question", screenshotIds: undefined, intent: "answer", fast: false }),
+    (error) => {
+      assert.equal(error.code, "ANALYSIS_FAILED");
+      assert.equal(error.message, "Codex CLI analysis failed.");
+      assert.equal(error.action, "Check the Codex CLI configuration and try the request again.");
+      assert.doesNotMatch(JSON.stringify(error), /raw selection|\/private|secret|cookie|PROCESS_FAILED/i);
+      return true;
+    },
+  );
+
+  assert.deepEqual(screenshots.getState(), before);
+  assert.equal(service.getState().status, "idle");
+});
+
+test("AnalysisService preserves safe startup classifications without leaking synchronous details", async () => {
+  const screenshots = makeScreenshots([FIRST_ID]);
+  screenshots.getManagedPaths = () => {
+    throw Object.assign(new Error("raw usage detail token=secret"), {
+      code: "USAGE_LIMIT",
+      action: "raw provider action cookie=session",
+    });
+  };
+  const service = makeService({ screenshots });
+
+  await assert.rejects(
+    service.start({ prompt: "Question", screenshotIds: undefined, intent: "answer", fast: false }),
+    (error) => {
+      assert.equal(error.code, "USAGE_LIMIT");
+      assert.equal(error.message, "Codex usage limit reached. Restore your usage or switch to an available model, then retry.");
+      assert.equal(error.action, "Restore your Codex usage or switch to an available model, then retry.");
+      assert.doesNotMatch(JSON.stringify(error), /raw usage|secret|cookie/i);
+      return true;
+    },
+  );
+  assert.equal(service.getState().status, "idle");
+});
+
 test("AnalysisService turns a clean empty provider completion into a terminal error", async () => {
   const provider = {
     stream: async function* () {

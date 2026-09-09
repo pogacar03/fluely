@@ -116,7 +116,7 @@ export async function runPackagedSmoke({
   let userDataPath;
   try {
     userDataPath = await createTempUserData();
-    const child = spawnProcess(executable, ["--user-data-dir", userDataPath], {
+    const child = spawnProcess(executable, [`--user-data-dir=${userDataPath}`], {
       stdio: "ignore",
       detached: false,
     });

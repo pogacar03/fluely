@@ -17,11 +17,12 @@ const [{ CommandRouter }, { ConversationStore }, { AttachmentStore }, { Analysis
 );
 
 const SCREENSHOT_ID = "11111111-1111-4111-8111-111111111111";
+const LATER_SCREENSHOT_ID = "33333333-3333-4333-8333-333333333333";
 const ATTACHMENT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
 const temporaryDirectories = [];
 
-async function makeHarness({ provider, queueItems = 1 } = {}) {
+async function makeHarness({ provider, queueItems = 1, onDraftCleanupFailure } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "fluely-router-"));
   temporaryDirectories.push(root);
   const items = Array.from({ length: queueItems }, (_, index) => ({
@@ -52,6 +53,19 @@ async function makeHarness({ provider, queueItems = 1 } = {}) {
     clear: async () => {
       queue = [];
       return screenshots.getState();
+    },
+    append: (id) => {
+      const item = {
+        id,
+        capturedAt: 900,
+        width: 1920,
+        height: 1080,
+        mimeType: "image/png",
+        previewUrl: `fluely-media://context/${id}`,
+      };
+      queue = [...queue, item];
+      paths.set(id, path.join(root, `${id}.png`));
+      return item;
     },
   };
   let nextAttachmentId = 0;
@@ -85,7 +99,13 @@ async function makeHarness({ provider, queueItems = 1 } = {}) {
     },
     now: () => new Date(400),
   });
-  const router = new CommandRouter({ screenshots, attachments, conversation, analysis });
+  const router = new CommandRouter({
+    screenshots,
+    attachments,
+    conversation,
+    analysis,
+    onDraftCleanupFailure,
+  });
   return { router, analysis, conversation, attachments, screenshots };
 }
 
@@ -202,6 +222,88 @@ test("ask provider reads the persistent attachment before successful draft clean
   assert.equal(observedPath, harness.attachments.getPath(ATTACHMENT_ID));
   assert.deepEqual(observedBytes, PNG_BYTES);
   assert.equal(harness.conversation.snapshot().messages.at(-1).text, "stable answer");
+});
+
+test("successful draft cleanup retries a transient delete failure without changing the completed answer", async () => {
+  const harness = await makeHarness({
+    provider: {
+      stream: async function* () {
+        yield "retry-cleanup answer";
+      },
+    },
+  });
+  const originalDelete = harness.screenshots.delete.bind(harness.screenshots);
+  let attempts = 0;
+  harness.screenshots.delete = async (id) => {
+    attempts += 1;
+    if (attempts === 1) {
+      throw new Error("transient delete failure");
+    }
+    return originalDelete(id);
+  };
+
+  await harness.router.execute({ type: "ask", requestId: "cleanup-retry", prompt: "Question" }, "desktop");
+  await harness.router.whenIdle();
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(harness.screenshots.getState().items, []);
+  const assistant = harness.conversation.snapshot().messages.at(-1);
+  assert.equal(assistant.role, "assistant");
+  assert.equal(assistant.status, "completed");
+  assert.equal(assistant.text, "retry-cleanup answer");
+  assert.deepEqual(assistant.attachmentIds, []);
+});
+
+test("persistent draft cleanup failure is finite, observable, and keeps the completed answer and draft", async () => {
+  const cleanupFailures = [];
+  const harness = await makeHarness({
+    onDraftCleanupFailure: (id) => cleanupFailures.push(id),
+    provider: {
+      stream: async function* () {
+        yield "observable cleanup answer";
+      },
+    },
+  });
+  let attempts = 0;
+  harness.screenshots.delete = async () => {
+    attempts += 1;
+    throw new Error("persistent delete failure");
+  };
+
+  await harness.router.execute({ type: "ask", requestId: "cleanup-observable", prompt: "Question" }, "desktop");
+  await harness.router.whenIdle();
+
+  assert.equal(attempts, 3);
+  assert.deepEqual(cleanupFailures, [SCREENSHOT_ID]);
+  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
+  assert.equal(harness.conversation.snapshot().messages.at(-1).status, "completed");
+  assert.equal(harness.conversation.snapshot().messages.at(-1).text, "observable cleanup answer");
+});
+
+test("successful draft cleanup only targets original IDs and preserves screenshots added later", async () => {
+  const harness = await makeHarness({
+    provider: {
+      stream: async function* () {
+        yield "later screenshot answer";
+      },
+    },
+  });
+  const originalDelete = harness.screenshots.delete.bind(harness.screenshots);
+  const deleteCalls = [];
+  harness.screenshots.delete = async (id) => {
+    deleteCalls.push(id);
+    if (deleteCalls.length === 1) {
+      harness.screenshots.append(LATER_SCREENSHOT_ID);
+    }
+    return originalDelete(id);
+  };
+
+  await harness.router.execute({ type: "ask", requestId: "cleanup-id-safe", prompt: "Question" }, "desktop");
+  await harness.router.whenIdle();
+
+  assert.deepEqual(deleteCalls, [SCREENSHOT_ID]);
+  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [LATER_SCREENSHOT_ID]);
+  assert.equal(harness.conversation.snapshot().messages.at(-1).status, "completed");
 });
 
 test("ask accepts a pure text prompt when no screenshots are queued", async () => {
@@ -758,11 +860,20 @@ test("sync start throws and async start rejects without acknowledging or clearin
         requestId: `start-failure-${scenario.name}`,
         prompt: "Question",
       }, "desktop"),
-      (error) => error?.code === "ANALYSIS_FAILED",
+      (error) => {
+        assert.equal(error?.code, "ANALYSIS_FAILED", scenario.name);
+        assert.equal(error?.message, "Codex CLI analysis failed.", scenario.name);
+        assert.doesNotMatch(JSON.stringify(error), /sync provider failure|async provider failure|raw|PROCESS_FAILED/i, scenario.name);
+        return true;
+      },
       scenario.name,
     );
     assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID], scenario.name);
     assert.equal(harness.conversation.snapshot().messages.at(-1).status, "error", scenario.name);
+    assert.deepEqual(harness.conversation.snapshot().messages.at(-1).error, {
+      code: "ANALYSIS_FAILED",
+      message: "Codex CLI analysis failed.",
+    }, scenario.name);
     assert.equal(harness.conversation.snapshot().activeMessageId, undefined, scenario.name);
     assert.equal(terminalEvents.length, 1, scenario.name);
     await harness.router.whenIdle();

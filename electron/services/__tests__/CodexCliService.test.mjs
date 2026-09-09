@@ -363,6 +363,125 @@ test("provider classification accepts common snake_case codes without scanning a
   );
 });
 
+test("stream extracts safe classifications from bounded data, payload, and event error envelopes", async (t) => {
+  const cases = [
+    {
+      name: "one-level data envelope",
+      event: {
+        type: "error",
+        data: { error_code: "rate_limit_exceeded", message: "raw quota detail" },
+      },
+      expectedCode: "USAGE_LIMIT",
+    },
+    {
+      name: "multi-level payload and event envelope",
+      event: {
+        type: "error",
+        payload: { event: { code: "authentication_required", message: "raw login detail" } },
+      },
+      expectedCode: "AUTHENTICATION_REQUIRED",
+    },
+    {
+      name: "multi-level event and data envelope",
+      event: {
+        type: "error",
+        event: { data: { code: "model_not_found", message: "raw model detail" } },
+      },
+      expectedCode: "MODEL_UNAVAILABLE",
+    },
+  ];
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      const child = makeFakeProcess();
+      const service = new CodexCliService({
+        spawn: () => {
+          queueMicrotask(() => {
+            child.stdout.write(`${JSON.stringify(fixture.event)}\n`);
+            child.emit("close", 0, null);
+          });
+          return child;
+        },
+      });
+
+      const run = runFakeStream(service);
+      await run.promise;
+      assert.equal(run.result.error?.code, fixture.expectedCode);
+      assert.deepEqual(run.result.deltas, []);
+      assert.doesNotMatch(JSON.stringify(run.result.error), /raw quota|raw login|raw model/i);
+    });
+  }
+});
+
+test("a later known provider classification overrides an earlier unknown error code", async () => {
+  const child = makeFakeProcess();
+  const service = new CodexCliService({
+    spawn: () => {
+      queueMicrotask(() => {
+        child.stdout.write(`${JSON.stringify({
+          type: "error",
+          code: "provider_internal_error",
+          message: "transient provider failure",
+        })}\n`);
+        child.stdout.write(`${JSON.stringify({
+          type: "error",
+          code: "authentication_required",
+          message: "login is required",
+        })}\n`);
+        child.emit("close", 0, null);
+      });
+      return child;
+    },
+  });
+
+  const run = runFakeStream(service);
+  await run.promise;
+  assert.equal(run.result.error?.code, "AUTHENTICATION_REQUIRED");
+  assert.match(run.result.error?.message ?? "", /Codex login/i);
+});
+
+test("assistant answer text containing provider-like words is never classified as a provider error", async () => {
+  const child = makeFakeProcess();
+  const service = new CodexCliService({
+    spawn: () => {
+      queueMicrotask(() => {
+        child.stdout.write(`${JSON.stringify({
+          type: "agent_message.delta",
+          delta: "The answer mentions 429, rate limit, login, and model not found as ordinary text.",
+        })}\n`);
+        child.emit("close", 1, null);
+      });
+      return child;
+    },
+  });
+
+  const run = runFakeStream(service);
+  await run.promise;
+  assert.deepEqual(run.result.deltas, ["The answer mentions 429, rate limit, login, and model not found as ordinary text."]);
+  assert.equal(run.result.error?.code, "PROCESS_FAILED");
+});
+
+test("unknown structured provider codes remain a generic process failure", async () => {
+  const child = makeFakeProcess();
+  const service = new CodexCliService({
+    spawn: () => {
+      queueMicrotask(() => {
+        child.stdout.write(`${JSON.stringify({
+          type: "error",
+          code: "future_provider_code",
+          message: "provider failed",
+        })}\n`);
+        child.emit("close", 0, null);
+      });
+      return child;
+    },
+  });
+
+  const run = runFakeStream(service);
+  await run.promise;
+  assert.equal(run.result.error?.code, "PROCESS_FAILED");
+});
+
 test("validateExecutable returns a resolved executable without throwing", async () => {
   const executable = await makeExecutable("exit 0");
   const child = makeFakeProcess();

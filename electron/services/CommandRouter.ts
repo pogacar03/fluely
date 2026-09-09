@@ -16,6 +16,7 @@ import type {
   ConversationMessage,
   ConversationPort,
 } from "../../src/shared/conversation";
+import { normalizeAnalysisServiceError } from "./AnalysisService";
 
 export interface CommandRouterScreenshotPort {
   getState(): ScreenshotState;
@@ -76,6 +77,7 @@ export interface CommandRouterOptions {
   attachments: CommandRouterAttachmentPort;
   conversation: CommandRouterConversationPort;
   analysis: CommandRouterAnalysisPort;
+  onDraftCleanupFailure?: (screenshotId: string) => void;
 }
 
 export interface CommandScope {
@@ -143,6 +145,7 @@ function getAnalysisError(event: AnalysisStateChangedEvent): { code: string; mes
 }
 
 const MAX_CONVERSATION_CONTEXT_LENGTH = 3000;
+const MAX_DRAFT_CLEANUP_ATTEMPTS = 3;
 
 function buildConversationContext(snapshot: ReturnType<ConversationPort["snapshot"]>): string | undefined {
   const entries = snapshot.messages
@@ -178,6 +181,7 @@ export class CommandRouter {
   private readonly attachments: CommandRouterAttachmentPort;
   private readonly conversation: CommandRouterConversationPort;
   private readonly analysis: CommandRouterAnalysisPort;
+  private readonly onDraftCleanupFailure?: (screenshotId: string) => void;
   private readonly requestDeduper = createRequestIdDeduper<CommandResult>();
   private commandTail: Promise<void> = Promise.resolve();
   private draftCleanupTail: Promise<void> = Promise.resolve();
@@ -192,6 +196,7 @@ export class CommandRouter {
     this.attachments = options.attachments;
     this.conversation = options.conversation;
     this.analysis = options.analysis;
+    this.onDraftCleanupFailure = options.onDraftCleanupFailure;
     this.analysis.onStateChanged((event) => this.handleAnalysisEvent(event));
   }
 
@@ -351,15 +356,15 @@ export class CommandRouter {
     try {
       await this.analysis.start(request, imagePaths);
     } catch (error) {
+      const safeError = normalizeAnalysisServiceError(error);
       // Give a provider terminal callback already racing startup one event-loop
       // turn to win. A genuine start failure still propagates to the caller.
       await new Promise<void>((resolve) => setImmediate(resolve));
       if (!activeRun.terminal) {
-        const message = error instanceof Error && error.message ? error.message : "Codex CLI analysis failed.";
         try {
           this.conversation.finishAssistant(messageId, "error", "", {
-            code: (error as { code?: string })?.code ?? "ANALYSIS_FAILED",
-            message,
+            code: safeError.code,
+            message: safeError.message,
           });
         } catch {
           // A terminal provider event may have won the race.
@@ -367,7 +372,7 @@ export class CommandRouter {
         this.markRunTerminal(messageId);
       }
       settle();
-      throw error;
+      throw safeError;
     }
 
     const whenIdle = this.analysis.whenIdle?.();
@@ -458,13 +463,33 @@ export class CommandRouter {
       }
 
       for (const screenshotId of active.draftScreenshotIds) {
-        if (!this.screenshots.getState().items.some((item) => item.id === screenshotId)) {
-          continue;
-        }
-        await this.screenshots.delete(screenshotId).catch(() => undefined);
+        await this.cleanupDraftScreenshot(active, screenshotId);
       }
     });
     this.draftCleanupTail = cleanup.then(() => undefined, () => undefined);
+  }
+
+  private async cleanupDraftScreenshot(active: ActiveRun, screenshotId: string): Promise<void> {
+    for (let attempt = 0; attempt < MAX_DRAFT_CLEANUP_ATTEMPTS; attempt += 1) {
+      if (!active.scope.isCurrent()) {
+        return;
+      }
+      if (!this.screenshots.getState().items.some((item) => item.id === screenshotId)) {
+        return;
+      }
+      try {
+        await this.screenshots.delete(screenshotId);
+        return;
+      } catch {
+        if (attempt + 1 === MAX_DRAFT_CLEANUP_ATTEMPTS) {
+          try {
+            this.onDraftCleanupFailure?.(screenshotId);
+          } catch {
+            // Cleanup observability must not change a completed answer.
+          }
+        }
+      }
+    }
   }
 
   private markRunTerminal(messageId: string): void {

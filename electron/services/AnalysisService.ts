@@ -260,6 +260,11 @@ function errorAction(value: unknown): string {
   return SAFE_ANALYSIS_FAILURE_COPY.action;
 }
 
+export function normalizeAnalysisServiceError(value: unknown): AnalysisServiceError {
+  const code = errorCode(value);
+  return createServiceError(code, errorMessage(value), errorAction(value));
+}
+
 const SAFE_ANALYSIS_FAILURE_COPY = {
   message: "Codex CLI analysis failed.",
   action: "Check the Codex CLI configuration and try the request again.",
@@ -393,12 +398,21 @@ export class AnalysisService {
       );
     }
 
-    const safeRequest: Record<string, unknown> = isRecord(request) ? request : {};
-    const requestedIds = normalizeScreenshotIds(safeRequest.screenshotIds);
-    const selection = this.resolveSelection(requestedIds, stableImagePaths);
-    const codex = this.codex;
-    const model = safeRequest.fast === true ? codex.fastModel : codex.model;
-    const timestamp = this.timestamp();
+    let safeRequest: Record<string, unknown>;
+    let selection: ResolvedSelection;
+    let codex: CodexCliSettings;
+    let model: string;
+    let timestamp: string;
+    try {
+      safeRequest = isRecord(request) ? request : {};
+      const requestedIds = normalizeScreenshotIds(safeRequest.screenshotIds);
+      selection = this.resolveSelection(requestedIds, stableImagePaths);
+      codex = this.codex;
+      model = safeRequest.fast === true ? codex.fastModel : codex.model;
+      timestamp = this.timestamp();
+    } catch (error) {
+      throw normalizeAnalysisServiceError(error);
+    }
     const controller = new AbortController();
     const token = Symbol("analysis");
     this.active = { token, controller };

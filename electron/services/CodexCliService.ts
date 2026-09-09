@@ -243,14 +243,29 @@ function firstText(...values: unknown[]): string | undefined {
   return undefined;
 }
 
-function getProviderErrorDetails(value: unknown, depth = 0): ProviderErrorDetails | null {
+const GENERIC_PROVIDER_ERROR_MESSAGE = "Codex CLI reported an error.";
+
+function hasProviderErrorMetadata(record: ParsedEvent): boolean {
+  return record.code !== undefined ||
+    record.errorCode !== undefined ||
+    record.error_code !== undefined ||
+    typeof record.message === "string" ||
+    typeof record.error === "string" ||
+    asRecord(record.error) !== null;
+}
+
+function collectProviderErrorDetails(
+  value: unknown,
+  depth = 0,
+  inheritedErrorContext = false,
+): ProviderErrorDetails[] {
   if (depth > 5) {
-    return null;
+    return [];
   }
 
   const record = asRecord(value);
   if (!record) {
-    return null;
+    return [];
   }
 
   const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
@@ -259,7 +274,9 @@ function getProviderErrorDetails(value: unknown, depth = 0): ProviderErrorDetail
   const error = asRecord(record.error);
   const isItemError = type === "item.completed" && item?.type === "error";
   const isErrorEvent = type === "error" || type.endsWith(".error") || type.endsWith("_error") || type === "stream_error";
-  if (isItemError || isErrorEvent) {
+  const inErrorContext = inheritedErrorContext || isItemError || isErrorEvent;
+  const details: ProviderErrorDetails[] = [];
+  if (isItemError || isErrorEvent || (inErrorContext && hasProviderErrorMetadata(record))) {
     const code = normalizeProviderErrorCode(
       record.code ?? record.errorCode ?? record.error_code ??
       error?.code ?? error?.errorCode ?? error?.error_code ??
@@ -274,20 +291,32 @@ function getProviderErrorDetails(value: unknown, depth = 0): ProviderErrorDetail
       typeof item?.error === "string" ? item.error : undefined,
       itemError?.message,
     );
-    return {
+    details.push({
       ...(code ? { code } : {}),
-      message: message ?? "Codex CLI reported an error.",
-    };
+      message: message ?? GENERIC_PROVIDER_ERROR_MESSAGE,
+    });
   }
 
   for (const nested of [record.payload, record.event, record.data, record.error]) {
-    const details = getProviderErrorDetails(nested, depth + 1);
-    if (details) {
-      return details;
-    }
+    details.push(...collectProviderErrorDetails(nested, depth + 1, inErrorContext));
   }
 
-  return null;
+  return details;
+}
+
+function getProviderErrorDetails(value: unknown, depth = 0): ProviderErrorDetails | null {
+  const details = collectProviderErrorDetails(value, depth);
+  for (let index = details.length - 1; index >= 0; index -= 1) {
+    if (classifyProviderCode(details[index].code)) {
+      return details[index];
+    }
+  }
+  for (let index = details.length - 1; index >= 0; index -= 1) {
+    if (details[index].message !== GENERIC_PROVIDER_ERROR_MESSAGE) {
+      return details[index];
+    }
+  }
+  return details.at(-1) ?? null;
 }
 
 function getErrorMessage(value: unknown, depth = 0): string | null {
@@ -529,11 +558,19 @@ function classifyFailureText(value: unknown): CodexCliErrorCode | undefined {
 
 function classifyProviderFailure(
   stderr: string,
-  providerError?: ProviderErrorDetails,
+  providerError?: ProviderErrorDetails | readonly ProviderErrorDetails[],
 ): CodexCliError {
-  const code = classifyProviderCode(providerError?.code) ??
-    classifyFailureText(providerError?.message) ??
-    classifyFailureText(stderr);
+  const details = providerError === undefined
+    ? []
+    : Array.isArray(providerError) ? providerError : [providerError];
+  let code: CodexCliErrorCode | undefined;
+  for (let index = details.length - 1; index >= 0 && !code; index -= 1) {
+    code = classifyProviderCode(details[index].code);
+  }
+  for (let index = details.length - 1; index >= 0 && !code; index -= 1) {
+    code = classifyFailureText(details[index].message);
+  }
+  code ??= classifyFailureText(stderr);
 
   if (code === "USAGE_LIMIT") {
     return createError(
@@ -955,7 +992,7 @@ export class CodexCliService {
     let closeCode: number | null = null;
     let closed = false;
     let termination: "abort" | CodexTimeoutStage | null = null;
-    let providerError: ProviderErrorDetails | undefined;
+    const providerErrors: ProviderErrorDetails[] = [];
     let sawAgentDelta = false;
     let sawValidProtocolEvent = false;
     const completedMessages: string[] = [];
@@ -1081,10 +1118,7 @@ export class CodexCliService {
         const parsed: unknown = JSON.parse(line);
         const details = getProviderErrorDetails(parsed);
         if (details) {
-          providerError = {
-            ...(providerError?.code || details.code ? { code: providerError?.code ?? details.code } : {}),
-            ...(providerError?.message || details.message ? { message: providerError?.message ?? details.message } : {}),
-          };
+          providerErrors.push(details);
         }
         if (isLivenessProtocolEvent(parsed)) {
           recordProtocolEvent(this.now());
@@ -1208,13 +1242,13 @@ export class CodexCliService {
     }
     if (closeCode !== 0) {
       throw errorAsException(
-        classifyProviderFailure(stderr, providerError),
+        classifyProviderFailure(stderr, providerErrors),
         diagnostics.snapshot(this.now()),
       );
     }
-    if (providerError) {
+    if (providerErrors.length > 0) {
       throw errorAsException(
-        classifyProviderFailure(stderr, providerError),
+        classifyProviderFailure(stderr, providerErrors),
         diagnostics.snapshot(this.now()),
       );
     }
