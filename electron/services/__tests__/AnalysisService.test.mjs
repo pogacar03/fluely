@@ -225,8 +225,34 @@ test("AnalysisService reports provider failures without changing the screenshot 
   assert.deepEqual(after, before);
   assert.equal(service.getState().status, "error");
   assert.equal(service.getState().text, "partial");
-  assert.match(service.getState().error.message, /not logged in/i);
+  assert.deepEqual(service.getState().error, {
+    code: "ANALYSIS_FAILED",
+    message: "Codex CLI analysis failed.",
+    action: "Check the Codex CLI configuration and try the request again.",
+  });
   assert.deepEqual(events.map((event) => event.event), ["started", "delta", "error"]);
+});
+
+test("AnalysisService normalizes unknown provider errors before publishing state", async () => {
+  const provider = {
+    stream: async function* () {
+      throw Object.assign(new Error("raw stderr /Users/private token=secret"), {
+        code: "PROCESS_FAILED",
+        action: "run codex --model private with cookie=session",
+      });
+    },
+  };
+  const service = makeService({ provider });
+
+  await service.start({ prompt: "Question", screenshotIds: [FIRST_ID], intent: "answer", fast: false });
+  await service.whenIdle();
+
+  assert.deepEqual(service.getState().error, {
+    code: "ANALYSIS_FAILED",
+    message: "Codex CLI analysis failed.",
+    action: "Check the Codex CLI configuration and try the request again.",
+  });
+  assert.doesNotMatch(JSON.stringify(service.getState()), /raw stderr|\/Users\/private|secret|cookie/i);
 });
 
 test("AnalysisService preserves safe provider classifications without leaking details", async () => {

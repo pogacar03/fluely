@@ -99,6 +99,7 @@ interface ActiveRun {
   messageId: string;
   source: "desktop" | "phone";
   scope: CommandScopeController;
+  draftScreenshotIds: string[];
   providerSettled: Promise<void>;
   terminal: boolean;
 }
@@ -179,6 +180,7 @@ export class CommandRouter {
   private readonly analysis: CommandRouterAnalysisPort;
   private readonly requestDeduper = createRequestIdDeduper<CommandResult>();
   private commandTail: Promise<void> = Promise.resolve();
+  private draftCleanupTail: Promise<void> = Promise.resolve();
   private activeRun: ActiveRun | null = null;
   private activeCommand: CommandOperationScope | null = null;
   private readonly scopes = new Set<CommandOperationScope>();
@@ -234,6 +236,7 @@ export class CommandRouter {
     await this.commandTail;
     await this.analysis.whenIdle?.();
     await this.activeRun?.providerSettled;
+    await this.draftCleanupTail;
     await this.conversation.whenIdle?.();
   }
 
@@ -320,7 +323,7 @@ export class CommandRouter {
         ...(conversationContext ? { conversationContext } : {}),
       }, imagePaths);
       this.assertCurrent(scope);
-      return this.result(await this.screenshots.clear());
+      return this.result();
     } catch (error) {
       await this.deleteMaterialized(materialized);
       throw error;
@@ -340,6 +343,7 @@ export class CommandRouter {
       messageId,
       source,
       scope: scope.owner,
+      draftScreenshotIds: [...request.screenshotIds],
       providerSettled,
       terminal: false,
     };
@@ -416,6 +420,7 @@ export class CommandRouter {
               });
             } else {
               this.conversation.finishAssistant(active.messageId, "completed", event.text);
+              this.scheduleSuccessfulDraftCleanup(active);
             }
           } finally {
             this.markRunTerminal(active.messageId);
@@ -440,6 +445,26 @@ export class CommandRouter {
       // The canonical store may already have received a terminal event from a
       // provider race; it must never make the analysis stream reject.
     }
+  }
+
+  private scheduleSuccessfulDraftCleanup(active: ActiveRun): void {
+    if (active.draftScreenshotIds.length === 0 || !active.scope.isCurrent()) {
+      return;
+    }
+
+    const cleanup = this.draftCleanupTail.then(async () => {
+      if (!active.scope.isCurrent()) {
+        return;
+      }
+
+      for (const screenshotId of active.draftScreenshotIds) {
+        if (!this.screenshots.getState().items.some((item) => item.id === screenshotId)) {
+          continue;
+        }
+        await this.screenshots.delete(screenshotId).catch(() => undefined);
+      }
+    });
+    this.draftCleanupTail = cleanup.then(() => undefined, () => undefined);
   }
 
   private markRunTerminal(messageId: string): void {

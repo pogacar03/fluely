@@ -202,13 +202,10 @@ function errorMessage(value: unknown): string {
   if (isCliTimeoutCode(code)) {
     return cliTimeoutMessage(code);
   }
-  if (value instanceof Error && value.message.trim()) {
-    return value.message.trim();
+  if (isKnownSafeAnalysisFailure(value)) {
+    return "Codex CLI returned no visible answer.";
   }
-  if (isRecord(value) && typeof value.message === "string" && value.message.trim()) {
-    return value.message.trim();
-  }
-  return String(value || "Codex CLI analysis failed.");
+  return SAFE_ANALYSIS_FAILURE_COPY.message;
 }
 
 function isCliTimeoutCode(value: unknown): value is "CLI_START_TIMEOUT" | "CLI_IDLE_TIMEOUT" | "CLI_HARD_TIMEOUT" {
@@ -237,16 +234,41 @@ function cliTimeoutMessage(code: "CLI_START_TIMEOUT" | "CLI_IDLE_TIMEOUT" | "CLI
   }
 }
 
+function cliTimeoutAction(code: "CLI_START_TIMEOUT" | "CLI_IDLE_TIMEOUT" | "CLI_HARD_TIMEOUT"): string {
+  switch (code) {
+    case "CLI_START_TIMEOUT":
+      return "Check the Codex CLI configuration, then retry the request.";
+    case "CLI_IDLE_TIMEOUT":
+      return "Retry the request or check the Codex CLI connection.";
+    case "CLI_HARD_TIMEOUT":
+      return "Retry with a smaller request or check the Codex CLI configuration.";
+  }
+}
+
 function errorAction(value: unknown): string {
   const code = errorCode(value);
   const safeProviderError = isSafeProviderErrorCode(code) ? SAFE_PROVIDER_ERROR_COPY[code] : undefined;
   if (safeProviderError) {
     return safeProviderError.action;
   }
-  if (isRecord(value) && typeof value.action === "string" && value.action.trim()) {
-    return value.action.trim();
+  if (isCliTimeoutCode(code)) {
+    return cliTimeoutAction(code);
   }
-  return "Check the Codex CLI configuration and try the request again.";
+  if (isKnownSafeAnalysisFailure(value)) {
+    return "Retry the analysis request or check the Codex CLI connection.";
+  }
+  return SAFE_ANALYSIS_FAILURE_COPY.action;
+}
+
+const SAFE_ANALYSIS_FAILURE_COPY = {
+  message: "Codex CLI analysis failed.",
+  action: "Check the Codex CLI configuration and try the request again.",
+} as const;
+
+function isKnownSafeAnalysisFailure(value: unknown): boolean {
+  return isRecord(value) && value.name === "AnalysisServiceError" &&
+    value.message === "Codex CLI returned no visible answer." &&
+    value.action === "Retry the analysis request or check the Codex CLI connection.";
 }
 
 const SAFE_PROVIDER_ERROR_COPY: Record<

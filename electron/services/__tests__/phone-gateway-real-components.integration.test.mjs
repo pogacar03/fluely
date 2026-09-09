@@ -332,6 +332,7 @@ test("real PhoneGateway and CommandRouter keep a shared-session waiter alive whi
     await waitFor(() => sharedEntry.waiterCount === 1);
     assert.equal(sharedEntry.scope.isCurrent(), true);
     analysisStarts[0].resolve();
+    analysis.state = { ...analysis.state, status: "completed", text: "shared answer" };
     analysis.emit("completed");
     await waitFor(() => second.received.some((frame) => frame.type === "ack" && frame.requestId === sharedCommand.requestId));
     await router.whenIdle();
@@ -995,8 +996,11 @@ test("desktop and phone commands share canonical order, idempotency, cancellatio
     assert.ok(activeMessageId);
     const userMessage = phoneClient.getState().snapshot.conversation.messages.find((message) => message.role === "user");
     assert.deepEqual(userMessage.attachmentIds, [ATTACHMENT_ID, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]);
-    await waitFor(() => phoneClient.getState().snapshot?.queue.length === 0);
-    assert.deepEqual(phoneClient.getState().snapshot.queue.map((item) => item.id), []);
+    await waitFor(() => phoneClient.getState().snapshot?.queue.length === 2);
+    assert.deepEqual(phoneClient.getState().snapshot.queue.map((item) => item.id), [
+      SCREENSHOT_ID,
+      "22222222-2222-4222-8222-222222222222",
+    ]);
 
     await waitFor(() => phoneSockets[0].received.some((frame) =>
       frame.type === "ack" && frame.requestId === askFrame.command.requestId));
@@ -1053,11 +1057,17 @@ test("desktop and phone commands share canonical order, idempotency, cancellatio
     getButton(phoneRoot, "Cancel").click();
     await waitFor(() => phoneClient.getState().snapshot?.conversation.messages.some((message) =>
       message.role === "assistant" && message.status === "cancelled"));
-    assert.deepEqual(phoneClient.getState().snapshot.queue.map((item) => item.id), []);
+    assert.deepEqual(phoneClient.getState().snapshot.queue.map((item) => item.id), [
+      SCREENSHOT_ID,
+      "22222222-2222-4222-8222-222222222222",
+    ]);
 
     getButton(phoneRoot, "Clear conversation").click();
     await waitFor(() => phoneClient.getState().snapshot?.conversation.messages.length === 0);
-    assert.deepEqual(phoneClient.getState().snapshot.queue.map((item) => item.id), []);
+    assert.deepEqual(phoneClient.getState().snapshot.queue.map((item) => item.id), [
+      SCREENSHOT_ID,
+      "22222222-2222-4222-8222-222222222222",
+    ]);
     await assertDesktopPhoneConverged();
 
     const refreshed = await gateway.regeneratePairing();

@@ -99,8 +99,9 @@ test("real services capture, materialize, stream, complete, clear the queue, and
 
   await session.router.execute({ type: "capture", requestId: "capture-integration" }, "desktop");
   const started = await session.router.execute({ type: "ask", requestId: "ask-integration", prompt: "Question" }, "desktop");
-  assert.deepEqual(started.queue.items, []);
+  assert.deepEqual(started.queue.items.map((item) => item.id), [SCREENSHOT_ID]);
   await session.analysis.whenIdle();
+  await session.router.whenIdle();
 
   const snapshot = session.conversation.snapshot();
   assert.deepEqual(snapshot.messages.map((message) => [message.role, message.status, message.text]), [

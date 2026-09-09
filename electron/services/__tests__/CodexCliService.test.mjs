@@ -279,6 +279,90 @@ test("stream classifies provider failures into safe actionable errors", async (t
   }
 });
 
+test("stream classifies a structured provider error even when the process exits successfully", async () => {
+  const child = makeFakeProcess();
+  const service = new CodexCliService({
+    spawn: () => {
+      queueMicrotask(() => {
+        child.stdout.write(JSON.stringify({
+          type: "error",
+          code: "rate_limit_exceeded",
+          message: "The provider quota is exhausted.",
+        }) + "\n");
+        child.emit("close", 0, null);
+      });
+      return child;
+    },
+  });
+
+  await assert.rejects(
+    (async () => {
+      for await (const _delta of service.stream("fake-codex", { prompt: "question" })) {
+        // The structured error must not be treated as an empty successful answer.
+      }
+    })(),
+    (error) => {
+      assert.equal(error.code, "USAGE_LIMIT");
+      assert.match(error.message, /usage limit/i);
+      return true;
+    },
+  );
+});
+
+test("provider classification accepts common snake_case codes without scanning assistant output", async () => {
+  const cases = [
+    ["authentication_required", "AUTHENTICATION_REQUIRED"],
+    ["model_not_found", "MODEL_UNAVAILABLE"],
+    ["quota_exhausted", "USAGE_LIMIT"],
+  ];
+
+  for (const [code, expectedCode] of cases) {
+    const child = makeFakeProcess();
+    const service = new CodexCliService({
+      spawn: () => {
+        queueMicrotask(() => {
+          child.stdout.write(JSON.stringify({ type: "error", code, message: "provider rejected request" }) + "\n");
+          child.emit("close", 0, null);
+        });
+        return child;
+      },
+    });
+
+    await assert.rejects(
+      (async () => {
+        for await (const _delta of service.stream("fake-codex", { prompt: "question" })) {
+          // The structured provider code is authoritative.
+        }
+      })(),
+      (error) => error.code === expectedCode,
+      code,
+    );
+  }
+
+  const child = makeFakeProcess();
+  const service = new CodexCliService({
+    spawn: () => {
+      queueMicrotask(() => {
+        child.stdout.write(JSON.stringify({
+          type: "agent_message.delta",
+          delta: "The model is unavailable in this example answer, but this is still assistant text.",
+        }) + "\n");
+        child.emit("close", 1, null);
+      });
+      return child;
+    },
+  });
+
+  await assert.rejects(
+    (async () => {
+      for await (const _delta of service.stream("fake-codex", { prompt: "question" })) {
+        // Normal assistant text must not be classified as a provider error.
+      }
+    })(),
+    (error) => error.code === "PROCESS_FAILED",
+  );
+});
+
 test("validateExecutable returns a resolved executable without throwing", async () => {
   const executable = await makeExecutable("exit 0");
   const child = makeFakeProcess();

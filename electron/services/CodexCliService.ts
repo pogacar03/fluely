@@ -103,6 +103,9 @@ export interface CodexCliDependencies {
 
 interface ParsedEvent {
   type?: unknown;
+  code?: unknown;
+  errorCode?: unknown;
+  error_code?: unknown;
   delta?: unknown;
   data?: unknown;
   payload?: unknown;
@@ -112,6 +115,11 @@ interface ParsedEvent {
   role?: unknown;
   message?: unknown;
   error?: unknown;
+}
+
+interface ProviderErrorDetails {
+  code?: string;
+  message?: string;
 }
 
 function asRecord(value: unknown): ParsedEvent | null {
@@ -215,7 +223,27 @@ function getCompletedAgentText(value: unknown): string | null {
     : null;
 }
 
-function getErrorMessage(value: unknown, depth = 0): string | null {
+function normalizeProviderErrorCode(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return undefined;
+  }
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || undefined;
+}
+
+function firstText(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+    const record = asRecord(value);
+    if (typeof record?.message === "string" && record.message.trim().length > 0) {
+      return record.message.trim();
+    }
+  }
+  return undefined;
+}
+
+function getProviderErrorDetails(value: unknown, depth = 0): ProviderErrorDetails | null {
   if (depth > 5) {
     return null;
   }
@@ -226,43 +254,44 @@ function getErrorMessage(value: unknown, depth = 0): string | null {
   }
 
   const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
-  if (type === "item.completed") {
-    const item = asRecord(record.item);
-    if (item?.type === "error") {
-      if (typeof item.message === "string" && item.message.trim()) {
-        return item.message.trim();
-      }
-      if (typeof item.error === "string" && item.error.trim()) {
-        return item.error.trim();
-      }
-      return "Codex CLI reported an error.";
-    }
-  }
-  if (type === "error" || type.endsWith(".error") || type.endsWith("_error") || type === "stream_error") {
-    for (const candidate of [record.message, record.error]) {
-      if (typeof candidate === "string" && candidate.trim()) {
-        return candidate.trim();
-      }
-      const candidateRecord = asRecord(candidate);
-      if (typeof candidateRecord?.message === "string" && candidateRecord.message.trim()) {
-        return candidateRecord.message.trim();
-      }
-      const nested = getErrorMessage(candidate, depth + 1);
-      if (nested) {
-        return nested;
-      }
-    }
-    return "Codex CLI reported an error.";
+  const item = asRecord(record.item);
+  const itemError = asRecord(item?.error);
+  const error = asRecord(record.error);
+  const isItemError = type === "item.completed" && item?.type === "error";
+  const isErrorEvent = type === "error" || type.endsWith(".error") || type.endsWith("_error") || type === "stream_error";
+  if (isItemError || isErrorEvent) {
+    const code = normalizeProviderErrorCode(
+      record.code ?? record.errorCode ?? record.error_code ??
+      error?.code ?? error?.errorCode ?? error?.error_code ??
+      item?.code ?? item?.errorCode ?? item?.error_code ??
+      itemError?.code ?? itemError?.errorCode ?? itemError?.error_code,
+    );
+    const message = firstText(
+      record.message,
+      typeof record.error === "string" ? record.error : undefined,
+      error?.message,
+      item?.message,
+      typeof item?.error === "string" ? item.error : undefined,
+      itemError?.message,
+    );
+    return {
+      ...(code ? { code } : {}),
+      message: message ?? "Codex CLI reported an error.",
+    };
   }
 
-  for (const nested of [record.payload, record.event, record.error]) {
-    const message = getErrorMessage(nested, depth + 1);
-    if (message) {
-      return message;
+  for (const nested of [record.payload, record.event, record.data, record.error]) {
+    const details = getProviderErrorDetails(nested, depth + 1);
+    if (details) {
+      return details;
     }
   }
 
   return null;
+}
+
+function getErrorMessage(value: unknown, depth = 0): string | null {
+  return getProviderErrorDetails(value, depth)?.message ?? null;
 }
 
 const CODEX_LIVENESS_EVENT_TYPES = new Set([
@@ -453,17 +482,60 @@ function errorAsException(
   return exception;
 }
 
-function classifyProviderFailure(
-  rawOutput: string,
-  stderr: string,
-  providerError?: string,
-): CodexCliError {
-  const failureText = [providerError, rawOutput, stderr]
-    .filter((value): value is string => typeof value === "string" && value.length > 0)
-    .join("\n")
-    .toLowerCase();
+function classifyProviderCode(value: unknown): CodexCliErrorCode | undefined {
+  switch (normalizeProviderErrorCode(value)) {
+    case "rate_limit_exceeded":
+    case "rate_limited":
+    case "quota_exhausted":
+    case "quota_exceeded":
+    case "usage_limit":
+    case "usage_limit_reached":
+    case "too_many_requests":
+      return "USAGE_LIMIT";
+    case "authentication_required":
+    case "authentication_failed":
+    case "not_authenticated":
+    case "login_required":
+    case "unauthorized":
+    case "invalid_api_key":
+      return "AUTHENTICATION_REQUIRED";
+    case "model_not_found":
+    case "model_unavailable":
+    case "model_not_available":
+    case "invalid_model":
+    case "unsupported_model":
+      return "MODEL_UNAVAILABLE";
+    default:
+      return undefined;
+  }
+}
 
-  if (/\b(?:usage|quota)\s+(?:limit|exceeded|reached)\b|rate[\s_-]?limit|\b429\b|too many requests/.test(failureText)) {
+function classifyFailureText(value: unknown): CodexCliErrorCode | undefined {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return undefined;
+  }
+  const text = value.toLowerCase();
+  if (/\b(?:rate[\s_-]*limit|quota[\s_-]*(?:exhausted|exceeded)|usage[\s_-]*limit(?:[\s_-]*reached)?)\b|\b429\b|too many requests/.test(text)) {
+    return "USAGE_LIMIT";
+  }
+  if (/\b(?:not logged in|authentication required|authentication failed|not authenticated|login required|unauthori[sz]ed|invalid api key|credentials? required)\b|\bcodex login\b/.test(text)) {
+    return "AUTHENTICATION_REQUIRED";
+  }
+  if (/\bmodel\b.{0,80}\b(?:unavailable|invalid|not found|does not exist|unsupported)\b|\b(?:unavailable|invalid|not found|does not exist|unsupported)\b.{0,80}\bmodel\b/.test(text)) {
+    return "MODEL_UNAVAILABLE";
+  }
+  return undefined;
+}
+
+function classifyProviderFailure(
+  stderr: string,
+  providerError?: ProviderErrorDetails,
+): CodexCliError {
+  const code = classifyProviderCode(providerError?.code) ??
+    classifyFailureText(providerError?.message) ??
+    classifyFailureText(stderr);
+
+  if (code === "USAGE_LIMIT") {
     return createError(
       "USAGE_LIMIT",
       "Codex usage limit reached. Restore your usage or switch to an available model, then retry.",
@@ -471,7 +543,7 @@ function classifyProviderFailure(
     );
   }
 
-  if (/not\s+logged\s+in|log(?:in|ged\s+in)|authentication|unauthori[sz]ed|credential/.test(failureText)) {
+  if (code === "AUTHENTICATION_REQUIRED") {
     return createError(
       "AUTHENTICATION_REQUIRED",
       "Check your Codex login, then retry the request.",
@@ -479,7 +551,7 @@ function classifyProviderFailure(
     );
   }
 
-  if (/\bmodel\b.*\b(?:unavailable|invalid|not found|does not exist|unsupported)\b|\b(?:unavailable|invalid|not found|does not exist|unsupported)\b.*\bmodel\b/.test(failureText)) {
+  if (code === "MODEL_UNAVAILABLE") {
     return createError(
       "MODEL_UNAVAILABLE",
       "The selected Codex model is unavailable. Choose an available model, then retry.",
@@ -883,7 +955,7 @@ export class CodexCliService {
     let closeCode: number | null = null;
     let closed = false;
     let termination: "abort" | CodexTimeoutStage | null = null;
-    let providerError: string | undefined;
+    let providerError: ProviderErrorDetails | undefined;
     let sawAgentDelta = false;
     let sawValidProtocolEvent = false;
     const completedMessages: string[] = [];
@@ -1007,7 +1079,13 @@ export class CodexCliService {
       }
       try {
         const parsed: unknown = JSON.parse(line);
-        providerError ??= getErrorMessage(parsed) ?? undefined;
+        const details = getProviderErrorDetails(parsed);
+        if (details) {
+          providerError = {
+            ...(providerError?.code || details.code ? { code: providerError?.code ?? details.code } : {}),
+            ...(providerError?.message || details.message ? { message: providerError?.message ?? details.message } : {}),
+          };
+        }
         if (isLivenessProtocolEvent(parsed)) {
           recordProtocolEvent(this.now());
         }
@@ -1130,12 +1208,22 @@ export class CodexCliService {
     }
     if (closeCode !== 0) {
       throw errorAsException(
-        classifyProviderFailure(rawOutput, stderr, providerError),
+        classifyProviderFailure(stderr, providerError),
+        diagnostics.snapshot(this.now()),
+      );
+    }
+    if (providerError) {
+      throw errorAsException(
+        classifyProviderFailure(stderr, providerError),
         diagnostics.snapshot(this.now()),
       );
     }
     const extractedText = CodexCliService.extractText(rawOutput).trim();
-    if (!extractedText && (stderr.trim() || providerError)) {
+    if (!extractedText && stderr.trim()) {
+      const classified = classifyProviderFailure(stderr);
+      if (classified.code !== "PROCESS_FAILED") {
+        throw errorAsException(classified, diagnostics.snapshot(this.now()));
+      }
       throw errorAsException(createError(
         "INVALID_OUTPUT",
         "Codex CLI returned no answer.",

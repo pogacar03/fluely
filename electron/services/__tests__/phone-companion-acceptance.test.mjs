@@ -689,7 +689,7 @@ test("same storage paths and real command services clear active capture, streami
     assert.equal(oldRuntime.projection.getSnapshot().conversation.messages.some((message) => message.status === "streaming"), true);
     assert.equal(oldRuntime.analysis.getState().status, "running");
     assert.equal(oldRuntime.screenshots.getState().capturing, false);
-    assert.deepEqual(oldRuntime.screenshots.getState().items, []);
+    assert.deepEqual(oldRuntime.screenshots.getState().items.map((item) => item.id), [oldRuntime.screenshotId]);
     assert.equal(oldRuntime.conversation.snapshot().attachments.length, 1);
     oldAttachmentUrl = oldContextUrl
       .replace("/api/context/", "/api/attachments/")

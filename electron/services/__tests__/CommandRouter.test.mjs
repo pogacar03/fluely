@@ -140,29 +140,62 @@ test("ask materializes immutable attachments, clears the queue, and completes on
   assert.equal(snapshot.activeMessageId, undefined);
 });
 
-test("ask provider reads the persistent attachment after the shared screenshot queue is cleared", async () => {
-  const queueCleared = deferred();
+test("ask keeps the real draft queue until provider success and preserves it after async failure", async () => {
+  const providerStarted = deferred();
+  const releaseProvider = deferred();
+  const harness = await makeHarness({
+    provider: {
+      stream: (_path, _options) => (async function* () {
+        providerStarted.resolve();
+        await releaseProvider.promise;
+        throw Object.assign(new Error("quota exhausted"), {
+          code: "USAGE_LIMIT",
+          action: "Retry the request.",
+        });
+      })(),
+    },
+  });
+
+  const ask = harness.router.execute({
+    type: "ask",
+    requestId: "retain-draft-after-failure",
+    prompt: "Question",
+  }, "desktop");
+  await providerStarted.promise;
+
+  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
+
+  releaseProvider.resolve();
+  await ask;
+  await harness.router.whenIdle();
+
+  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
+  assert.equal(harness.conversation.snapshot().messages.at(-1).status, "error");
+});
+
+test("ask provider reads the persistent attachment before successful draft cleanup", async () => {
+  const providerStarted = deferred();
+  const releaseProvider = deferred();
   const queuePath = path.join("/managed", `${SCREENSHOT_ID}.png`);
   let observedPath;
   let observedBytes;
   const harness = await makeHarness({
     provider: {
       stream: (_path, options) => (async function* () {
-        await queueCleared.promise;
+        providerStarted.resolve();
+        await releaseProvider.promise;
         observedPath = options.imagePaths[0];
         observedBytes = new Uint8Array(await readFile(observedPath));
         yield "stable answer";
       })(),
     },
   });
-  const originalClear = harness.screenshots.clear;
-  harness.screenshots.clear = async () => {
-    const result = await originalClear();
-    queueCleared.resolve();
-    return result;
-  };
 
-  await harness.router.execute({ type: "ask", requestId: "persistent-attachment", prompt: "Question" }, "desktop");
+  const ask = harness.router.execute({ type: "ask", requestId: "persistent-attachment", prompt: "Question" }, "desktop");
+  await providerStarted.promise;
+  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
+  releaseProvider.resolve();
+  await ask;
   await harness.router.whenIdle();
 
   assert.notEqual(observedPath, queuePath);
@@ -377,7 +410,7 @@ test("invalidating one phone client scope cancels only its ask and preserves the
   assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
 });
 
-test("phone clear-conversation and cancel preserve the already-consumed draft queue", async () => {
+test("phone clear-conversation and cancel preserve the still-pending draft queue", async () => {
   let release;
   const harness = await makeHarness({
     provider: {
@@ -397,11 +430,11 @@ test("phone clear-conversation and cancel preserve the already-consumed draft qu
   release();
   await cancelPromise;
   await harness.router.whenIdle();
-  assert.deepEqual(harness.screenshots.getState().items, []);
+  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
 
   await harness.router.execute({ type: "clear-conversation", requestId: "phone-clear" }, "phone");
   assert.deepEqual(harness.conversation.snapshot().messages, []);
-  assert.deepEqual(harness.screenshots.getState().items, []);
+  assert.deepEqual(harness.screenshots.getState().items.map((item) => item.id), [SCREENSHOT_ID]);
 });
 
 test("provider failure with zero visible delta produces an error assistant terminal state", async () => {
@@ -422,7 +455,10 @@ test("provider failure with zero visible delta produces an error assistant termi
   const assistant = snapshot.messages[1];
   assert.equal(assistant.status, "error");
   assert.equal(assistant.text, "");
-  assert.deepEqual(assistant.error, { code: "ANALYSIS_FAILED", message: "provider failure" });
+  assert.deepEqual(assistant.error, {
+    code: "ANALYSIS_FAILED",
+    message: "Codex CLI analysis failed.",
+  });
   assert.equal(snapshot.activeMessageId, undefined);
 });
 
