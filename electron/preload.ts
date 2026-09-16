@@ -1,0 +1,93 @@
+import { contextBridge, ipcRenderer } from "electron";
+import type {
+  AnalysisState,
+  AnalysisStateChangedEvent,
+  AnalysisStateListener,
+  AppStatus,
+  CodexStatus,
+  ConversationEvent,
+  ConversationEventListener,
+  ConversationSnapshot,
+  FluelyApi,
+  FluelySettings,
+  IpcResult,
+  PhoneGatewayStatus,
+  PhoneGatewayStatusListener,
+  SettingsPatch,
+  ScreenshotStateListener,
+  ScreenshotState,
+  ShortcutSettings,
+  ShortcutStatus,
+  WorkspaceCommand,
+  WorkspaceCommandResult,
+  WindowSettings,
+} from "../src/shared/ipc";
+
+function invoke<T>(channel: string, ...args: unknown[]): Promise<IpcResult<T>> {
+  return ipcRenderer.invoke(channel, ...args) as Promise<IpcResult<T>>;
+}
+
+const api: FluelyApi = {
+  settings: {
+    get: () => invoke<FluelySettings>("settings:get"),
+    update: (patch: SettingsPatch) => invoke<FluelySettings>("settings:update", patch),
+    reset: () => invoke<FluelySettings>("settings:reset"),
+  },
+  shortcuts: {
+    get: () => invoke<ShortcutStatus>("shortcuts:get"),
+    update: (shortcuts: ShortcutSettings) => invoke<ShortcutStatus>("shortcuts:update", shortcuts),
+  },
+    screenshots: {
+      get: () => invoke<ScreenshotState>("screenshots:get"),
+      onStateChanged: (listener: ScreenshotStateListener) => {
+      const eventListener = (_event: Electron.IpcRendererEvent, state: ScreenshotState) => listener(state);
+      ipcRenderer.on("screenshots:state-changed", eventListener);
+      return () => ipcRenderer.removeListener("screenshots:state-changed", eventListener);
+    },
+  },
+  app: {
+    getStatus: () => invoke<AppStatus>("app:get-status"),
+  },
+  codex: {
+    getStatus: () => invoke<CodexStatus>("codex:get-status"),
+    validate: (path: string) => invoke<CodexStatus>("codex:validate", path),
+  },
+  analysis: {
+    getStatus: () => invoke<AnalysisState>("analysis:get-status"),
+    onStateChanged: (listener: AnalysisStateListener) => {
+      const eventListener = (_event: Electron.IpcRendererEvent, event: AnalysisStateChangedEvent) => {
+        listener(event);
+      };
+      ipcRenderer.on("analysis:state-changed", eventListener);
+      return () => ipcRenderer.removeListener("analysis:state-changed", eventListener);
+    },
+  },
+  window: {
+    setOpacity: (opacity: number) => invoke<WindowSettings>("window:set-opacity", opacity),
+    hide: () => invoke<void>("window:hide"),
+  },
+  workspace: {
+    execute: (command: WorkspaceCommand) => invoke<WorkspaceCommandResult>("workspace:execute", command),
+  },
+  conversation: {
+    getSnapshot: () => invoke<ConversationSnapshot>("conversation:get-snapshot"),
+    onEvent: (listener: ConversationEventListener) => {
+      const eventListener = (_event: Electron.IpcRendererEvent, event: ConversationEvent) => listener(event);
+      ipcRenderer.on("conversation:event", eventListener);
+      return () => ipcRenderer.removeListener("conversation:event", eventListener);
+    },
+  },
+  phoneGateway: {
+    getStatus: () => invoke<PhoneGatewayStatus>("phone-gateway:get-status"),
+    enable: () => invoke<PhoneGatewayStatus>("phone-gateway:enable"),
+    disable: () => invoke<PhoneGatewayStatus>("phone-gateway:disable"),
+    regeneratePairing: () => invoke<PhoneGatewayStatus>("phone-gateway:regenerate-pairing"),
+    onStatusChanged: (listener: PhoneGatewayStatusListener) => {
+      const eventListener = (_event: Electron.IpcRendererEvent, status: PhoneGatewayStatus) => listener(status);
+      ipcRenderer.on("phone-gateway:status-changed", eventListener);
+      return () => ipcRenderer.removeListener("phone-gateway:status-changed", eventListener);
+    },
+  },
+};
+
+contextBridge.exposeInMainWorld("fluely", api);

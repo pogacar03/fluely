@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-electron/
+dist-phone/
+release/
+.DS_Store
+.env
+.env.*
+*.log
+screenshots/
+models/
+*.tmp-*

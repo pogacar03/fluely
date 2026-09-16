@@ -1,0 +1,42 @@
+{
+  "name": "fluely",
+  "version": "0.1.0",
+  "description": "A quiet, fast AI copilot for your screen.",
+  "author": "pogacar03",
+  "private": true,
+  "productName": "Fluely",
+  "main": "dist-electron/electron/main.js",
+  "scripts": {
+    "clean": "rimraf dist dist-electron release",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p electron/tsconfig.json",
+    "build:phone": "node scripts/build-phone.mjs",
+    "build": "npm run clean && npm run build:renderer && npm run build:electron && npm run build:phone",
+    "dev": "npm run build && electron .",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p electron/tsconfig.json --noEmit",
+    "test": "npm run build:electron && npm run build:phone && node --test",
+    "package:dir": "npm run build && electron-builder --dir && node scripts/check-package-allowlist.mjs",
+    "smoke:packaged": "node scripts/smoke-packaged.mjs"
+  },
+  "devDependencies": {
+    "@electron/asar": "^3.4.1",
+    "@types/node": "^22.10.2",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^40.10.2",
+    "electron-builder": "^25.1.8",
+    "jsdom": "^30.0.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "ws": "^8.21.3"
+  }
+}

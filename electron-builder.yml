@@ -1,0 +1,28 @@
+appId: com.pogacar03.fluely
+productName: Fluely
+electronDist: node_modules/electron/dist
+directories:
+  output: release
+  buildResources: assets
+files:
+  - dist/**
+  - dist-electron/**
+  - dist-phone/**
+  - package.json
+  - assets/icon.svg
+  - '!**/*.map'
+  - '!**/*.test.*'
+  - '!**/coverage{,/**}'
+  - '!**/*.env'
+  - '!**/.env{,.*}'
+  - '!**/.npmrc'
+  - '!**/*.{pem,key}'
+  - '!**/credentials*'
+  - '!**/secret*'
+asar: true
+mac:
+  category: public.app-category.productivity
+  extendInfo:
+    NSLocalNetworkUsageDescription: Fluely uses your local network to pair and sync your phone companion with this computer.
+  target:
+    - zip
